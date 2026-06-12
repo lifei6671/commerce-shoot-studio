@@ -455,7 +455,7 @@ R6 第二期授权与支付
 **验证清单**：
 
 - [x] 模板出现未声明变量时返回 `PROMPT_TEMPLATE_INVALID`。
-- [ ] required 变量缺失时 `validate_combination` 阻止执行。
+- [x] required 变量缺失时 `validate_combination` 阻止执行。
 - [x] 同一 PromptBinding 的预览结果可被后续 `start_generation` 复用为快照。
 
 **退出条件**：
@@ -496,13 +496,13 @@ R6 第二期授权与支付
 
 **验证清单**：
 
-- [ ] 切换模型后，服装图 min/max 校验随模型变化。
+- [x] 切换模型后，服装图 min/max 校验随模型变化。
 - [x] 参数表单能保存并重新读取。
 - [x] `advancedModels=false` 时前端不可选择高级模型。
 
 **退出条件**：
 
-- [ ] 模型配置能参与 `validate_combination` 和后续生成快照。
+- [x] 模型配置能参与 `validate_combination` 和后续生成快照。
 
 ---
 
@@ -535,8 +535,8 @@ R6 第二期授权与支付
 
 **验证清单**：
 
-- [ ] 修改人物图后立即影响校验结果。
-- [ ] 修改服装图顺序后校验基于当前草稿。
+- [x] 修改人物图后立即影响校验结果。
+- [x] 修改服装图顺序后校验基于当前草稿。
 - [x] 修改 Prompt 或模型参数后校验基于当前草稿。
 - [x] 旧 revision 返回不会覆盖新 revision 的执行按钮状态。
 

@@ -681,6 +681,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_combination_recomputes_limits_when_draft_model_changes() {
+        let (_temp_dir, database) = test_database().await;
+        seed_assets_and_prompt_template(&database).await;
+        let draft_combination = DraftImageCombination {
+            id: None,
+            name: Some("look".to_string()),
+            person_asset_id: Some("person_1".to_string()),
+            garment_asset_ids: vec![
+                "garment_1".to_string(),
+                "garment_2".to_string(),
+                "garment_3".to_string(),
+            ],
+        };
+
+        let standard = validate_combination_request(
+            &database,
+            ValidateCombinationRequest {
+                revision: 43,
+                draft_combination: draft_combination.clone(),
+                draft_prompt_binding: Some(test_prompt_binding(json!({"garment": "linen dress"}))),
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+            },
+        )
+        .await
+        .expect("validate standard");
+        let fast = validate_combination_request(
+            &database,
+            ValidateCombinationRequest {
+                revision: 44,
+                draft_combination,
+                draft_prompt_binding: Some(test_prompt_binding(json!({"garment": "linen dress"}))),
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1-fast".to_string(),
+                    params_json: json!({"outputCount": 1}),
+                }),
+            },
+        )
+        .await
+        .expect("validate fast");
+
+        assert!(standard.executable);
+        assert_eq!(standard.effective_limits.max_garments, 4);
+        assert!(!fast.executable);
+        assert_eq!(fast.effective_limits.max_garments, 2);
+        assert!(fast
+            .reasons
+            .iter()
+            .any(|reason| reason.code == ValidationReasonCode::GarmentCountAboveMax));
+    }
+
+    #[tokio::test]
+    async fn validate_combination_uses_current_draft_assets() {
+        let (_temp_dir, database) = test_database().await;
+        seed_assets_and_prompt_template(&database).await;
+        let prompt_binding = test_prompt_binding(json!({"garment": "linen dress"}));
+        let model_config = SaveModelConfigRequest {
+            id: None,
+            provider: "openai".to_string(),
+            model_id: "gpt-image-1".to_string(),
+            params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+        };
+
+        let missing_person = validate_combination_request(
+            &database,
+            ValidateCombinationRequest {
+                revision: 45,
+                draft_combination: DraftImageCombination {
+                    id: None,
+                    name: Some("look".to_string()),
+                    person_asset_id: Some("missing_person".to_string()),
+                    garment_asset_ids: vec!["garment_1".to_string()],
+                },
+                draft_prompt_binding: Some(prompt_binding.clone()),
+                draft_model_config: Some(model_config.clone()),
+            },
+        )
+        .await
+        .expect("validate missing person");
+        let missing_garment = validate_combination_request(
+            &database,
+            ValidateCombinationRequest {
+                revision: 46,
+                draft_combination: DraftImageCombination {
+                    id: None,
+                    name: Some("look".to_string()),
+                    person_asset_id: Some("person_1".to_string()),
+                    garment_asset_ids: vec!["garment_1".to_string(), "missing_garment".to_string()],
+                },
+                draft_prompt_binding: Some(prompt_binding),
+                draft_model_config: Some(model_config),
+            },
+        )
+        .await
+        .expect("validate missing garment");
+
+        assert!(missing_person
+            .reasons
+            .iter()
+            .any(|reason| reason.field.as_deref() == Some("draftCombination.personAssetId")));
+        assert!(missing_garment
+            .reasons
+            .iter()
+            .any(|reason| reason.field.as_deref() == Some("draftCombination.garmentAssetIds")));
+    }
+
+    #[tokio::test]
     async fn validate_combination_maps_prompt_required_variable_to_reason() {
         let (_temp_dir, database) = test_database().await;
         seed_assets_and_prompt_template(&database).await;
