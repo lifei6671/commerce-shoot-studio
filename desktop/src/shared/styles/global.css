@@ -1336,11 +1336,11 @@ button {
   overflow: hidden;
 }
 
-.canvas-shell--hand .flow-canvas {
+.canvas-shell--hand .react-flow__pane {
   cursor: grab;
 }
 
-.canvas-shell--hand .flow-canvas:active {
+.canvas-shell--hand .react-flow__pane:active {
   cursor: grabbing;
 }
 
@@ -1488,23 +1488,20 @@ button {
   touch-action: none;
 }
 
-.flow-canvas__inner {
-  position: absolute;
-  top: 50%;
-  left: 34px;
-  width: 1120px;
-  height: 260px;
-  transform-origin: left center;
-  transition: transform 160ms ease;
+.flow-canvas .react-flow__renderer {
+  background: transparent;
 }
 
-.canvas-shell.is-panning .flow-canvas__inner,
-.canvas-shell.is-wheel-interacting .flow-canvas__inner {
-  transition: none;
+.react-flow__node-workflowNode {
+  width: 124px;
+  height: 210px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
 .flow-node {
-  position: absolute;
+  position: relative;
   z-index: 1;
   width: 124px;
   height: 210px;
@@ -1519,6 +1516,13 @@ button {
   box-shadow: 0 16px 34px rgba(15, 23, 42, 0.08);
   touch-action: none;
   user-select: none;
+}
+
+.flow-node__handle {
+  width: 8px;
+  height: 8px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .flow-node--green {
@@ -1728,25 +1732,14 @@ button {
   min-height: 94px;
 }
 
-.flow-arrows {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  pointer-events: none;
-}
-
-.flow-arrow {
+.react-flow__edge.flow-edge .react-flow__edge-path {
   fill: none;
   stroke: #111827;
-  stroke-width: 1.5;
-  marker-end: url("#flow-arrow-head");
+  stroke-width: 1.7;
 }
 
-.flow-arrows marker path {
-  fill: #111827;
+.react-flow__edge.flow-edge.animated .react-flow__edge-path {
+  stroke-dasharray: 6 6;
 }
 
 .flow-minimap {
@@ -1755,34 +1748,15 @@ button {
   bottom: 22px;
   width: 150px;
   height: 76px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 24px 14px;
+  padding: 0;
   border: 1px solid #dbe4f1;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.1);
 }
 
-.flow-minimap span {
-  width: 18px;
-  height: 18px;
-  border-radius: 2px;
-  background: #dbe4f1;
-}
-
-.flow-minimap span:nth-child(1) {
-  background: #bbf7d0;
-}
-
-.flow-minimap span:nth-child(4) {
-  background: #fed7aa;
-}
-
-.flow-minimap .is-active {
-  outline: 3px solid #2f66ff;
-  outline-offset: 3px;
+.flow-minimap .react-flow__minimap-mask {
+  fill: rgba(37, 99, 235, 0.08);
 }
 
 .flow-context {

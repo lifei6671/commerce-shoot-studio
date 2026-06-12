@@ -1,13 +1,30 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Background,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useUpdateNodeInternals,
+  type Edge,
+  type Node,
+  type NodeChange,
+  type NodeMouseHandler,
+  type NodeProps,
+  type OnMove,
+  type ReactFlowInstance,
+  type Viewport,
+} from "@xyflow/react";
+import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
-  type PointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -85,9 +102,13 @@ import {
 } from "../../generation-task/services/taskService";
 import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
 import {
-  buildFlowConnectorPath,
+  buildWorkflowEdges,
+  cloneInitialWorkflowNodePositions,
+  isFlowNodeId,
+  WORKFLOW_NODE_ORDER,
+  type FlowNodeId,
   type FlowNodePosition,
-} from "./flowConnectorPath";
+} from "./workflowFlowGraph";
 
 const DEFAULT_PROMPT_TEXT =
   "Create a clean commercial fashion try-on image. Preserve the person's identity and pose, apply the selected garments naturally, keep realistic fabric texture, studio lighting, and ecommerce-ready composition.";
@@ -108,39 +129,24 @@ type SelectableAsset = {
 };
 
 type SidePanelMode = "details" | "edit" | "links" | "history";
-type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
 type CanvasTool = "hand" | "select" | "grid";
+type WorkflowNodeData = Record<string, unknown> & {
+  accent: "green" | "blue" | "purple" | "orange" | "gray";
+  body: ReactNode;
+  nodeId: FlowNodeId;
+  selected: boolean;
+  status: "done" | "pending" | "required";
+  subtitle: string;
+  title: string;
+};
+type WorkflowReactFlowNode = Node<WorkflowNodeData, "workflowNode">;
+type WorkflowReactFlowEdge = Edge<Record<string, never>, "straight">;
 
-const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
 const CANVAS_MAX_ZOOM = 300;
 const CANVAS_ZOOM_LEVELS = [33, 50, 75, 100, 125, 150, 200, 300] as const;
-const CANVAS_WHEEL_ZOOM_EXPONENT = 1 / 500;
-const CANVAS_WHEEL_ZOOM_FRAME_FACTOR = 1.45;
-const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
 const ACTION_MESSAGE_AUTO_DISMISS_MS = 2400;
-const WHEEL_DELTA_LINE_PX = 16;
-const WHEEL_DELTA_PAGE_PX = 320;
-const FLOW_NODE_ORDER: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
-const INITIAL_FLOW_NODE_POSITIONS: Record<FlowNodeId, FlowNodePosition> = {
-  person: { x: 0, y: 40 },
-  garments: { x: 198, y: 40 },
-  prompt: { x: 396, y: 40 },
-  model: { x: 594, y: 40 },
-  execute: { x: 792, y: 40 },
-  result: { x: 990, y: 40 },
-};
-
-function cloneInitialFlowNodePositions(): Record<FlowNodeId, FlowNodePosition> {
-  return {
-    person: { ...INITIAL_FLOW_NODE_POSITIONS.person },
-    garments: { ...INITIAL_FLOW_NODE_POSITIONS.garments },
-    prompt: { ...INITIAL_FLOW_NODE_POSITIONS.prompt },
-    model: { ...INITIAL_FLOW_NODE_POSITIONS.model },
-    execute: { ...INITIAL_FLOW_NODE_POSITIONS.execute },
-    result: { ...INITIAL_FLOW_NODE_POSITIONS.result },
-  };
-}
+const REACT_FLOW_DEFAULT_VIEWPORT: Viewport = { x: 40, y: 158, zoom: 1 };
 
 type NewCombinationForm = {
   name: string;
@@ -1660,407 +1666,147 @@ function FlowWorkbench({
   onRun: () => void;
   onZoomChange: (zoom: number) => void;
 }) {
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [isPanning, setIsPanning] = useState(false);
-  const [isWheelInteracting, setIsWheelInteracting] = useState(false);
   const [nodePositions, setNodePositions] = useState<Record<FlowNodeId, FlowNodePosition>>(
-    cloneInitialFlowNodePositions,
+    cloneInitialWorkflowNodePositions,
   );
-  const dragStartRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    panX: number;
-    panY: number;
-  } | null>(null);
-  const nodeDragStartRef = useRef<{
-    pointerId: number;
-    nodeId: FlowNodeId;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-    moved: boolean;
-  } | null>(null);
-  const suppressNextNodeClickRef = useRef(false);
-  const canvasShellRef = useRef<HTMLElement | null>(null);
-  const canvasInnerRef = useRef<HTMLDivElement | null>(null);
-  const latestZoomRef = useRef(zoom);
-  const pendingWheelZoomFactorRef = useRef(1);
-  const pendingWheelZoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
-  const wheelZoomRafRef = useRef<number | null>(null);
-  const wheelIdleTimeoutRef = useRef<number | null>(null);
+  const [viewport, setViewport] = useState<Viewport>(REACT_FLOW_DEFAULT_VIEWPORT);
+  const [flowInstanceRevision, setFlowInstanceRevision] = useState(0);
+  const reactFlowRef = useRef<ReactFlowInstance<WorkflowReactFlowNode, WorkflowReactFlowEdge> | null>(
+    null,
+  );
   const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
   const modelReady = credentialStatus?.configured === true;
-  const viewportWidth = typeof window === "undefined" ? 1600 : window.innerWidth;
-  const fitScale = Math.min(1, Math.max(0.55, (viewportWidth - 690) / 1160));
-  const canvasScale = fitScale * CANVAS_BASE_SCALE * (zoom / 100);
+  const taskInProgress = latestTask
+    ? ["queued", "preparing", "calling_model", "waiting_result", "saving_result"].includes(
+        latestTask.task.status,
+      )
+    : false;
+  const workflowEdges = useMemo<WorkflowReactFlowEdge[]>(
+    () =>
+      buildWorkflowEdges().map((edge) => ({
+        ...edge,
+        animated: taskInProgress && edge.target === "result",
+        className: "flow-edge",
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: "#111827",
+          width: 18,
+          height: 18,
+        },
+        style: {
+          stroke: "#111827",
+          strokeWidth: 1.7,
+        },
+      })),
+    [taskInProgress],
+  );
+  const nodeTypes = useMemo(() => ({ workflowNode: FlowNode }), []);
 
   useEffect(() => {
-    latestZoomRef.current = zoom;
+    const nextZoom = clampZoom(zoom) / 100;
+    setViewport((currentViewport) => {
+      if (Math.abs(currentViewport.zoom - nextZoom) < 0.001) {
+        return currentViewport;
+      }
+      return { ...currentViewport, zoom: nextZoom };
+    });
   }, [zoom]);
 
   useEffect(() => {
-    dragStartRef.current = null;
-    nodeDragStartRef.current = null;
-    suppressNextNodeClickRef.current = false;
-    setPan({ x: 0, y: 0 });
-    setIsPanning(false);
-    setIsWheelInteracting(false);
-    setNodePositions(cloneInitialFlowNodePositions());
+    setNodePositions(cloneInitialWorkflowNodePositions());
+    setViewport(REACT_FLOW_DEFAULT_VIEWPORT);
+    setFlowInstanceRevision((revision) => revision + 1);
   }, [resetRevision]);
 
-  useEffect(
-    () => () => {
-      if (wheelZoomRafRef.current !== null) {
-        window.cancelAnimationFrame(wheelZoomRafRef.current);
-      }
-      if (wheelIdleTimeoutRef.current !== null) {
-        window.clearTimeout(wheelIdleTimeoutRef.current);
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    const canvasShell = canvasShellRef.current;
-    if (!canvasShell) {
-      return undefined;
-    }
-    canvasShell.addEventListener("wheel", handleCanvasWheel, { passive: false });
-    return () => {
-      canvasShell.removeEventListener("wheel", handleCanvasWheel);
-    };
-  });
-
-  function markWheelInteracting() {
-    setIsWheelInteracting(true);
-    if (wheelIdleTimeoutRef.current !== null) {
-      window.clearTimeout(wheelIdleTimeoutRef.current);
-    }
-    wheelIdleTimeoutRef.current = window.setTimeout(() => {
-      setIsWheelInteracting(false);
-      wheelIdleTimeoutRef.current = null;
-    }, CANVAS_WHEEL_IDLE_DELAY_MS);
-  }
-
-  function adjustPanForZoomAnchor(anchor: { x: number; y: number }, zoomFactor: number) {
-    const canvasInner = canvasInnerRef.current;
-    if (!canvasInner) {
-      return;
-    }
-    const bounds = canvasInner.getBoundingClientRect();
-    const nextLeft = anchor.x - (anchor.x - bounds.left) * zoomFactor;
-    const nextTop = anchor.y - (anchor.y - bounds.top) * zoomFactor;
-    setPan((currentPan) => ({
-      x: currentPan.x + nextLeft - bounds.left,
-      y: currentPan.y + nextTop - bounds.top,
-    }));
-  }
-
-  function scheduleWheelZoom(zoomFactor: number, anchor: { x: number; y: number }) {
-    pendingWheelZoomFactorRef.current *= zoomFactor;
-    pendingWheelZoomAnchorRef.current = anchor;
-    if (wheelZoomRafRef.current !== null) {
-      return;
-    }
-    wheelZoomRafRef.current = window.requestAnimationFrame(() => {
-      wheelZoomRafRef.current = null;
-      const frameFactor = clampValue(
-        pendingWheelZoomFactorRef.current,
-        1 / CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
-        CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
-      );
-      const anchorPoint = pendingWheelZoomAnchorRef.current;
-      pendingWheelZoomFactorRef.current = 1;
-      pendingWheelZoomAnchorRef.current = null;
-      const currentZoom = latestZoomRef.current;
-      const nextZoom = clampZoom(currentZoom * frameFactor);
-      if (nextZoom !== currentZoom) {
-        const appliedZoomFactor = nextZoom / currentZoom;
-        if (anchorPoint) {
-          adjustPanForZoomAnchor(anchorPoint, appliedZoomFactor);
-        }
-        latestZoomRef.current = nextZoom;
-        onZoomChange(nextZoom);
-      }
-    });
-  }
-
-  function handleCanvasWheel(event: WheelEvent) {
-    event.preventDefault();
-    markWheelInteracting();
-
-    if (event.ctrlKey || event.metaKey) {
-      scheduleWheelZoom(getWheelZoomFactor(event.deltaY, event.deltaMode), {
-        x: event.clientX,
-        y: event.clientY,
-      });
-      return;
-    }
-
-    if (canvasTool !== "hand") {
-      return;
-    }
-
-    const panDelta = getWheelPanDelta(event.deltaX, event.deltaY, event.deltaMode);
-    setPan((currentPan) => ({
-      x: currentPan.x - panDelta.x,
-      y: currentPan.y - panDelta.y,
-    }));
-  }
-
-  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
-    if (canvasTool !== "hand") {
-      return;
-    }
-    event.preventDefault();
-    setIsPanning(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragStartRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      panX: pan.x,
-      panY: pan.y,
-    };
-  }
-
-  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
-    const dragStart = dragStartRef.current;
-    if (!dragStart || dragStart.pointerId !== event.pointerId) {
-      return;
-    }
-    event.preventDefault();
-    setPan({
-      x: dragStart.panX + event.clientX - dragStart.startX,
-      y: dragStart.panY + event.clientY - dragStart.startY,
-    });
-  }
-
-  function stopCanvasDrag(event: PointerEvent<HTMLDivElement>) {
-    if (dragStartRef.current?.pointerId === event.pointerId) {
-      dragStartRef.current = null;
-      setIsPanning(false);
-    }
-  }
-
-  function handleNodePointerDown(event: PointerEvent<HTMLButtonElement>, nodeId: FlowNodeId) {
-    if (event.button !== 0) {
-      return;
-    }
-    const target = event.target as HTMLElement;
-    if (target.closest(".flow-node__play")) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    onNodeSelect(nodeId);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const origin = nodePositions[nodeId];
-    nodeDragStartRef.current = {
-      pointerId: event.pointerId,
-      nodeId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: origin.x,
-      originY: origin.y,
-      moved: false,
-    };
-  }
-
-  function handleNodePointerMove(event: PointerEvent<HTMLButtonElement>) {
-    const dragStart = nodeDragStartRef.current;
-    if (!dragStart || dragStart.pointerId !== event.pointerId) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    const pointerDeltaX = event.clientX - dragStart.startX;
-    const pointerDeltaY = event.clientY - dragStart.startY;
-    if (Math.abs(pointerDeltaX) > 3 || Math.abs(pointerDeltaY) > 3) {
-      dragStart.moved = true;
-    }
-    setNodePositions((currentPositions) => ({
-      ...currentPositions,
-      [dragStart.nodeId]: {
-        x: dragStart.originX + pointerDeltaX / canvasScale,
-        y: dragStart.originY + pointerDeltaY / canvasScale,
-      },
-    }));
-  }
-
-  function stopNodeDrag(event: PointerEvent<HTMLButtonElement>) {
-    const dragStart = nodeDragStartRef.current;
-    if (!dragStart || dragStart.pointerId !== event.pointerId) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    if (dragStart.moved) {
-      suppressNextNodeClickRef.current = true;
-    }
-    nodeDragStartRef.current = null;
-  }
-
-  function handleFlowNodeSelect(nodeId: FlowNodeId, event: ReactMouseEvent<HTMLButtonElement>) {
-    if (suppressNextNodeClickRef.current) {
-      event.preventDefault();
-      suppressNextNodeClickRef.current = false;
-      return;
-    }
-    onNodeSelect(nodeId);
-  }
-
-  function handleFitCanvas() {
-    setPan({ x: 0, y: 0 });
-    onZoomChange(100);
-  }
-
-  return (
-    <section
-      ref={canvasShellRef}
-      className={`canvas-shell canvas-shell--${canvasTool}${isPanning ? " is-panning" : ""}${
-        isWheelInteracting ? " is-wheel-interacting" : ""
-      }`}
-    >
-      <CanvasToolbar
-        canvasTool={canvasTool}
-        zoom={zoom}
-        onCanvasToolChange={onCanvasToolChange}
-        onZoomChange={onZoomChange}
-        onFitCanvas={handleFitCanvas}
-      />
-      <div
-        className="flow-canvas"
-        onPointerCancel={stopCanvasDrag}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={stopCanvasDrag}
-      >
-        <div
-          ref={canvasInnerRef}
-          className="flow-canvas__inner"
-          style={{
-            transform: `translate(${pan.x}px, ${pan.y}px) translateY(-50%) scale(${canvasScale})`,
-          }}
-        >
-          <FlowArrows nodePositions={nodePositions} />
-          <FlowNode
-            accent="green"
-            id="person"
-            position={nodePositions.person}
-            selected={selectedFlowNode === "person"}
-            status={selectedPerson ? "done" : "required"}
-            subtitle={selectedPerson ? "必选" : "未选择"}
-            title="人物图"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
-            {selectedPerson ? (
-              <>
-                <img
-                  className="flow-node__hero-image"
-                  alt={selectedPerson.asset.originalName}
-                  src={assetThumbSrc(selectedPerson)}
-                />
-                <small>{selectedPerson.asset.originalName}</small>
-                <strong>{formatDimensions(selectedPerson.asset.width, selectedPerson.asset.height)}</strong>
-              </>
-            ) : (
-              <NodeEmpty icon={<UserRound size={24} />} text="导入人物图" />
-            )}
-          </FlowNode>
-          <FlowNode
-            accent="blue"
-            id="garments"
-            position={nodePositions.garments}
-            selected={selectedFlowNode === "garments"}
-            status={selectedGarments.length ? "done" : "required"}
-            subtitle="至少 1 张"
-            title="服装图组"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
-            {selectedGarments.length ? (
-              <>
-                <div className="flow-node__image-grid">
-                  {selectedGarments.slice(0, 4).map((asset) => (
-                    <img
-                      alt={asset.asset.originalName}
-                      key={asset.asset.id}
-                      src={assetThumbSrc(asset)}
-                    />
-                  ))}
-                </div>
-                <span className="flow-node__count">{selectedGarments.length} 张</span>
-              </>
-            ) : (
-              <NodeEmpty icon={<BriefcaseBusiness size={24} />} text="导入服装图" />
-            )}
-          </FlowNode>
-          <FlowNode
-            accent="purple"
-            id="prompt"
-            position={nodePositions.prompt}
-            selected={selectedFlowNode === "prompt"}
-            status={promptText.trim() ? "done" : "required"}
-            subtitle={promptText.trim() ? "已配置" : "未配置"}
-            title="Prompt"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
+  const flowNodes = useMemo<WorkflowReactFlowNode[]>(
+    () => [
+      createWorkflowNode({
+        accent: "green",
+        body: selectedPerson ? (
+          <>
+            <img
+              className="flow-node__hero-image"
+              alt={selectedPerson.asset.originalName}
+              src={assetThumbSrc(selectedPerson)}
+            />
+            <small>{selectedPerson.asset.originalName}</small>
+            <strong>{formatDimensions(selectedPerson.asset.width, selectedPerson.asset.height)}</strong>
+          </>
+        ) : (
+          <NodeEmpty icon={<UserRound size={24} />} text="导入人物图" />
+        ),
+        nodeId: "person",
+        position: nodePositions.person,
+        selected: selectedFlowNode === "person",
+        status: selectedPerson ? "done" : "required",
+        subtitle: selectedPerson ? "必选" : "未选择",
+        title: "人物图",
+      }),
+      createWorkflowNode({
+        accent: "blue",
+        body: selectedGarments.length ? (
+          <>
+            <div className="flow-node__image-grid">
+              {selectedGarments.slice(0, 4).map((asset) => (
+                <img alt={asset.asset.originalName} key={asset.asset.id} src={assetThumbSrc(asset)} />
+              ))}
+            </div>
+            <span className="flow-node__count">{selectedGarments.length} 张</span>
+          </>
+        ) : (
+          <NodeEmpty icon={<BriefcaseBusiness size={24} />} text="导入服装图" />
+        ),
+        nodeId: "garments",
+        position: nodePositions.garments,
+        selected: selectedFlowNode === "garments",
+        status: selectedGarments.length ? "done" : "required",
+        subtitle: "至少 1 张",
+        title: "服装图组",
+      }),
+      createWorkflowNode({
+        accent: "purple",
+        body: (
+          <>
             <div className="flow-node__document">
               <FileText size={42} />
               <span>用户 Prompt</span>
             </div>
             <strong>{promptText.trim().length} 字符</strong>
-          </FlowNode>
-          <FlowNode
-            accent="orange"
-            id="model"
-            position={nodePositions.model}
-            selected={selectedFlowNode === "model"}
-            status={modelReady ? "done" : "pending"}
-            subtitle={modelReady ? "已选择" : "待配置"}
-            title="模型"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
+          </>
+        ),
+        nodeId: "prompt",
+        position: nodePositions.prompt,
+        selected: selectedFlowNode === "prompt",
+        status: promptText.trim() ? "done" : "required",
+        subtitle: promptText.trim() ? "已配置" : "未配置",
+        title: "Prompt",
+      }),
+      createWorkflowNode({
+        accent: "orange",
+        body: (
+          <>
             <div className="flow-node__model">
               <Box size={44} />
             </div>
             <strong>{DEFAULT_MODEL_ID}</strong>
-            <small>{modelSize} / {outputCount} 张</small>
-          </FlowNode>
-          <FlowNode
-            accent="blue"
-            id="execute"
-            position={nodePositions.execute}
-            selected={selectedFlowNode === "execute"}
-            status={validationResult?.executable ? "done" : "required"}
-            subtitle={canRun ? "就绪" : "待补齐"}
-            title="执行"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
+            <small>
+              {modelSize} / {outputCount} 张
+            </small>
+          </>
+        ),
+        nodeId: "model",
+        position: nodePositions.model,
+        selected: selectedFlowNode === "model",
+        status: modelReady ? "done" : "pending",
+        subtitle: modelReady ? "已选择" : "待配置",
+        title: "模型",
+      }),
+      createWorkflowNode({
+        accent: "blue",
+        body: (
+          <>
             <button
-              className="flow-node__play"
+              className="flow-node__play nodrag nopan"
               disabled={!canRun}
               onClick={(event) => {
                 event.stopPropagation();
@@ -2071,40 +1817,179 @@ function FlowWorkbench({
               <Play size={30} fill="currentColor" />
             </button>
             <small>{canRun ? "点击执行生成" : "输入未完整"}</small>
-          </FlowNode>
-          <FlowNode
-            accent="gray"
-            id="result"
-            position={nodePositions.result}
-            selected={selectedFlowNode === "result"}
-            status={results.length ? "done" : "pending"}
-            subtitle={taskStatus}
-            title="结果"
-            onPointerCancel={stopNodeDrag}
-            onPointerDown={handleNodePointerDown}
-            onPointerMove={handleNodePointerMove}
-            onPointerUp={stopNodeDrag}
-            onSelect={handleFlowNodeSelect}
-          >
-            {results.length ? (
-              <div className="flow-node__image-grid flow-node__image-grid--results">
-                {results.slice(0, 4).map((result) => (
-                  <img alt="生成结果" key={result.id} src={convertFileSrc(result.thumbFilePath)} />
-                ))}
-              </div>
-            ) : (
-              <NodeEmpty icon={<ImageIcon size={28} />} text={`将生成 ${outputCount} 张图片`} />
-            )}
-          </FlowNode>
-        </div>
-      </div>
-      <FlowMiniMap selectedFlowNode={selectedFlowNode} />
+          </>
+        ),
+        nodeId: "execute",
+        position: nodePositions.execute,
+        selected: selectedFlowNode === "execute",
+        status: validationResult?.executable ? "done" : "required",
+        subtitle: canRun ? "就绪" : "待补齐",
+        title: "执行",
+      }),
+      createWorkflowNode({
+        accent: "gray",
+        body: results.length ? (
+          <div className="flow-node__image-grid flow-node__image-grid--results">
+            {results.slice(0, 4).map((result) => (
+              <img alt="生成结果" key={result.id} src={convertFileSrc(result.thumbFilePath)} />
+            ))}
+          </div>
+        ) : (
+          <NodeEmpty icon={<ImageIcon size={28} />} text={`将生成 ${outputCount} 张图片`} />
+        ),
+        nodeId: "result",
+        position: nodePositions.result,
+        selected: selectedFlowNode === "result",
+        status: results.length ? "done" : "pending",
+        subtitle: taskStatus,
+        title: "结果",
+      }),
+    ],
+    [
+      canRun,
+      modelReady,
+      modelSize,
+      nodePositions,
+      onRun,
+      outputCount,
+      promptText,
+      results,
+      selectedFlowNode,
+      selectedGarments,
+      selectedPerson,
+      taskStatus,
+      validationResult?.executable,
+    ],
+  );
+
+  const handleNodesChange = useCallback((changes: NodeChange<WorkflowReactFlowNode>[]) => {
+    setNodePositions((currentPositions) => {
+      let nextPositions = currentPositions;
+      for (const change of changes) {
+        if (change.type !== "position" || !change.position || !isFlowNodeId(change.id)) {
+          continue;
+        }
+        if (nextPositions === currentPositions) {
+          nextPositions = { ...currentPositions };
+        }
+        nextPositions[change.id] = change.position;
+      }
+      return nextPositions;
+    });
+  }, []);
+
+  const handleNodeClick = useCallback<NodeMouseHandler<WorkflowReactFlowNode>>(
+    (_event, node) => {
+      if (isFlowNodeId(node.id)) {
+        onNodeSelect(node.id);
+      }
+    },
+    [onNodeSelect],
+  );
+
+  const handleViewportChange = useCallback(
+    (nextViewport: Viewport) => {
+      setViewport(nextViewport);
+      onZoomChange(clampZoom(nextViewport.zoom * 100));
+    },
+    [onZoomChange],
+  );
+
+  const handleMoveEnd = useCallback<OnMove>(
+    (_event, nextViewport) => {
+      handleViewportChange(nextViewport);
+    },
+    [handleViewportChange],
+  );
+
+  function handleFitCanvas() {
+    const instance = reactFlowRef.current;
+    if (instance) {
+      void instance.fitView({ duration: 160, maxZoom: 1, minZoom: 1, padding: 0.18 });
+    } else {
+      setViewport(REACT_FLOW_DEFAULT_VIEWPORT);
+    }
+    onZoomChange(100);
+  }
+
+  return (
+    <section className={`canvas-shell canvas-shell--${canvasTool}`}>
+      <CanvasToolbar
+        canvasTool={canvasTool}
+        zoom={zoom}
+        onCanvasToolChange={onCanvasToolChange}
+        onZoomChange={onZoomChange}
+        onFitCanvas={handleFitCanvas}
+      />
+      <ReactFlowProvider key={flowInstanceRevision}>
+        <FlowInternalsUpdater
+          revision={[
+            flowInstanceRevision,
+            selectedPerson?.asset.id ?? "",
+            selectedGarments.map((asset) => asset.asset.id).join("|"),
+            results.map((result) => result.id).join("|"),
+          ].join(":")}
+        />
+        <ReactFlow<WorkflowReactFlowNode, WorkflowReactFlowEdge>
+          className="flow-canvas"
+          nodes={flowNodes}
+          edges={workflowEdges}
+          nodeTypes={nodeTypes}
+          viewport={viewport}
+          minZoom={CANVAS_MIN_ZOOM / 100}
+          maxZoom={CANVAS_MAX_ZOOM / 100}
+          nodesConnectable={false}
+          edgesReconnectable={false}
+          connectOnClick={false}
+          deleteKeyCode={null}
+          edgesFocusable={false}
+          nodesDraggable
+          panOnDrag
+          panOnScroll
+          panOnScrollSpeed={1}
+          zoomOnPinch
+          zoomOnScroll={false}
+          zoomOnDoubleClick={false}
+          preventScrolling
+          selectNodesOnDrag={false}
+          onlyRenderVisibleElements={false}
+          proOptions={{ hideAttribution: true }}
+          onInit={(instance) => {
+            reactFlowRef.current = instance;
+          }}
+          onNodesChange={handleNodesChange}
+          onNodeClick={handleNodeClick}
+          onMoveEnd={handleMoveEnd}
+          onViewportChange={handleViewportChange}
+        >
+          <Background gap={18} size={1.4} color="#cbd5e1" />
+          <MiniMap className="flow-minimap" pannable zoomable />
+        </ReactFlow>
+      </ReactFlowProvider>
       <div className="flow-context">
         <span>{currentCombination?.name ?? "未保存组合"}</span>
         <strong>{validationResult?.executable ? "流程已就绪" : "待补充输入"}</strong>
       </div>
     </section>
   );
+}
+
+function FlowInternalsUpdater({ revision }: { revision: string }) {
+  const updateNodeInternals = useUpdateNodeInternals();
+
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      for (const nodeId of WORKFLOW_NODE_ORDER) {
+        updateNodeInternals(nodeId);
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [revision, updateNodeInternals]);
+
+  return null;
 }
 
 function CanvasToolbar({
@@ -2174,56 +2059,64 @@ function CanvasToolbar({
   );
 }
 
-function FlowNode({
+function createWorkflowNode({
   accent,
-  children,
-  id,
+  body,
+  nodeId,
   position,
   selected,
   status,
   subtitle,
   title,
-  onPointerCancel,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
-  onSelect,
-}: {
-  accent: "green" | "blue" | "purple" | "orange" | "gray";
-  children: ReactNode;
-  id: FlowNodeId;
-  position: FlowNodePosition;
-  selected: boolean;
-  status: "done" | "pending" | "required";
-  subtitle: string;
-  title: string;
-  onPointerCancel: (event: PointerEvent<HTMLButtonElement>) => void;
-  onPointerDown: (event: PointerEvent<HTMLButtonElement>, nodeId: FlowNodeId) => void;
-  onPointerMove: (event: PointerEvent<HTMLButtonElement>) => void;
-  onPointerUp: (event: PointerEvent<HTMLButtonElement>) => void;
-  onSelect: (nodeId: FlowNodeId, event: ReactMouseEvent<HTMLButtonElement>) => void;
-}) {
+}: WorkflowNodeData & { position: FlowNodePosition }): WorkflowReactFlowNode {
+  return {
+    id: nodeId,
+    type: "workflowNode",
+    position,
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    selected,
+    data: {
+      accent,
+      body,
+      nodeId,
+      selected,
+      status,
+      subtitle,
+      title,
+    },
+  };
+}
+
+function FlowNode({ data, selected }: NodeProps<WorkflowReactFlowNode>) {
   return (
-    <button
-      className={`flow-node flow-node--${accent} ${selected ? "is-selected" : ""}`}
-      data-node-id={id}
-      onClick={(event) => onSelect(id, event)}
-      onPointerCancel={onPointerCancel}
-      onPointerDown={(event) => onPointerDown(event, id)}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      style={{ left: position.x, top: position.y }}
-      type="button"
+    <div
+      className={`flow-node flow-node--${data.accent} ${selected || data.selected ? "is-selected" : ""}`}
+      data-node-id={data.nodeId}
     >
+      <Handle
+        className="flow-node__handle flow-node__handle--target"
+        id="target"
+        isConnectable={false}
+        position={Position.Left}
+        type="target"
+      />
+      <Handle
+        className="flow-node__handle flow-node__handle--source"
+        id="source"
+        isConnectable={false}
+        position={Position.Right}
+        type="source"
+      />
       <div className="flow-node__header">
         <div>
-          <strong>{title}</strong>
-          <span>{subtitle}</span>
+          <strong>{data.title}</strong>
+          <span>{data.subtitle}</span>
         </div>
-        <StatusMark status={status} />
+        <StatusMark status={data.status} />
       </div>
-      <div className="flow-node__body">{children}</div>
-    </button>
+      <div className="flow-node__body">{data.body}</div>
+    </div>
   );
 }
 
@@ -2258,38 +2151,6 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
   );
 }
 
-function FlowArrows({ nodePositions }: { nodePositions: Record<FlowNodeId, FlowNodePosition> }) {
-  return (
-    <svg className="flow-arrows" aria-hidden="true" focusable="false">
-      <defs>
-        <marker
-          id="flow-arrow-head"
-          markerHeight="8"
-          markerUnits="strokeWidth"
-          markerWidth="8"
-          orient="auto"
-          refX="7"
-          refY="4"
-        >
-          <path d="M 0 0 L 8 4 L 0 8 z" />
-        </marker>
-      </defs>
-      {FLOW_NODE_ORDER.slice(0, -1).map((nodeId, index) => {
-        const nextNodeId = FLOW_NODE_ORDER[index + 1];
-        const from = nodePositions[nodeId];
-        const to = nodePositions[nextNodeId];
-        return (
-          <path
-            className="flow-arrow"
-            d={buildFlowConnectorPath(from, to)}
-            key={`${nodeId}-${nextNodeId}`}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
 function clampZoom(zoom: number) {
   return Math.max(CANVAS_MIN_ZOOM, Math.min(CANVAS_MAX_ZOOM, zoom));
 }
@@ -2313,46 +2174,6 @@ function getNextZoomLevel(zoom: number) {
   return CANVAS_MAX_ZOOM;
 }
 
-function clampValue(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function normalizeWheelDelta(delta: number, deltaMode: number) {
-  if (deltaMode === 1) {
-    return delta * WHEEL_DELTA_LINE_PX;
-  }
-  if (deltaMode === 2) {
-    return delta * WHEEL_DELTA_PAGE_PX;
-  }
-  return delta;
-}
-
-function getWheelZoomFactor(deltaY: number, deltaMode: number) {
-  const normalizedDeltaY = normalizeWheelDelta(deltaY, deltaMode);
-  return clampValue(
-    2 ** (-normalizedDeltaY * CANVAS_WHEEL_ZOOM_EXPONENT),
-    1 / CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
-    CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
-  );
-}
-
-function getWheelPanDelta(deltaX: number, deltaY: number, deltaMode: number) {
-  return {
-    x: normalizeWheelDelta(deltaX, deltaMode),
-    y: normalizeWheelDelta(deltaY, deltaMode),
-  };
-}
-
-function FlowMiniMap({ selectedFlowNode }: { selectedFlowNode: FlowNodeId }) {
-  const nodes: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
-  return (
-    <div className="flow-minimap" aria-label="流程缩略图">
-      {nodes.map((nodeId) => (
-        <span className={selectedFlowNode === nodeId ? "is-active" : ""} key={nodeId} />
-      ))}
-    </div>
-  );
-}
 
 function ComposerHeader({
   credentialStatus,
