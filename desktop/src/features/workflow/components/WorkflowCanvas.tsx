@@ -1533,6 +1533,7 @@ function FlowWorkbench({
   onZoomChange: (zoom: number) => void;
 }) {
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const dragStartRef = useRef<{
     pointerId: number;
     startX: number;
@@ -1569,6 +1570,7 @@ function FlowWorkbench({
       return;
     }
     event.preventDefault();
+    setIsPanning(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     dragStartRef.current = {
       pointerId: event.pointerId,
@@ -1594,6 +1596,7 @@ function FlowWorkbench({
   function stopCanvasDrag(event: PointerEvent<HTMLDivElement>) {
     if (dragStartRef.current?.pointerId === event.pointerId) {
       dragStartRef.current = null;
+      setIsPanning(false);
     }
   }
 
@@ -1603,7 +1606,7 @@ function FlowWorkbench({
   }
 
   return (
-    <section className={`canvas-shell canvas-shell--${canvasTool}`}>
+    <section className={`canvas-shell canvas-shell--${canvasTool}${isPanning ? " is-panning" : ""}`}>
       <CanvasToolbar
         canvasTool={canvasTool}
         zoom={zoom}
@@ -1622,7 +1625,7 @@ function FlowWorkbench({
         <div
           className="flow-canvas__inner"
           style={{
-            transform: `translate(${pan.x}px, calc(-50% + ${pan.y}px)) scale(${canvasScale})`,
+            transform: `translate(${pan.x}px, ${pan.y}px) translateY(-50%) scale(${canvasScale})`,
           }}
         >
           <FlowNode
