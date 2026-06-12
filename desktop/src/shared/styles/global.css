@@ -218,6 +218,343 @@ button {
   box-shadow: 0 0 0 1px #cbd5e1;
 }
 
+.modal-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(2, 6, 14, 0.56);
+  backdrop-filter: blur(2px);
+}
+
+.new-combination-modal {
+  width: min(848px, calc(100vw - 76px));
+  max-height: calc(100vh - 92px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, 0.32);
+}
+
+.modal-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 26px 16px;
+  border-bottom: 1px solid #e4eaf3;
+}
+
+.modal-header h2,
+.modal-header p {
+  margin: 0;
+}
+
+.modal-header h2 {
+  color: #111827;
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.modal-header p {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.modal-header button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  color: #1f2937;
+  border-radius: 6px;
+}
+
+.new-combination-modal form {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.modal-form-scroll {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.modal-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 14px 26px 0;
+  padding: 9px 10px;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.modal-section {
+  padding: 18px 26px;
+  border-bottom: 1px solid #edf1f6;
+}
+
+.modal-section h3 {
+  margin: 0 0 14px;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.modal-section h3 span {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.modal-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.modal-field-grid label,
+.modal-field-block,
+.modal-setting-grid label,
+.modal-asset-picker,
+.modal-asset-preview {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.modal-field-grid b {
+  color: #ef4444;
+}
+
+.modal-input-wrap {
+  position: relative;
+}
+
+.modal-input-wrap input,
+.modal-input-wrap textarea,
+.modal-setting-grid select,
+.modal-setting-grid input {
+  width: 100%;
+  border: 1px solid #dce3ee;
+  border-radius: 6px;
+  outline: none;
+  color: #111827;
+  background: #ffffff;
+}
+
+.modal-input-wrap input,
+.modal-setting-grid select,
+.modal-setting-grid input {
+  height: 34px;
+  padding: 0 48px 0 11px;
+}
+
+.modal-input-wrap textarea {
+  min-height: 70px;
+  padding: 10px 52px 10px 11px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.modal-input-wrap small {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.modal-input-wrap--textarea small {
+  bottom: 9px;
+}
+
+.modal-asset-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(120px, 0.85fr) minmax(190px, 1.35fr) minmax(120px, 0.85fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.modal-dropzone,
+.modal-preview-single,
+.modal-preview-grid {
+  min-height: 172px;
+  border: 1px dashed #d2dbe9;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+.modal-dropzone {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 12px;
+  color: #64748b;
+  text-align: center;
+}
+
+.modal-dropzone small,
+.modal-preview-single span {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.modal-resource-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.modal-resource-grid button {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border: 1px solid #e1e7f0;
+  border-radius: 6px;
+  background: #eef2f7;
+}
+
+.modal-resource-grid button.is-selected {
+  border: 2px solid #2563eb;
+}
+
+.modal-resource-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modal-resource-grid span {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: grid;
+  place-items: center;
+  color: #2563eb;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.modal-preview-single {
+  display: grid;
+  place-items: center;
+  padding: 14px;
+}
+
+.modal-preview-single > div {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #9aa7ba;
+  text-align: center;
+}
+
+.modal-preview-single img {
+  width: 100%;
+  max-height: 150px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #dbe4f1;
+}
+
+.modal-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 14px;
+}
+
+.modal-preview-grid img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border: 1px solid #dbe4f1;
+  border-radius: 6px;
+}
+
+.modal-setting-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr 0.85fr;
+  gap: 14px;
+}
+
+.modal-stepper {
+  height: 34px;
+  display: grid;
+  grid-template-columns: 38px minmax(42px, 1fr) 38px;
+  overflow: hidden;
+  border: 1px solid #dce3ee;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.modal-stepper button {
+  display: grid;
+  place-items: center;
+  color: #334155;
+  border-right: 1px solid #e2e8f0;
+}
+
+.modal-stepper button:last-child {
+  border-right: 0;
+  border-left: 1px solid #e2e8f0;
+}
+
+.modal-stepper input {
+  height: 32px;
+  padding: 0;
+  text-align: center;
+  border: 0;
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 26px 18px;
+  border-top: 1px solid #edf1f6;
+  background: #ffffff;
+}
+
+.modal-footer > div {
+  display: flex;
+  gap: 10px;
+}
+
+.modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.modal-checkbox input {
+  width: 14px;
+  height: 14px;
+  accent-color: #245cff;
+}
+
 .workbench__body {
   min-height: 0;
   display: grid;

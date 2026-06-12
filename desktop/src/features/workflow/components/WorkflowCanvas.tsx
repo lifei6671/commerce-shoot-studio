@@ -95,6 +95,18 @@ type SelectableAsset = {
 type SidePanelMode = "details" | "edit" | "links" | "history";
 type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
 type CanvasTool = "hand" | "select" | "grid";
+type NewCombinationForm = {
+  name: string;
+  code: string;
+  description: string;
+  personAssetId: string | null;
+  garmentAssetIds: string[];
+  promptTemplate: string;
+  modelId: string;
+  size: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  openAfterCreate: boolean;
+};
 
 // Backwards-compatible export for the node wrapper files.
 export function WorkflowNode() {
@@ -110,6 +122,7 @@ export function WorkflowCanvas() {
   const [promptText, setPromptText] = useState(DEFAULT_PROMPT_TEXT);
   const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("1024x1024");
   const [outputCount, setOutputCount] = useState(1);
+  const [draftCombinationName, setDraftCombinationName] = useState<string | null>(null);
   const [credentialStatus, setCredentialStatus] =
     useState<ProviderCredentialStatus | null>(null);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -127,6 +140,10 @@ export function WorkflowCanvas() {
   const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
   const [canvasTool, setCanvasTool] = useState<CanvasTool>("hand");
   const [zoom, setZoom] = useState(100);
+  const [newCombinationForm, setNewCombinationForm] =
+    useState<NewCombinationForm>(() => buildNewCombinationForm());
+  const [isNewCombinationModalOpen, setIsNewCombinationModalOpen] = useState(false);
+  const [newCombinationError, setNewCombinationError] = useState<string | null>(null);
   const latestTask = useGenerationTaskStore((state) => state.latestTask);
   const recentTasks = useGenerationTaskStore((state) => state.recentTasks);
   const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
@@ -158,7 +175,7 @@ export function WorkflowCanvas() {
   );
   const resultAssets = latestTask?.results ?? [];
   const canRun = validationResult?.executable === true && !isStarting && !isSaving;
-  const combinationName = currentCombination?.name ?? "未保存组合";
+  const combinationName = currentCombination?.name ?? draftCombinationName ?? "未保存组合";
 
   async function refreshTaskLists() {
     const [runningTasks, recentTasks] = await Promise.all([
@@ -243,7 +260,7 @@ export function WorkflowCanvas() {
       revision: Date.now(),
       draftCombination: {
         id: currentCombination?.id,
-        name: currentCombination?.name ?? buildCombinationName(),
+        name: currentCombination?.name ?? draftCombinationName ?? buildCombinationName(),
         personAssetId: selectedPersonId,
         garmentAssetIds: selectedGarmentIds,
       },
@@ -268,6 +285,7 @@ export function WorkflowCanvas() {
   }, [
     currentCombination?.id,
     currentCombination?.name,
+    draftCombinationName,
     modelConfig,
     promptText,
     selectedGarmentIds,
@@ -418,23 +436,80 @@ export function WorkflowCanvas() {
 
     const saved = await saveImageCombination({
       id: currentCombination?.id,
-      name: currentCombination?.name ?? buildCombinationName(),
+      name: currentCombination?.name ?? draftCombinationName ?? buildCombinationName(),
       personAssetId: selectedPersonId,
       garmentAssetIds: selectedGarmentIds,
     });
     setCurrentCombination(saved);
+    setDraftCombinationName(null);
     await savePromptBinding(buildPromptBinding(saved.id, promptText));
     await refreshTaskLists();
     return saved;
   }
 
-  function handleNewCombination() {
-    setCurrentCombination(null);
-    setSelectedPersonId(null);
-    setSelectedGarmentIds([]);
-    setLatestTask(null);
+  function openNewCombinationModal() {
+    setNewCombinationForm(
+      buildNewCombinationForm({
+        name: buildCombinationName(),
+        personAssetId: selectedPersonId,
+        garmentAssetIds: selectedGarmentIds,
+        size: modelSize,
+        outputCount,
+      }),
+    );
+    setNewCombinationError(null);
+    setIsNewCombinationModalOpen(true);
+  }
+
+  async function handleCreateCombination() {
+    const name = newCombinationForm.name.trim();
+    if (!name) {
+      setNewCombinationError("请填写组合名称");
+      return;
+    }
+
+    const nextGarmentIds = newCombinationForm.garmentAssetIds.slice(0, 4);
     setActionError(null);
-    setActionMessage("已新建空白组合");
+    setActionMessage(null);
+    setNewCombinationError(null);
+    setPromptText(DEFAULT_PROMPT_TEXT);
+    setModelSize(newCombinationForm.size);
+    setOutputCount(newCombinationForm.outputCount);
+    setSelectedPersonId(newCombinationForm.personAssetId);
+    setSelectedGarmentIds(nextGarmentIds);
+
+    if (!newCombinationForm.personAssetId || !nextGarmentIds.length) {
+      setCurrentCombination(null);
+      setDraftCombinationName(name);
+      setLatestTask(null);
+      setIsNewCombinationModalOpen(false);
+      setSelectedFlowNode(newCombinationForm.openAfterCreate ? "person" : selectedFlowNode);
+      setSidePanelMode("details");
+      setActionMessage("已创建本地草稿，选择人物图和服装图后可保存");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const saved = await saveImageCombination({
+        name,
+        personAssetId: newCombinationForm.personAssetId,
+        garmentAssetIds: nextGarmentIds,
+      });
+      setCurrentCombination(saved);
+      setDraftCombinationName(null);
+      await savePromptBinding(buildPromptBinding(saved.id, DEFAULT_PROMPT_TEXT));
+      setLatestTask(null);
+      await refreshTaskLists();
+      setIsNewCombinationModalOpen(false);
+      setSelectedFlowNode(newCombinationForm.openAfterCreate ? "person" : selectedFlowNode);
+      setSidePanelMode("details");
+      setActionMessage("组合已创建");
+    } catch (error) {
+      setNewCombinationError(error instanceof Error ? error.message : "创建组合失败");
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function toggleGarment(assetId: string) {
@@ -473,7 +548,7 @@ export function WorkflowCanvas() {
             setSelectedFlowNode("model");
             setSidePanelMode("edit");
           }}
-          onNew={handleNewCombination}
+          onNew={openNewCombinationModal}
           onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
           onRefresh={handleRefreshAll}
           onSave={() => {
@@ -568,6 +643,23 @@ export function WorkflowCanvas() {
           />
         </div>
       </div>
+      {isNewCombinationModalOpen ? (
+        <NewCombinationModal
+          error={newCombinationError}
+          form={newCombinationForm}
+          garments={garments}
+          isSaving={isSaving}
+          people={people}
+          onCancel={() => {
+            setIsNewCombinationModalOpen(false);
+            setNewCombinationError(null);
+          }}
+          onCreate={() => {
+            void handleCreateCombination();
+          }}
+          onFormChange={setNewCombinationForm}
+        />
+      ) : null}
       <StatusBar />
     </div>
   );
@@ -585,6 +677,38 @@ function buildCombinationName() {
     minute: "2-digit",
     hour12: false,
   })}`;
+}
+
+function buildCombinationCode() {
+  const now = new Date();
+  const datePart = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+  const timePart = [
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
+  return `tryon-${datePart}-${timePart}`;
+}
+
+function buildNewCombinationForm(
+  override: Partial<NewCombinationForm> = {},
+): NewCombinationForm {
+  return {
+    name: buildCombinationName(),
+    code: buildCombinationCode(),
+    description: "",
+    personAssetId: null,
+    garmentAssetIds: [],
+    promptTemplate: "默认模板（通用）",
+    modelId: "FLUX.1 dev",
+    size: "1024x1536",
+    outputCount: 3,
+    openAfterCreate: true,
+    ...override,
+  };
 }
 
 function buildPromptBinding(
@@ -735,6 +859,304 @@ function ToolbarButton({
       {icon}
       {label}
     </button>
+  );
+}
+
+function NewCombinationModal({
+  error,
+  form,
+  garments,
+  isSaving,
+  people,
+  onCancel,
+  onCreate,
+  onFormChange,
+}: {
+  error: string | null;
+  form: NewCombinationForm;
+  garments: AssetFileView[];
+  isSaving: boolean;
+  people: AssetFileView[];
+  onCancel: () => void;
+  onCreate: () => void;
+  onFormChange: (form: NewCombinationForm) => void;
+}) {
+  const selectedPerson = people.find((asset) => asset.asset.id === form.personAssetId) ?? null;
+  const selectedGarments = form.garmentAssetIds
+    .map((assetId) => garments.find((asset) => asset.asset.id === assetId))
+    .filter((asset): asset is AssetFileView => Boolean(asset));
+
+  function updateForm(patch: Partial<NewCombinationForm>) {
+    onFormChange({ ...form, ...patch });
+  }
+
+  function toggleGarmentForDraft(assetId: string) {
+    const nextIds = form.garmentAssetIds.includes(assetId)
+      ? form.garmentAssetIds.filter((id) => id !== assetId)
+      : [assetId, ...form.garmentAssetIds].slice(0, 4);
+    updateForm({ garmentAssetIds: nextIds });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="new-combination-modal" aria-modal="true" role="dialog">
+        <header className="modal-header">
+          <div>
+            <h2>新建组合</h2>
+            <p>创建一个新的图片组合，开始你的生图流程</p>
+          </div>
+          <button onClick={onCancel} type="button" aria-label="关闭">
+            <X size={18} />
+          </button>
+        </header>
+        {error ? (
+          <div className="modal-error">
+            <CircleAlert size={15} />
+            {error}
+          </div>
+        ) : null}
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCreate();
+          }}
+        >
+          <div className="modal-form-scroll">
+            <section className="modal-section">
+              <h3>1. 基本信息</h3>
+              <div className="modal-field-grid">
+                <label>
+                  <span>
+                    <b>*</b> 组合名称
+                  </span>
+                  <div className="modal-input-wrap">
+                    <input
+                      maxLength={50}
+                      value={form.name}
+                      onChange={(event) => updateForm({ name: event.target.value })}
+                    />
+                    <small>{form.name.length}/50</small>
+                  </div>
+                </label>
+                <label>
+                  <span>组合编码（可选）</span>
+                  <div className="modal-input-wrap">
+                    <input
+                      maxLength={50}
+                      value={form.code}
+                      onChange={(event) => updateForm({ code: event.target.value })}
+                    />
+                    <small>{form.code.length}/50</small>
+                  </div>
+                </label>
+              </div>
+              <label className="modal-field-block">
+                <span>描述（可选）</span>
+                <div className="modal-input-wrap modal-input-wrap--textarea">
+                  <textarea
+                    maxLength={200}
+                    rows={3}
+                    placeholder="输入组合的描述，帮助你更好地管理和识别"
+                    value={form.description}
+                    onChange={(event) => updateForm({ description: event.target.value })}
+                  />
+                  <small>{form.description.length}/200</small>
+                </div>
+              </label>
+            </section>
+            <section className="modal-section">
+              <h3>2. 选择初始素材 <span>（非必填，可在后续补充）</span></h3>
+              <div className="modal-asset-layout">
+                <ModalAssetPicker
+                  assets={people}
+                  emptyText="暂无人物图"
+                  label="人物图片"
+                  selectedIds={form.personAssetId ? [form.personAssetId] : []}
+                  onSelect={(assetId) => updateForm({ personAssetId: assetId })}
+                />
+                <ModalAssetPreview
+                  emptyIcon={<ImageIcon size={34} />}
+                  emptyText="尚未选择人物图片"
+                  images={selectedPerson ? [selectedPerson] : []}
+                  label="预览"
+                />
+                <ModalAssetPicker
+                  assets={garments}
+                  emptyText="暂无服装图"
+                  label="服装图片（至少 1 张建议多角度）"
+                  selectedIds={form.garmentAssetIds}
+                  onSelect={toggleGarmentForDraft}
+                />
+                <ModalAssetPreview
+                  emptyIcon={<Grid3X3 size={34} />}
+                  emptyText="尚未选择服装图片"
+                  images={selectedGarments}
+                  label="预览"
+                />
+              </div>
+            </section>
+            <section className="modal-section">
+              <h3>3. 默认设置</h3>
+              <div className="modal-setting-grid">
+                <label>
+                  默认 Prompt 模板
+                  <select
+                    value={form.promptTemplate}
+                    onChange={(event) => updateForm({ promptTemplate: event.target.value })}
+                  >
+                    <option>默认模板（通用）</option>
+                  </select>
+                </label>
+                <label>
+                  默认模型
+                  <select
+                    value={form.modelId}
+                    onChange={(event) => updateForm({ modelId: event.target.value })}
+                  >
+                    <option>FLUX.1 dev</option>
+                    <option>{DEFAULT_MODEL_ID}</option>
+                  </select>
+                </label>
+                <label>
+                  默认尺寸
+                  <select
+                    value={form.size}
+                    onChange={(event) =>
+                      updateForm({ size: event.target.value as (typeof MODEL_SIZES)[number] })
+                    }
+                  >
+                    {MODEL_SIZES.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  默认生成数量
+                  <span className="modal-stepper">
+                    <button
+                      onClick={() => updateForm({ outputCount: Math.max(1, form.outputCount - 1) })}
+                      type="button"
+                      aria-label="减少生成数量"
+                    >
+                      <Minus size={15} />
+                    </button>
+                    <input value={form.outputCount} readOnly />
+                    <button
+                      onClick={() => updateForm({ outputCount: Math.min(4, form.outputCount + 1) })}
+                      type="button"
+                      aria-label="增加生成数量"
+                    >
+                      <Plus size={15} />
+                    </button>
+                  </span>
+                </label>
+              </div>
+            </section>
+          </div>
+          <footer className="modal-footer">
+            <label className="modal-checkbox">
+              <input
+                checked={form.openAfterCreate}
+                onChange={(event) => updateForm({ openAfterCreate: event.target.checked })}
+                type="checkbox"
+              />
+              创建后立即打开并进入编辑
+            </label>
+            <div>
+              <button className="toolbar-button" onClick={onCancel} type="button">
+                取消
+              </button>
+              <button className="primary-action" disabled={isSaving || !form.name.trim()} type="submit">
+                {isSaving ? "创建中" : "创建组合"}
+              </button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ModalAssetPicker({
+  assets,
+  emptyText,
+  label,
+  selectedIds,
+  onSelect,
+}: {
+  assets: AssetFileView[];
+  emptyText: string;
+  label: string;
+  selectedIds: string[];
+  onSelect: (assetId: string) => void;
+}) {
+  return (
+    <div className="modal-asset-picker">
+      <strong>{label}</strong>
+      <div className="modal-dropzone">
+        {assets.length ? (
+          <div className="modal-resource-grid">
+            {assets.slice(0, 8).map((asset) => (
+              <button
+                className={selectedIds.includes(asset.asset.id) ? "is-selected" : ""}
+                key={asset.asset.id}
+                onClick={() => onSelect(asset.asset.id)}
+                type="button"
+              >
+                <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+                {selectedIds.includes(asset.asset.id) ? (
+                  <span>
+                    <CircleCheck size={13} fill="currentColor" />
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <>
+            <Import size={30} />
+            <span>{emptyText}</span>
+            <small>请先在左侧资源库导入素材</small>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ModalAssetPreview({
+  emptyIcon,
+  emptyText,
+  images,
+  label,
+}: {
+  emptyIcon: ReactNode;
+  emptyText: string;
+  images: AssetFileView[];
+  label: string;
+}) {
+  return (
+    <div className="modal-asset-preview">
+      <strong>{label}</strong>
+      <div className={images.length > 1 ? "modal-preview-grid" : "modal-preview-single"}>
+        {images.length ? (
+          images.slice(0, 4).map((asset) => (
+            <img
+              alt={asset.asset.originalName}
+              key={asset.asset.id}
+              src={convertFileSrc(asset.thumbFilePath)}
+            />
+          ))
+        ) : (
+          <div>
+            {emptyIcon}
+            <span>{emptyText}</span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
