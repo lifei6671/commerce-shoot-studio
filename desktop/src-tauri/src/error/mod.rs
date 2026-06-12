@@ -15,6 +15,8 @@ pub enum AppError {
     PromptTemplateInvalid(String),
     #[error("prompt required variable missing: {0}")]
     PromptRequiredVariableMissing(String),
+    #[error("model config invalid: {0}")]
+    ModelConfigInvalid(String),
     #[error("{0}")]
     InvalidInput(String),
 }
@@ -38,6 +40,7 @@ impl serde::Serialize for AppError {
             AppError::WorkspaceUnavailable => "WORKSPACE_UNAVAILABLE",
             AppError::PromptTemplateInvalid(_) => "PROMPT_TEMPLATE_INVALID",
             AppError::PromptRequiredVariableMissing(_) => "PROMPT_REQUIRED_VARIABLE_MISSING",
+            AppError::ModelConfigInvalid(_) => "MODEL_CONFIG_INVALID",
             AppError::InvalidInput(_) => "INVALID_INPUT",
         };
 

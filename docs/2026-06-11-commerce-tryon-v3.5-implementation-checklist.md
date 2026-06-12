@@ -480,20 +480,20 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 定义固定 Provider 的 `ModelDefinition`。
-- [ ] 定义 `ModelParamSchema`。
-- [ ] 创建 `model_configs` 表。
-- [ ] 实现 `list_model_definitions`。
-- [ ] 实现 `save_model_config`。
-- [ ] 服装图数量限制从 `ModelDefinition.inputLimits` 派生。
-- [ ] 输出数量通过 `output.countParamKey` 归一化为 `normalizedOutputCount`。
-- [ ] 高级模型在本期由本地模型定义控制，不接入套餐权益。
+- [x] 定义固定 Provider 的 `ModelDefinition`。
+- [x] 定义 `ModelParamSchema`。
+- [x] 创建 `model_configs` 表。
+- [x] 实现 `list_model_definitions`。
+- [x] 实现 `save_model_config`。
+- [x] 服装图数量限制从 `ModelDefinition.inputLimits` 派生。
+- [x] 输出数量通过 `output.countParamKey` 归一化为 `normalizedOutputCount`。
+- [x] 高级模型在本期由本地模型定义控制，不接入套餐权益。
 
 **验证清单**：
 
 - [ ] 切换模型后，服装图 min/max 校验随模型变化。
-- [ ] 参数表单能保存并重新读取。
-- [ ] `advancedModels=false` 时前端不可选择高级模型。
+- [x] 参数表单能保存并重新读取。
+- [x] `advancedModels=false` 时前端不可选择高级模型。
 
 **退出条件**：
 
