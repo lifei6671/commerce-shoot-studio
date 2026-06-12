@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   CircleCheck,
   CircleX,
@@ -187,6 +188,9 @@ export function WorkflowCanvas() {
   const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
   const [canvasTool, setCanvasTool] = useState<CanvasTool>("hand");
   const [zoom, setZoom] = useState(100);
+  const [isAssetLibraryCollapsed, setIsAssetLibraryCollapsed] = useState(false);
+  const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
+  const [isBottomDashboardCollapsed, setIsBottomDashboardCollapsed] = useState(false);
   const [newCombinationForm, setNewCombinationForm] =
     useState<NewCombinationForm>(() => buildNewCombinationForm());
   const [isNewCombinationModalOpen, setIsNewCombinationModalOpen] = useState(false);
@@ -672,6 +676,14 @@ export function WorkflowCanvas() {
   }
 
   const showWindowChrome = isWindowsPlatform();
+  const workbenchBodyClassName = [
+    "workbench__body",
+    "workbench__body--app",
+    isAssetLibraryCollapsed ? "workbench__body--left-collapsed" : "",
+    isInspectorCollapsed ? "workbench__body--right-collapsed" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div className={`desktop-frame${showWindowChrome ? "" : " desktop-frame--native-titlebar"}`}>
@@ -705,22 +717,31 @@ export function WorkflowCanvas() {
             void handleStartGeneration();
           }}
         />
-        <div className="workbench__body workbench__body--app">
-          <AssetLibrary
-            people={people}
-            garments={garments}
-            results={resultAssets}
-            selectedPersonId={selectedPersonId}
-            selectedGarmentIds={selectedGarmentIds}
-            importingType={importingType}
-            onImport={(assetType) => {
-              void handleImport(assetType);
-            }}
-            onRefresh={handleRefreshAll}
-            onSelectPerson={setSelectedPersonId}
-            onToggleGarment={toggleGarment}
-          />
-          <main className="canvas-column">
+        <div className={workbenchBodyClassName}>
+          {isAssetLibraryCollapsed ? (
+            <PanelRestoreButton
+              label="展开资源库"
+              side="left"
+              onClick={() => setIsAssetLibraryCollapsed(false)}
+            />
+          ) : (
+            <AssetLibrary
+              people={people}
+              garments={garments}
+              results={resultAssets}
+              selectedPersonId={selectedPersonId}
+              selectedGarmentIds={selectedGarmentIds}
+              importingType={importingType}
+              onCollapse={() => setIsAssetLibraryCollapsed(true)}
+              onImport={(assetType) => {
+                void handleImport(assetType);
+              }}
+              onRefresh={handleRefreshAll}
+              onSelectPerson={setSelectedPersonId}
+              onToggleGarment={toggleGarment}
+            />
+          )}
+          <main className={`canvas-column${isBottomDashboardCollapsed ? " canvas-column--bottom-collapsed" : ""}`}>
             <WorkbenchMessages
               loadingError={loadingError}
               actionError={actionError}
@@ -751,43 +772,65 @@ export function WorkflowCanvas() {
               }}
               onZoomChange={setZoom}
             />
-            <BottomDashboard
+            {isBottomDashboardCollapsed ? (
+              <button
+                className="bottom-panel-restore"
+                onClick={() => setIsBottomDashboardCollapsed(false)}
+                type="button"
+                aria-label="展开任务面板"
+              >
+                <ChevronUp size={15} />
+                <span>任务面板</span>
+              </button>
+            ) : (
+              <BottomDashboard
+                currentCombination={currentCombination}
+                latestTask={latestTask}
+                onCollapse={() => setIsBottomDashboardCollapsed(true)}
+              />
+            )}
+          </main>
+          {isInspectorCollapsed ? (
+            <PanelRestoreButton
+              label="展开属性面板"
+              side="right"
+              onClick={() => setIsInspectorCollapsed(false)}
+            />
+          ) : (
+            <InspectorPanel
+              apiKeyDraft={apiKeyDraft}
+              credentialStatus={credentialStatus}
               currentCombination={currentCombination}
               latestTask={latestTask}
+              mode={sidePanelMode}
+              modelSize={modelSize}
+              outputCount={outputCount}
+              promptText={promptText}
+              recentTasks={recentTasks}
+              results={resultAssets}
+              selectedFlowNode={selectedFlowNode}
+              selectedGarments={selectedGarments}
+              selectedPerson={selectedPerson}
+              validationResult={validationResult}
+              onApiKeyDraftChange={setApiKeyDraft}
+              onCollapse={() => setIsInspectorCollapsed(true)}
+              onImport={(assetType) => {
+                void handleImport(assetType);
+              }}
+              onModelSizeChange={setModelSize}
+              onModeChange={setSidePanelMode}
+              onOutputCountChange={setOutputCount}
+              onPromptChange={setPromptText}
+              onSaveApiKey={() => {
+                void handleSaveApiKey();
+              }}
+              onSelectNode={setSelectedFlowNode}
+              onTaskChanged={(detail) => {
+                setLatestTask(detail);
+                void refreshTaskLists();
+              }}
             />
-          </main>
-          <InspectorPanel
-            apiKeyDraft={apiKeyDraft}
-            credentialStatus={credentialStatus}
-            currentCombination={currentCombination}
-            latestTask={latestTask}
-            mode={sidePanelMode}
-            modelSize={modelSize}
-            outputCount={outputCount}
-            promptText={promptText}
-            recentTasks={recentTasks}
-            results={resultAssets}
-            selectedFlowNode={selectedFlowNode}
-            selectedGarments={selectedGarments}
-            selectedPerson={selectedPerson}
-            validationResult={validationResult}
-            onApiKeyDraftChange={setApiKeyDraft}
-            onImport={(assetType) => {
-              void handleImport(assetType);
-            }}
-            onModelSizeChange={setModelSize}
-            onModeChange={setSidePanelMode}
-            onOutputCountChange={setOutputCount}
-            onPromptChange={setPromptText}
-            onSaveApiKey={() => {
-              void handleSaveApiKey();
-            }}
-            onSelectNode={setSelectedFlowNode}
-            onTaskChanged={(detail) => {
-              setLatestTask(detail);
-              void refreshTaskLists();
-            }}
-          />
+          )}
         </div>
       </div>
       {isNewCombinationModalOpen ? (
@@ -1405,6 +1448,7 @@ function AssetLibrary({
   selectedPersonId,
   selectedGarmentIds,
   importingType,
+  onCollapse,
   onImport,
   onRefresh,
   onSelectPerson,
@@ -1416,6 +1460,7 @@ function AssetLibrary({
   selectedPersonId: string | null;
   selectedGarmentIds: string[];
   importingType: Extract<AssetType, "person" | "garment"> | null;
+  onCollapse: () => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
   onRefresh: () => void;
   onSelectPerson: (assetId: string) => void;
@@ -1425,7 +1470,15 @@ function AssetLibrary({
     <aside className="asset-library">
       <div className="panel-title">
         <h2>资源库</h2>
-        <Menu size={18} />
+        <button
+          className="panel-collapse-button"
+          onClick={onCollapse}
+          title="折叠资源库"
+          type="button"
+          aria-label="折叠资源库"
+        >
+          <Menu size={18} />
+        </button>
       </div>
       <AssetSection
         title="人物图片"
@@ -2656,6 +2709,25 @@ function WorkbenchMessages({
   );
 }
 
+function PanelRestoreButton({
+  label,
+  side,
+  onClick,
+}: {
+  label: string;
+  side: "left" | "right";
+  onClick: () => void;
+}) {
+  return (
+    <aside className={`panel-restore panel-restore--${side}`}>
+      <button onClick={onClick} title={label} type="button" aria-label={label}>
+        {side === "left" ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
+        <span>{label.replace("展开", "")}</span>
+      </button>
+    </aside>
+  );
+}
+
 function InspectorPanel({
   apiKeyDraft,
   credentialStatus,
@@ -2672,6 +2744,7 @@ function InspectorPanel({
   selectedPerson,
   validationResult,
   onApiKeyDraftChange,
+  onCollapse,
   onImport,
   onModelSizeChange,
   onModeChange,
@@ -2696,6 +2769,7 @@ function InspectorPanel({
   selectedPerson: AssetFileView | null;
   validationResult: ValidateCombinationResponse | null;
   onApiKeyDraftChange: (value: string) => void;
+  onCollapse: () => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
   onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
   onModeChange: (mode: SidePanelMode) => void;
@@ -2715,7 +2789,15 @@ function InspectorPanel({
             当前选择： <strong>{nodeLabel}</strong>
           </p>
         </div>
-        <ChevronLeft size={18} />
+        <button
+          className="panel-collapse-button"
+          onClick={onCollapse}
+          title="折叠属性面板"
+          type="button"
+          aria-label="折叠属性面板"
+        >
+          <ChevronLeft size={18} />
+        </button>
       </div>
       <div className="tabs">
         <button
@@ -3259,9 +3341,11 @@ function TaskHistory({
 function BottomDashboard({
   currentCombination,
   latestTask,
+  onCollapse,
 }: {
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
+  onCollapse: () => void;
 }) {
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -3276,7 +3360,6 @@ function BottomDashboard({
   } as CSSProperties;
   const taskStatus = getGenerationTaskStatusLabel(task?.status);
   const taskSteps = buildTaskProgressSteps(task?.status);
-  const hasTask = Boolean(task);
   const canCancel = Boolean(task && isRunningTaskStatus(task.status) && !isCancelling);
   const cancellationNotice =
     cancelError ?? getCancellationNotice(task?.status, task?.cancelMode);
@@ -3306,10 +3389,16 @@ function BottomDashboard({
   return (
     <section className="bottom-dashboard">
       <div className="task-status">
-        <h2>
-          任务状态
+        <button
+          className="bottom-panel-collapse-button"
+          onClick={onCollapse}
+          title="折叠任务面板"
+          type="button"
+          aria-label="折叠任务面板"
+        >
+          <span>任务状态</span>
           <ChevronDown size={15} />
-        </h2>
+        </button>
         <div className="progress-layout">
           <div className="progress-ring">
             <svg viewBox="0 0 120 120">
@@ -3355,7 +3444,7 @@ function BottomDashboard({
             <CircleX size={15} />
             {isCancelling ? "取消中" : "取消任务"}
           </button>
-          <button className="toolbar-button" disabled={!hasTask} type="button">
+          <button className="toolbar-button" onClick={onCollapse} type="button">
             <Eye size={15} />
             最小化面板
           </button>
