@@ -109,9 +109,9 @@ type CanvasTool = "hand" | "select" | "grid";
 const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
 const CANVAS_MAX_ZOOM = 300;
-const CANVAS_ZOOM_STEP = 10;
-const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.15;
-const CANVAS_WHEEL_ZOOM_FRAME_LIMIT = 20;
+const CANVAS_ZOOM_LEVELS = [33, 50, 75, 100, 125, 150, 200, 300] as const;
+const CANVAS_WHEEL_ZOOM_EXPONENT = 1 / 500;
+const CANVAS_WHEEL_ZOOM_FRAME_FACTOR = 1.45;
 const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
 const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
@@ -1553,8 +1553,10 @@ function FlowWorkbench({
     panX: number;
     panY: number;
   } | null>(null);
+  const canvasInnerRef = useRef<HTMLDivElement | null>(null);
   const latestZoomRef = useRef(zoom);
-  const pendingWheelZoomDeltaRef = useRef(0);
+  const pendingWheelZoomFactorRef = useRef(1);
+  const pendingWheelZoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
   const wheelZoomRafRef = useRef<number | null>(null);
   const wheelIdleTimeoutRef = useRef<number | null>(null);
   const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
@@ -1590,21 +1592,45 @@ function FlowWorkbench({
     }, CANVAS_WHEEL_IDLE_DELAY_MS);
   }
 
-  function scheduleWheelZoom(zoomDelta: number) {
-    pendingWheelZoomDeltaRef.current += zoomDelta;
+  function adjustPanForZoomAnchor(anchor: { x: number; y: number }, zoomFactor: number) {
+    const canvasInner = canvasInnerRef.current;
+    if (!canvasInner) {
+      return;
+    }
+    const bounds = canvasInner.getBoundingClientRect();
+    const nextLeft = anchor.x - (anchor.x - bounds.left) * zoomFactor;
+    const nextTop = anchor.y - (anchor.y - bounds.top) * zoomFactor;
+    setPan((currentPan) => ({
+      x: currentPan.x + nextLeft - bounds.left,
+      y: currentPan.y + nextTop - bounds.top,
+    }));
+  }
+
+  function scheduleWheelZoom(zoomFactor: number, anchor: { x: number; y: number }) {
+    pendingWheelZoomFactorRef.current *= zoomFactor;
+    pendingWheelZoomAnchorRef.current = anchor;
     if (wheelZoomRafRef.current !== null) {
       return;
     }
     wheelZoomRafRef.current = window.requestAnimationFrame(() => {
       wheelZoomRafRef.current = null;
-      const frameDelta = clampValue(
-        pendingWheelZoomDeltaRef.current,
-        -CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
-        CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+      const frameFactor = clampValue(
+        pendingWheelZoomFactorRef.current,
+        1 / CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
+        CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
       );
-      pendingWheelZoomDeltaRef.current = 0;
-      if (frameDelta !== 0) {
-        onZoomChange(clampZoom(latestZoomRef.current + frameDelta));
+      const anchorPoint = pendingWheelZoomAnchorRef.current;
+      pendingWheelZoomFactorRef.current = 1;
+      pendingWheelZoomAnchorRef.current = null;
+      const currentZoom = latestZoomRef.current;
+      const nextZoom = clampZoom(currentZoom * frameFactor);
+      if (nextZoom !== currentZoom) {
+        const appliedZoomFactor = nextZoom / currentZoom;
+        if (anchorPoint) {
+          adjustPanForZoomAnchor(anchorPoint, appliedZoomFactor);
+        }
+        latestZoomRef.current = nextZoom;
+        onZoomChange(nextZoom);
       }
     });
   }
@@ -1614,7 +1640,10 @@ function FlowWorkbench({
     markWheelInteracting();
 
     if (event.ctrlKey || event.metaKey) {
-      scheduleWheelZoom(getWheelZoomDelta(event.deltaY, event.deltaMode));
+      scheduleWheelZoom(getWheelZoomFactor(event.deltaY, event.deltaMode), {
+        x: event.clientX,
+        y: event.clientY,
+      });
       return;
     }
 
@@ -1691,6 +1720,7 @@ function FlowWorkbench({
         onWheel={handleCanvasWheel}
       >
         <div
+          ref={canvasInnerRef}
           className="flow-canvas__inner"
           style={{
             transform: `translate(${pan.x}px, ${pan.y}px) translateY(-50%) scale(${canvasScale})`,
@@ -1873,11 +1903,11 @@ function CanvasToolbar({
         ))}
       </div>
       <div className="zoom-control" role="group" aria-label="缩放">
-        <button onClick={() => updateZoom(zoom - CANVAS_ZOOM_STEP)} type="button" aria-label="缩小">
+        <button onClick={() => updateZoom(getPreviousZoomLevel(zoom))} type="button" aria-label="缩小">
           <Minus size={16} />
         </button>
         <span>{zoomLabel}%</span>
-        <button onClick={() => updateZoom(zoom + CANVAS_ZOOM_STEP)} type="button" aria-label="放大">
+        <button onClick={() => updateZoom(getNextZoomLevel(zoom))} type="button" aria-label="放大">
           <Plus size={16} />
         </button>
       </div>
@@ -1976,6 +2006,25 @@ function clampZoom(zoom: number) {
   return Math.max(CANVAS_MIN_ZOOM, Math.min(CANVAS_MAX_ZOOM, zoom));
 }
 
+function getPreviousZoomLevel(zoom: number) {
+  for (let index = CANVAS_ZOOM_LEVELS.length - 1; index >= 0; index -= 1) {
+    const zoomLevel = CANVAS_ZOOM_LEVELS[index];
+    if (zoom > zoomLevel + 0.5) {
+      return zoomLevel;
+    }
+  }
+  return CANVAS_MIN_ZOOM;
+}
+
+function getNextZoomLevel(zoom: number) {
+  for (const zoomLevel of CANVAS_ZOOM_LEVELS) {
+    if (zoom < zoomLevel - 0.5) {
+      return zoomLevel;
+    }
+  }
+  return CANVAS_MAX_ZOOM;
+}
+
 function clampValue(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
@@ -1990,12 +2039,12 @@ function normalizeWheelDelta(delta: number, deltaMode: number) {
   return delta;
 }
 
-function getWheelZoomDelta(deltaY: number, deltaMode: number) {
+function getWheelZoomFactor(deltaY: number, deltaMode: number) {
   const normalizedDeltaY = normalizeWheelDelta(deltaY, deltaMode);
   return clampValue(
-    -normalizedDeltaY * CANVAS_WHEEL_ZOOM_SENSITIVITY,
-    -CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
-    CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+    2 ** (-normalizedDeltaY * CANVAS_WHEEL_ZOOM_EXPONENT),
+    1 / CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
+    CANVAS_WHEEL_ZOOM_FRAME_FACTOR,
   );
 }
 
