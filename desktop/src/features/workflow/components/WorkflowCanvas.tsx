@@ -8,7 +8,6 @@ import {
   type CSSProperties,
   type PointerEvent,
   type ReactNode,
-  type WheelEvent,
 } from "react";
 import {
   Archive,
@@ -1553,6 +1552,7 @@ function FlowWorkbench({
     panX: number;
     panY: number;
   } | null>(null);
+  const canvasShellRef = useRef<HTMLElement | null>(null);
   const canvasInnerRef = useRef<HTMLDivElement | null>(null);
   const latestZoomRef = useRef(zoom);
   const pendingWheelZoomFactorRef = useRef(1);
@@ -1580,6 +1580,17 @@ function FlowWorkbench({
     },
     [],
   );
+
+  useEffect(() => {
+    const canvasShell = canvasShellRef.current;
+    if (!canvasShell) {
+      return undefined;
+    }
+    canvasShell.addEventListener("wheel", handleCanvasWheel, { passive: false });
+    return () => {
+      canvasShell.removeEventListener("wheel", handleCanvasWheel);
+    };
+  });
 
   function markWheelInteracting() {
     setIsWheelInteracting(true);
@@ -1635,7 +1646,7 @@ function FlowWorkbench({
     });
   }
 
-  function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
+  function handleCanvasWheel(event: WheelEvent) {
     event.preventDefault();
     markWheelInteracting();
 
@@ -1700,6 +1711,7 @@ function FlowWorkbench({
 
   return (
     <section
+      ref={canvasShellRef}
       className={`canvas-shell canvas-shell--${canvasTool}${isPanning ? " is-panning" : ""}${
         isWheelInteracting ? " is-wheel-interacting" : ""
       }`}
@@ -1717,7 +1729,6 @@ function FlowWorkbench({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={stopCanvasDrag}
-        onWheel={handleCanvasWheel}
       >
         <div
           ref={canvasInnerRef}
@@ -1803,7 +1814,7 @@ function FlowWorkbench({
             onSelect={onNodeSelect}
           >
             <div className="flow-node__model">
-              <Box size={52} />
+              <Box size={44} />
             </div>
             <strong>{DEFAULT_MODEL_ID}</strong>
             <small>{modelSize} / {outputCount} 张</small>

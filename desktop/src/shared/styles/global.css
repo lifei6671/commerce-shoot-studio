@@ -1461,6 +1461,14 @@ button {
   left: 594px;
 }
 
+.flow-node[data-node-id="model"] .flow-node__body {
+  gap: 5px;
+}
+
+.flow-node[data-node-id="model"] .flow-node__model {
+  min-height: 94px;
+}
+
 .flow-node[data-node-id="execute"] {
   left: 792px;
 }
