@@ -4,6 +4,8 @@ import type {
   ImageCombination,
   ImageCombinationSummary,
   SaveImageCombinationRequest,
+  ValidateCombinationRequest,
+  ValidateCombinationResponse,
 } from "../model/combinationTypes";
 
 export async function saveImageCombination(
@@ -20,4 +22,10 @@ export async function getImageCombination(
 
 export async function listImageCombinations(): Promise<ImageCombinationSummary[]> {
   return invoke<ImageCombinationSummary[]>("list_image_combinations");
+}
+
+export async function validateCombination(
+  request: ValidateCombinationRequest,
+): Promise<ValidateCombinationResponse> {
+  return invoke<ValidateCombinationResponse>("validate_combination", { request });
 }

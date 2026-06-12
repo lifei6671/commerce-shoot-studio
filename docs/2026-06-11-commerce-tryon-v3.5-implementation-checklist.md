@@ -520,24 +520,24 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] `validate_combination` 支持 `draftCombination`。
-- [ ] `validate_combination` 支持 `draftPromptBinding`。
-- [ ] `validate_combination` 支持 `draftModelConfig`。
-- [ ] 请求包含 `revision`。
-- [ ] 前端只接受最新 revision 的校验结果。
-- [ ] 返回结构化 reasons、warnings、effective limits。
-- [ ] 本期不接入 LicenseGuard；授权与套餐限制第二期再接入。
+- [x] `validate_combination` 支持 `draftCombination`。
+- [x] `validate_combination` 支持 `draftPromptBinding`。
+- [x] `validate_combination` 支持 `draftModelConfig`。
+- [x] 请求包含 `revision`。
+- [x] 前端只接受最新 revision 的校验结果。
+- [x] 返回结构化 reasons、warnings、effective limits。
+- [x] 本期不接入 LicenseGuard；授权与套餐限制第二期再接入。
 
 **验证清单**：
 
 - [ ] 修改人物图后立即影响校验结果。
 - [ ] 修改服装图顺序后校验基于当前草稿。
-- [ ] 修改 Prompt 或模型参数后校验基于当前草稿。
-- [ ] 旧 revision 返回不会覆盖新 revision 的执行按钮状态。
+- [x] 修改 Prompt 或模型参数后校验基于当前草稿。
+- [x] 旧 revision 返回不会覆盖新 revision 的执行按钮状态。
 
 **退出条件**：
 
-- [ ] ExecuteNode 的可执行状态只来自 Rust 校验结果。
+- [x] ExecuteNode 的可执行状态只来自 Rust 校验结果。
 
 ---
 

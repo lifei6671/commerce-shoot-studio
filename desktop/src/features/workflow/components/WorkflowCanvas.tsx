@@ -49,7 +49,10 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { AssetType } from "../../assets/model/assetTypes";
-import type { ImageCombination } from "../../assets/model/combinationTypes";
+import type {
+  ImageCombination,
+  ValidateCombinationResponse,
+} from "../../assets/model/combinationTypes";
 import { importImage } from "../../assets/services/assetService";
 import {
   getImageCombination,
@@ -271,6 +274,7 @@ const edgeTypes = { flow: FlowEdge };
 
 export function WorkflowCanvas() {
   const [currentCombination, setCurrentCombination] = useState<ImageCombination | null>(null);
+  const validationResult = useWorkbenchStore((state) => state.validationResult);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -304,7 +308,7 @@ export function WorkflowCanvas() {
     };
   }, []);
 
-  const flowNodes = buildWorkflowNodes(currentCombination);
+  const flowNodes = buildWorkflowNodes(currentCombination, validationResult);
 
   return (
     <div className="desktop-frame">
@@ -351,8 +355,23 @@ export function WorkflowCanvas() {
   );
 }
 
-function buildWorkflowNodes(currentCombination: ImageCombination | null): Node<WorkflowNodeData>[] {
+function buildWorkflowNodes(
+  currentCombination: ImageCombination | null,
+  validationResult: ValidateCombinationResponse | null,
+): Node<WorkflowNodeData>[] {
   return baseNodes.map((node) => {
+    if (node.id === "execute") {
+      const executable = validationResult?.executable === true;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          subtitle: executable ? "就绪" : "待校验",
+          status: executable ? "ready" : "pending",
+        },
+      };
+    }
+
     if (node.id === "person" && currentCombination) {
       return {
         ...node,
