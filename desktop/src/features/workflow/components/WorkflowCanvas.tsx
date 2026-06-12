@@ -1174,39 +1174,18 @@ function ModalAssetPicker({
           {importLabel}
         </button>
       </div>
-      <div
-        className={`modal-dropzone ${assets.length ? "has-assets" : ""}`}
-        onClick={assets.length || isImporting ? undefined : onImport}
-        role={assets.length ? undefined : "button"}
-        tabIndex={assets.length ? undefined : 0}
-        onKeyDown={(event) => {
-          if (assets.length || isImporting) {
-            return;
-          }
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onImport();
-          }
-        }}
-      >
-        {assets.length ? (
+      {assets.length ? (
+        <div className="modal-dropzone has-assets">
           <div className="modal-resource-grid">
             {assets.slice(0, 8).map((asset) => (
-              <span
+              <button
                 className={selectedIds.includes(asset.asset.id) ? "is-selected" : ""}
                 key={asset.asset.id}
                 onClick={(event) => {
                   event.stopPropagation();
                   onSelect(asset.asset.id);
                 }}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelect(asset.asset.id);
-                  }
-                }}
+                type="button"
               >
                 <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
                 {selectedIds.includes(asset.asset.id) ? (
@@ -1214,17 +1193,24 @@ function ModalAssetPicker({
                     <CircleCheck size={13} fill="currentColor" />
                   </i>
                 ) : null}
-              </span>
+              </button>
             ))}
           </div>
-        ) : (
+        </div>
+      ) : (
+        <button
+          className="modal-dropzone modal-dropzone--empty"
+          disabled={isImporting}
+          onClick={onImport}
+          type="button"
+        >
           <>
             <Import size={30} />
             <span>{emptyText}</span>
             <small>点击这里从本地选择图片</small>
           </>
-        )}
-      </div>
+        </button>
+      )}
       <small className="modal-picker-hint">{helperText}</small>
     </div>
   );
