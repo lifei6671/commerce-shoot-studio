@@ -262,6 +262,7 @@ mod tests {
 
     use super::*;
     use crate::domain::task::APP_UNEXPECTED_SHUTDOWN;
+    use crate::services::task_runner::list_recent_generation_task_details;
 
     #[tokio::test]
     async fn initialize_creates_database_and_runs_startup_recovery() {
@@ -354,6 +355,77 @@ mod tests {
             .await
             .expect("gc count");
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn initialize_recovered_task_is_listed_as_recent() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = AppState::initialize_with_workspace(temp_dir.path().to_path_buf())
+            .await
+            .expect("initialize");
+
+        let mut writer = state.database().writer().await;
+        sqlx::query(
+            "INSERT INTO generation_tasks (
+                id,
+                status,
+                provider,
+                model_id,
+                combination_snapshot_json,
+                prompt_snapshot_json,
+                model_snapshot_json,
+                input_assets_snapshot_json,
+                input_snapshot_json,
+                final_prompt_snapshot_json,
+                model_config_snapshot_json,
+                asset_snapshot_json
+            ) VALUES (
+                'task-recovered-recent',
+                'calling_model',
+                'openai',
+                'gpt-image-1',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                '{}',
+                '{}',
+                '{}',
+                '[]'
+            )",
+        )
+        .execute(&mut *writer)
+        .await
+        .expect("insert task");
+        drop(writer);
+        drop(state);
+
+        let restarted = AppState::initialize_with_workspace(temp_dir.path().to_path_buf())
+            .await
+            .expect("restart");
+        let recent = list_recent_generation_task_details(
+            restarted.database(),
+            restarted.workspace_paths(),
+            10,
+        )
+        .await
+        .expect("recent tasks");
+        let recovered = recent
+            .iter()
+            .find(|detail| detail.task.id == "task-recovered-recent")
+            .expect("recovered task");
+
+        assert_eq!(recovered.task.status, "failed");
+        let row = sqlx::query(
+            "SELECT error_code FROM generation_tasks WHERE id = 'task-recovered-recent'",
+        )
+        .fetch_one(restarted.database().pool())
+        .await
+        .expect("task row");
+        assert_eq!(
+            row.get::<Option<String>, _>("error_code"),
+            Some(APP_UNEXPECTED_SHUTDOWN.to_string())
+        );
     }
 
     #[tokio::test]

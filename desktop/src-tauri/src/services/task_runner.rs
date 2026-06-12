@@ -1262,7 +1262,7 @@ mod tests {
     };
     use crate::providers::provider_trait::{
         GenerateInput, GenerateResult, GeneratedImage, ImageGenerationProvider, ProviderError,
-        RemoteCancelResult,
+        ProviderErrorCode, RemoteCancelResult,
     };
     use crate::services::assets::import_image_file;
     use crate::services::combinations::save_image_combination_request;
@@ -1845,6 +1845,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_generation_flow_saves_failure_reason() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+
+        let result = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &FailingProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_provider_failed".to_string()),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        let row = sqlx::query(
+            "SELECT status, error_code, error_message
+             FROM generation_tasks
+             WHERE id = 'task_provider_failed'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("failed task");
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(
+            row.get::<Option<String>, _>("error_code").as_deref(),
+            Some("INVALID_INPUT")
+        );
+        assert!(row
+            .get::<Option<String>, _>("error_message")
+            .expect("error message")
+            .contains("provider unavailable"));
+    }
+
     #[test]
     fn sanitize_source_url_drops_signed_or_sensitive_urls() {
         assert_eq!(
@@ -2038,6 +2083,33 @@ mod tests {
             Box::pin(async move {
                 assert_eq!(task_id, "task_cancel_remote");
                 Ok(RemoteCancelResult::Confirmed)
+            })
+        }
+    }
+
+    struct FailingProvider;
+
+    impl ImageGenerationProvider for FailingProvider {
+        fn provider_name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn generate<'a>(
+            &'a self,
+            input: GenerateInput,
+            _api_key: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Err(ProviderError::new(
+                    "openai",
+                    Some(input.model_id),
+                    ProviderErrorCode::RemoteError,
+                    "provider unavailable",
+                ))
             })
         }
     }
