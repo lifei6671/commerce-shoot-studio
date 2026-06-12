@@ -1,22 +1,8 @@
-import {
-  Background,
-  BackgroundVariant,
-  BaseEdge,
-  EdgeLabelRenderer,
-  Handle,
-  Node,
-  Position,
-  ReactFlow,
-  getBezierPath,
-  type EdgeProps,
-  type NodeProps,
-} from "@xyflow/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Archive,
-  Box,
   BriefcaseBusiness,
   ChevronDown,
   ChevronLeft,
@@ -29,14 +15,11 @@ import {
   Eye,
   FileText,
   FolderOpen,
-  Hand,
   ImageIcon,
   Import,
-  LayoutGrid,
+  KeyRound,
   Menu,
   Minus,
-  MousePointer2,
-  PanelRightClose,
   Play,
   Plus,
   RefreshCw,
@@ -46,26 +29,27 @@ import {
   SlidersHorizontal,
   UserRound,
   X,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react";
 import type { AssetFileView, AssetType } from "../../assets/model/assetTypes";
 import type {
   ImageCombination,
   ValidateCombinationResponse,
 } from "../../assets/model/combinationTypes";
-import {
-  getAsset,
-  importImage,
-  listAssets,
-} from "../../assets/services/assetService";
+import { getAsset, importImage, listAssets } from "../../assets/services/assetService";
 import {
   getImageCombination,
   listImageCombinations,
   saveImageCombination,
   validateCombination,
 } from "../../assets/services/combinationService";
-import type { SaveModelConfigRequest } from "../../model-config/model/modelTypes";
+import type {
+  ProviderCredentialStatus,
+  SaveModelConfigRequest,
+} from "../../model-config/model/modelTypes";
+import {
+  getProviderCredentialStatus,
+  setProviderApiKey,
+} from "../../model-config/services/modelService";
 import type { SavePromptBindingRequest } from "../../prompt/model/promptTypes";
 import { savePromptBinding } from "../../prompt/services/promptService";
 import type {
@@ -84,235 +68,31 @@ import {
   startGeneration,
 } from "../../generation-task/services/taskService";
 import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
-import { useWorkbenchStore } from "../store/workflowStore";
-import type { Asset, WorkflowNodeData } from "../model/workflowTypes";
-import "@xyflow/react/dist/style.css";
-
-const DEFAULT_MODEL_CONFIG: SaveModelConfigRequest = {
-  provider: "openai",
-  modelId: "gpt-image-1",
-  paramsJson: {
-    outputCount: 1,
-    size: "1024x1024",
-  },
-};
 
 const DEFAULT_PROMPT_TEXT =
   "Create a clean commercial fashion try-on image. Preserve the person's identity and pose, apply the selected garments naturally, keep realistic fabric texture, studio lighting, and ecommerce-ready composition.";
 
-const baseNodes: Node<WorkflowNodeData>[] = [
-  {
-    id: "person",
-    type: "workflow",
-    position: { x: 28, y: 146 },
-    data: {
-      title: "人物图",
-      subtitle: "未选择",
-      tone: "person",
-      status: "pending",
-    },
-  },
-  {
-    id: "garments",
-    type: "workflow",
-    position: { x: 214, y: 146 },
-    data: {
-      title: "服装图组",
-      subtitle: "未选择",
-      tone: "garment",
-      status: "pending",
-    },
-  },
-  {
-    id: "prompt",
-    type: "workflow",
-    position: { x: 400, y: 146 },
-    data: {
-      title: "Prompt",
-      subtitle: "已准备",
-      tone: "prompt",
-      status: "done",
-    },
-  },
-  {
-    id: "model",
-    type: "workflow",
-    position: { x: 586, y: 146 },
-    data: {
-      title: "模型",
-      subtitle: "GPT Image 1",
-      tone: "model",
-      status: "done",
-    },
-  },
-  {
-    id: "execute",
-    type: "workflow",
-    position: { x: 772, y: 146 },
-    data: {
-      title: "执行",
-      subtitle: "待校验",
-      tone: "execute",
-      status: "pending",
-    },
-  },
-  {
-    id: "result",
-    type: "workflow",
-    position: { x: 958, y: 146 },
-    data: {
-      title: "结果",
-      subtitle: "待生成",
-      tone: "result",
-      status: "pending",
-    },
-  },
-];
+const DEFAULT_MODEL_ID = "gpt-image-1";
+const DEFAULT_PROVIDER = "openai";
+const MODEL_SIZES = ["1024x1024", "1024x1536", "1536x1024"] as const;
 
-const edges = [
-  { id: "person-garments", source: "person", target: "garments", type: "flow" },
-  { id: "garments-prompt", source: "garments", target: "prompt", type: "flow" },
-  { id: "prompt-model", source: "prompt", target: "model", type: "flow" },
-  { id: "model-execute", source: "model", target: "execute", type: "flow" },
-  { id: "execute-result", source: "execute", target: "result", type: "flow" },
-];
+type SelectableAsset = {
+  id: string;
+  imageSrc?: string;
+  label: string;
+  selected?: boolean;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+  createdAt?: string;
+};
 
-function FlowEdge(props: EdgeProps) {
-  const [edgePath] = getBezierPath(props);
+type SidePanelMode = "summary" | "settings" | "history";
 
-  return (
-    <>
-      <BaseEdge path={edgePath} markerEnd={props.markerEnd} className="flow-edge" />
-      <EdgeLabelRenderer>
-        <span
-          className="flow-edge__arrow"
-          style={{
-            transform: `translate(-50%, -50%) translate(${props.targetX - 16}px, ${props.targetY}px)`,
-          }}
-        >
-          <ChevronRight size={16} />
-        </span>
-      </EdgeLabelRenderer>
-    </>
-  );
+// Backwards-compatible export for the node wrapper files.
+export function WorkflowNode() {
+  return null;
 }
-
-export function WorkflowNode({ data, selected }: NodeProps<Node<WorkflowNodeData>>) {
-  const setSelectedNode = useWorkbenchStore((state) => state.setSelectedNode);
-
-  return (
-    <button
-      className={`workflow-node workflow-node--${data.tone} ${selected ? "is-selected" : ""}`}
-      onClick={() => setSelectedNode(data.tone === "garment" ? "garments" : data.tone)}
-      type="button"
-    >
-      <Handle type="target" position={Position.Left} className="node-handle" />
-      <span className="workflow-node__status">
-        {data.status === "pending" ? (
-          <Clock3 size={13} />
-        ) : data.status === "ready" ? (
-          <Play size={13} fill="currentColor" />
-        ) : (
-          <CircleCheck size={14} fill="currentColor" />
-        )}
-      </span>
-      <span className="workflow-node__title">{data.title}</span>
-      <span className="workflow-node__subtitle">{data.subtitle}</span>
-      <WorkflowNodeBody data={data} />
-      <Handle type="source" position={Position.Right} className="node-handle" />
-    </button>
-  );
-}
-
-function WorkflowNodeBody({ data }: { data: WorkflowNodeData }) {
-  const assets = data.assets ?? [];
-  if (data.tone === "person") {
-    const asset = assets[0];
-    return (
-      <div className="workflow-node__image-card">
-        {asset ? <AssetImage asset={asset} /> : <NodeEmpty icon={<UserRound size={38} />} label="导入人物图" />}
-        {asset ? (
-          <>
-            <span>{asset.label}</span>
-            <strong>{formatDimensions(asset.width, asset.height)}</strong>
-          </>
-        ) : null}
-      </div>
-    );
-  }
-
-  if (data.tone === "garment") {
-    return (
-      <div className="workflow-node__garments">
-        {assets.slice(0, 4).map((asset) => (
-          <AssetImage asset={asset} key={asset.id} />
-        ))}
-        {!assets.length ? <NodeEmpty icon={<BriefcaseBusiness size={30} />} label="导入服装图" /> : null}
-        <span>{assets.length} 张</span>
-      </div>
-    );
-  }
-
-  if (data.tone === "prompt") {
-    return (
-      <div className="workflow-node__prompt">
-        <FileText size={58} strokeWidth={1.25} />
-        <span>{data.details?.[0] ?? "用户 Prompt"}</span>
-        <strong>{data.details?.[1] ?? "0 字符"}</strong>
-      </div>
-    );
-  }
-
-  if (data.tone === "model") {
-    return (
-      <div className="workflow-node__model">
-        <Box size={56} strokeWidth={1.6} />
-        <span>{data.details?.[0] ?? DEFAULT_MODEL_CONFIG.modelId}</span>
-        <strong>{data.details?.[1] ?? "1024 x 1024"}</strong>
-        <strong>{data.details?.[2] ?? "生成数量：1"}</strong>
-      </div>
-    );
-  }
-
-  if (data.tone === "execute") {
-    return (
-      <div className="workflow-node__execute">
-        <span className="workflow-node__play">
-          <Play size={34} fill="currentColor" />
-        </span>
-        <strong>{data.actionLabel ?? "等待输入"}</strong>
-        <span>{data.details?.[0] ?? "完成校验后可执行"}</span>
-      </div>
-    );
-  }
-
-  if (data.results?.length) {
-    return (
-      <div className="workflow-node__result">
-        <div className="workflow-node__result-thumbs">
-          {data.results.slice(0, 3).map((result) => (
-            <img
-              alt="生成结果"
-              key={result.assetId}
-              src={convertFileSrc(result.thumbFilePath)}
-            />
-          ))}
-        </div>
-        <span>{data.results.length} 张结果</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="workflow-node__result">
-      <ImageIcon size={54} />
-      <span>等待生成结果</span>
-    </div>
-  );
-}
-
-const nodeTypes = { workflow: WorkflowNode };
-const edgeTypes = { flow: FlowEdge };
 
 export function WorkflowCanvas() {
   const [currentCombination, setCurrentCombination] = useState<ImageCombination | null>(null);
@@ -321,32 +101,54 @@ export function WorkflowCanvas() {
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<string[]>([]);
   const [promptText, setPromptText] = useState(DEFAULT_PROMPT_TEXT);
+  const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("1024x1024");
+  const [outputCount, setOutputCount] = useState(1);
+  const [credentialStatus, setCredentialStatus] =
+    useState<ProviderCredentialStatus | null>(null);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [loadingError, setLoadingError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [importingType, setImportingType] = useState<Extract<AssetType, "person" | "garment"> | null>(null);
+  const [importingType, setImportingType] =
+    useState<Extract<AssetType, "person" | "garment"> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
-  const validationResult = useWorkbenchStore((state) => state.validationResult);
-  const nextValidationRevision = useWorkbenchStore((state) => state.nextValidationRevision);
-  const acceptValidationResult = useWorkbenchStore((state) => state.acceptValidationResult);
+  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  const [validationResult, setValidationResult] =
+    useState<ValidateCombinationResponse | null>(null);
+  const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("summary");
   const latestTask = useGenerationTaskStore((state) => state.latestTask);
   const recentTasks = useGenerationTaskStore((state) => state.recentTasks);
   const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
   const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
   const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
 
+  const modelConfig = useMemo<SaveModelConfigRequest>(
+    () => ({
+      provider: DEFAULT_PROVIDER,
+      modelId: DEFAULT_MODEL_ID,
+      paramsJson: {
+        outputCount,
+        size: modelSize,
+      },
+    }),
+    [modelSize, outputCount],
+  );
+
   const selectedPerson = useMemo(
     () => people.find((asset) => asset.asset.id === selectedPersonId) ?? null,
     [people, selectedPersonId],
   );
   const selectedGarments = useMemo(
-    () => selectedGarmentIds
-      .map((id) => garments.find((asset) => asset.asset.id === id))
-      .filter((asset): asset is AssetFileView => Boolean(asset)),
+    () =>
+      selectedGarmentIds
+        .map((id) => garments.find((asset) => asset.asset.id === id))
+        .filter((asset): asset is AssetFileView => Boolean(asset)),
     [garments, selectedGarmentIds],
   );
   const resultAssets = latestTask?.results ?? [];
+  const canRun = validationResult?.executable === true && !isStarting && !isSaving;
+  const combinationName = currentCombination?.name ?? "未保存组合";
 
   async function refreshTaskLists() {
     const [runningTasks, recentTasks] = await Promise.all([
@@ -366,54 +168,49 @@ export function WorkflowCanvas() {
     setGarments(garmentAssets);
   }
 
+  async function refreshCredentialStatus() {
+    const status = await getProviderCredentialStatus(DEFAULT_PROVIDER);
+    setCredentialStatus(status);
+  }
+
+  async function refreshWorkbenchData() {
+    const [personAssets, garmentAssets, combinations] = await Promise.all([
+      listAssets("person"),
+      listAssets("garment"),
+      listImageCombinations(),
+      refreshTaskLists(),
+      refreshCredentialStatus(),
+    ]);
+    setPeople(personAssets);
+    setGarments(garmentAssets);
+
+    const latest = combinations[0];
+    if (!latest) {
+      setCurrentCombination(null);
+      setSelectedPersonId(null);
+      setSelectedGarmentIds([]);
+      setLatestTask(null);
+      return;
+    }
+
+    const combination = await getImageCombination(latest.id);
+    setCurrentCombination(combination);
+    setSelectedPersonId(combination?.personAssetId ?? null);
+    setSelectedGarmentIds(combination?.garmentAssetIds ?? []);
+
+    if (combination) {
+      setLatestTask(await getLatestGenerationTaskByCombination(combination.id));
+    }
+  }
+
   useEffect(() => {
     if (!isTauriRuntime()) {
       return;
     }
 
     let canceled = false;
-
-    async function loadWorkbench() {
-      setLoadingError(null);
-      const [personAssets, garmentAssets, combinations] = await Promise.all([
-        listAssets("person"),
-        listAssets("garment"),
-        listImageCombinations(),
-        refreshTaskLists(),
-      ]);
-
-      if (canceled) {
-        return;
-      }
-      setPeople(personAssets);
-      setGarments(garmentAssets);
-
-      const latest = combinations[0];
-      if (!latest) {
-        setCurrentCombination(null);
-        setSelectedPersonId(null);
-        setSelectedGarmentIds([]);
-        setLatestTask(null);
-        return;
-      }
-
-      const combination = await getImageCombination(latest.id);
-      if (canceled) {
-        return;
-      }
-      setCurrentCombination(combination);
-      setSelectedPersonId(combination?.personAssetId ?? null);
-      setSelectedGarmentIds(combination?.garmentAssetIds ?? []);
-
-      if (combination) {
-        const task = await getLatestGenerationTaskByCombination(combination.id);
-        if (!canceled) {
-          setLatestTask(task);
-        }
-      }
-    }
-
-    loadWorkbench().catch((error) => {
+    setLoadingError(null);
+    refreshWorkbenchData().catch((error) => {
       if (!canceled) {
         setLoadingError(error instanceof Error ? error.message : "加载工作台失败");
         setCurrentCombination(null);
@@ -432,9 +229,8 @@ export function WorkflowCanvas() {
     }
 
     let canceled = false;
-    const revision = nextValidationRevision();
     validateCombination({
-      revision,
+      revision: Date.now(),
       draftCombination: {
         id: currentCombination?.id,
         name: currentCombination?.name ?? buildCombinationName(),
@@ -442,15 +238,16 @@ export function WorkflowCanvas() {
         garmentAssetIds: selectedGarmentIds,
       },
       draftPromptBinding: buildPromptBinding(currentCombination?.id ?? "draft", promptText),
-      draftModelConfig: DEFAULT_MODEL_CONFIG,
+      draftModelConfig: modelConfig,
     })
       .then((result) => {
         if (!canceled) {
-          acceptValidationResult(result);
+          setValidationResult(result);
         }
       })
       .catch((error) => {
         if (!canceled) {
+          setValidationResult(null);
           setActionError(error instanceof Error ? error.message : "校验组合失败");
         }
       });
@@ -459,10 +256,9 @@ export function WorkflowCanvas() {
       canceled = true;
     };
   }, [
-    acceptValidationResult,
     currentCombination?.id,
     currentCombination?.name,
-    nextValidationRevision,
+    modelConfig,
     promptText,
     selectedGarmentIds,
     selectedPersonId,
@@ -533,7 +329,9 @@ export function WorkflowCanvas() {
         setSelectedPersonId(view.asset.id);
       } else {
         setGarments((items) => upsertAsset(items, view));
-        setSelectedGarmentIds((ids) => [view.asset.id, ...ids.filter((id) => id !== view.asset.id)].slice(0, 4));
+        setSelectedGarmentIds((ids) =>
+          [view.asset.id, ...ids.filter((id) => id !== view.asset.id)].slice(0, 4),
+        );
       }
       setActionMessage(response.duplicate ? "已选择已存在的相同图片" : "图片导入成功");
     } catch (error) {
@@ -548,10 +346,8 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     try {
-      const saved = await persistCurrentCombination();
-      if (saved) {
-        setActionMessage("组合已保存");
-      }
+      await persistCurrentCombination();
+      setActionMessage("组合已保存");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "保存组合失败");
     } finally {
@@ -565,15 +361,12 @@ export function WorkflowCanvas() {
     setActionMessage(null);
     try {
       const saved = await persistCurrentCombination();
-      if (!saved) {
-        return;
-      }
       const promptBinding = buildPromptBinding(saved.id, promptText);
       await savePromptBinding(promptBinding);
       const task = await startGeneration({
         combinationId: saved.id,
         draftPromptBinding: promptBinding,
-        draftModelConfig: DEFAULT_MODEL_CONFIG,
+        draftModelConfig: modelConfig,
       });
       const detail = await getGenerationTaskDetail(task.id);
       setLatestTask(detail ?? { task, results: [] });
@@ -586,12 +379,31 @@ export function WorkflowCanvas() {
     }
   }
 
+  async function handleSaveApiKey() {
+    setIsSavingApiKey(true);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      await setProviderApiKey(DEFAULT_PROVIDER, apiKeyDraft);
+      await refreshCredentialStatus();
+      setApiKeyDraft("");
+      setActionMessage("API Key 已保存到系统密钥库");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "保存 API Key 失败");
+    } finally {
+      setIsSavingApiKey(false);
+    }
+  }
+
   async function persistCurrentCombination() {
     if (!selectedPersonId) {
       throw new Error("请先选择人物图片");
     }
     if (!selectedGarmentIds.length) {
       throw new Error("请至少选择一张服装图片");
+    }
+    if (!promptText.trim()) {
+      throw new Error("请填写 Prompt");
     }
 
     const saved = await saveImageCombination({
@@ -624,15 +436,15 @@ export function WorkflowCanvas() {
     });
   }
 
-  const flowNodes = buildWorkflowNodes({
-    selectedPerson,
-    selectedGarments,
-    promptText,
-    validationResult,
-    latestTask,
-  });
-  const canRun = validationResult?.executable === true && !isStarting && !isSaving;
-  const combinationName = currentCombination?.name ?? "未保存组合";
+  function handleRefreshAll() {
+    setActionError(null);
+    setActionMessage(null);
+    Promise.all([refreshAssets(), refreshTaskLists(), refreshCredentialStatus()])
+      .then(() => setActionMessage("工作台已刷新"))
+      .catch((error) =>
+        setActionError(error instanceof Error ? error.message : "刷新工作台失败"),
+      );
+  }
 
   return (
     <div className="desktop-frame">
@@ -643,7 +455,11 @@ export function WorkflowCanvas() {
           canRun={canRun}
           isSaving={isSaving}
           isStarting={isStarting}
+          onHistory={() => setSidePanelMode("history")}
+          onModelSettings={() => setSidePanelMode("settings")}
           onNew={handleNewCombination}
+          onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
+          onRefresh={handleRefreshAll}
           onSave={() => {
             void handleSaveCombination();
           }}
@@ -651,7 +467,7 @@ export function WorkflowCanvas() {
             void handleStartGeneration();
           }}
         />
-        <div className="workbench__body">
+        <div className="workbench__body workbench__body--app">
           <AssetLibrary
             people={people}
             garments={garments}
@@ -662,53 +478,106 @@ export function WorkflowCanvas() {
             onImport={(assetType) => {
               void handleImport(assetType);
             }}
-            onRefresh={() => {
-              void Promise.all([refreshAssets(), refreshTaskLists()]);
-            }}
+            onRefresh={handleRefreshAll}
             onSelectPerson={setSelectedPersonId}
             onToggleGarment={toggleGarment}
           />
-          <div className="canvas-column">
-            <main className="canvas-shell">
-              <CanvasToolbar validationResult={validationResult} />
-              <ReactFlow
-                nodes={flowNodes}
-                edges={edges}
-                nodeTypes={nodeTypes}
-                edgeTypes={edgeTypes}
-                fitView
-                fitViewOptions={{ padding: 0.16 }}
-                nodesDraggable={false}
-                nodesConnectable={false}
-                elementsSelectable
-                panOnDrag={false}
-                zoomOnScroll={false}
-                zoomOnPinch={false}
-                zoomOnDoubleClick={false}
-                proOptions={{ hideAttribution: true }}
-              >
-                <Background
-                  variant={BackgroundVariant.Dots}
-                  gap={16}
-                  size={1}
-                  color="#d5dbe6"
-                />
-              </ReactFlow>
-              <MinimapMock />
-            </main>
-            <WorkbenchMessages loadingError={loadingError} actionError={actionError} actionMessage={actionMessage} />
-            <BottomDashboard currentCombination={currentCombination} latestTask={latestTask} />
-          </div>
-          <PropertyPanel
+          <main className="generation-workbench">
+            <WorkbenchMessages
+              loadingError={loadingError}
+              actionError={actionError}
+              actionMessage={actionMessage}
+            />
+            <ComposerHeader
+              credentialStatus={credentialStatus}
+              latestTask={latestTask}
+              selectedGarmentCount={selectedGarments.length}
+              selectedPerson={selectedPerson}
+              validationResult={validationResult}
+            />
+            <section className="composer-grid">
+              <AssetInputCard
+                asset={selectedPerson}
+                icon={<UserRound size={28} />}
+                isImporting={importingType === "person"}
+                title="人物图片"
+                description="选择一张主体人物图，后续生成会保持人物身份和姿态。"
+                actionLabel={selectedPerson ? "替换人物图" : "导入人物图"}
+                onImport={() => {
+                  void handleImport("person");
+                }}
+              />
+              <GarmentInputCard
+                garments={selectedGarments}
+                isImporting={importingType === "garment"}
+                onImport={() => {
+                  void handleImport("garment");
+                }}
+                onRemove={(assetId) => toggleGarment(assetId)}
+              />
+              <PromptEditorCard promptText={promptText} onPromptChange={setPromptText} />
+              <ModelSettingsCard
+                apiKeyDraft={apiKeyDraft}
+                credentialStatus={credentialStatus}
+                isSavingApiKey={isSavingApiKey}
+                modelSize={modelSize}
+                outputCount={outputCount}
+                onApiKeyDraftChange={setApiKeyDraft}
+                onModelSizeChange={setModelSize}
+                onOutputCountChange={setOutputCount}
+                onSaveApiKey={() => {
+                  void handleSaveApiKey();
+                }}
+              />
+            </section>
+            <section className="execution-strip">
+              <ValidationSummary validationResult={validationResult} />
+              <div className="execution-actions">
+                <button
+                  className="toolbar-button"
+                  disabled={isSaving}
+                  onClick={() => {
+                    void handleSaveCombination();
+                  }}
+                  type="button"
+                >
+                  <Save size={16} />
+                  {isSaving ? "保存中" : "保存组合"}
+                </button>
+                <button
+                  className="run-button"
+                  disabled={!canRun}
+                  onClick={() => {
+                    void handleStartGeneration();
+                  }}
+                  type="button"
+                >
+                  <Play size={17} fill="currentColor" />
+                  {isStarting ? "提交中" : "执行生成"}
+                </button>
+              </div>
+            </section>
+            <section className="result-workspace">
+              <BottomDashboard currentCombination={currentCombination} latestTask={latestTask} />
+              <ResultPreview results={resultAssets} />
+            </section>
+          </main>
+          <InspectorPanel
+            apiKeyDraft={apiKeyDraft}
+            credentialStatus={credentialStatus}
             currentCombination={currentCombination}
-            selectedPerson={selectedPerson}
-            selectedGarments={selectedGarments}
-            promptText={promptText}
-            validationResult={validationResult}
+            mode={sidePanelMode}
             recentTasks={recentTasks}
-            onPromptChange={setPromptText}
+            selectedGarments={selectedGarments}
+            selectedPerson={selectedPerson}
+            validationResult={validationResult}
+            onApiKeyDraftChange={setApiKeyDraft}
             onImport={(assetType) => {
               void handleImport(assetType);
+            }}
+            onModeChange={setSidePanelMode}
+            onSaveApiKey={() => {
+              void handleSaveApiKey();
             }}
             onTaskChanged={(detail) => {
               setLatestTask(detail);
@@ -720,109 +589,6 @@ export function WorkflowCanvas() {
       <StatusBar />
     </div>
   );
-}
-
-function buildWorkflowNodes({
-  selectedPerson,
-  selectedGarments,
-  promptText,
-  validationResult,
-  latestTask,
-}: {
-  selectedPerson: AssetFileView | null;
-  selectedGarments: AssetFileView[];
-  promptText: string;
-  validationResult: ValidateCombinationResponse | null;
-  latestTask: GenerationTaskDetail | null;
-}): Node<WorkflowNodeData>[] {
-  return baseNodes.map((node) => {
-    if (node.id === "person") {
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          subtitle: selectedPerson ? "已选择 1 张" : "未选择",
-          status: selectedPerson ? "done" : "pending",
-          assets: selectedPerson ? [toWorkflowAsset(selectedPerson, true)] : [],
-        },
-      };
-    }
-
-    if (node.id === "garments") {
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          subtitle: selectedGarments.length ? `${selectedGarments.length} 张` : "未选择",
-          status: selectedGarments.length ? "done" : "pending",
-          assets: selectedGarments.map((asset) => toWorkflowAsset(asset, true)),
-        },
-      };
-    }
-
-    if (node.id === "prompt") {
-      const promptLength = promptText.trim().length;
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          subtitle: promptLength ? "已配置" : "未配置",
-          status: promptLength ? "done" : "pending",
-          details: ["用户 Prompt", `${promptLength} 字符`],
-        },
-      };
-    }
-
-    if (node.id === "model") {
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          details: [
-            DEFAULT_MODEL_CONFIG.modelId,
-            String(DEFAULT_MODEL_CONFIG.paramsJson.size).replace("x", " x "),
-            `生成数量：${DEFAULT_MODEL_CONFIG.paramsJson.outputCount}`,
-          ],
-        },
-      };
-    }
-
-    if (node.id === "execute") {
-      const executable = validationResult?.executable === true;
-      const firstReason = validationResult?.reasons[0]?.message;
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          subtitle: executable ? "就绪" : "待处理",
-          status: executable ? "ready" : "pending",
-          actionLabel: executable ? "可以执行生成" : "输入未完整",
-          details: [executable ? "将保存组合并提交任务" : firstReason ?? "等待校验"],
-        },
-      };
-    }
-
-    if (node.id === "result") {
-      const results = latestTask?.results.map((result) => ({
-        assetId: result.assetId,
-        thumbFilePath: result.thumbFilePath,
-        width: result.width,
-        height: result.height,
-      }));
-      const hasResults = Boolean(results?.length);
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          subtitle: hasResults ? `${results?.length ?? 0} 张` : "待生成",
-          status: hasResults ? "done" : "pending",
-          results,
-        },
-      };
-    }
-
-    return node;
-  });
 }
 
 function isTauriRuntime() {
@@ -872,7 +638,7 @@ function upsertAsset(items: AssetFileView[], asset: AssetFileView) {
   return [asset, ...items.filter((item) => item.asset.id !== asset.asset.id)];
 }
 
-function toWorkflowAsset(view: AssetFileView, selected: boolean): Asset {
+function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAsset {
   return {
     id: view.asset.id,
     imageSrc: convertFileSrc(view.thumbFilePath),
@@ -910,7 +676,11 @@ function TopToolbar({
   canRun,
   isSaving,
   isStarting,
+  onHistory,
+  onModelSettings,
   onNew,
+  onPromptTemplate,
+  onRefresh,
   onSave,
   onRun,
 }: {
@@ -918,7 +688,11 @@ function TopToolbar({
   canRun: boolean;
   isSaving: boolean;
   isStarting: boolean;
+  onHistory: () => void;
+  onModelSettings: () => void;
   onNew: () => void;
+  onPromptTemplate: () => void;
+  onRefresh: () => void;
   onSave: () => void;
   onRun: () => void;
 }) {
@@ -940,17 +714,17 @@ function TopToolbar({
           onClick={onSave}
           disabled={isSaving}
         />
-        <ToolbarButton icon={<FolderOpen size={16} />} label="打开历史" disabled />
-        <ToolbarButton icon={<Settings size={16} />} label="模型设置" disabled />
-        <ToolbarButton icon={<Copy size={16} />} label="Prompt 模板" disabled />
-        <ToolbarButton icon={<SlidersHorizontal size={16} />} label="工作区设置" disabled />
+        <ToolbarButton icon={<FolderOpen size={16} />} label="打开历史" onClick={onHistory} />
+        <ToolbarButton icon={<Settings size={16} />} label="模型设置" onClick={onModelSettings} />
+        <ToolbarButton icon={<Copy size={16} />} label="应用默认 Prompt" onClick={onPromptTemplate} />
+        <ToolbarButton icon={<SlidersHorizontal size={16} />} label="刷新工作区" onClick={onRefresh} />
       </div>
       <div className="toolbar-spacer" />
       <button className="icon-button is-muted" disabled type="button" aria-label="撤销">
         <RotateCcw size={18} />
       </button>
-      <button className="icon-button is-muted" disabled type="button" aria-label="重做">
-        <RotateCcw size={18} className="flip-x" />
+      <button className="icon-button" onClick={onRefresh} type="button" aria-label="刷新">
+        <RefreshCw size={18} />
       </button>
       <button className="run-button" disabled={!canRun} onClick={onRun} type="button">
         <Play size={17} fill="currentColor" />
@@ -1014,7 +788,7 @@ function AssetLibrary({
       <AssetSection
         title="人物图片"
         count={people.length}
-        assets={people.map((asset) => toWorkflowAsset(asset, asset.asset.id === selectedPersonId))}
+        assets={people.map((asset) => toSelectableAsset(asset, asset.asset.id === selectedPersonId))}
         accent="green"
         action="导入"
         isImporting={importingType === "person"}
@@ -1024,7 +798,9 @@ function AssetLibrary({
       <AssetSection
         title="服装图片"
         count={garments.length}
-        assets={garments.map((asset) => toWorkflowAsset(asset, selectedGarmentIds.includes(asset.asset.id)))}
+        assets={garments.map((asset) =>
+          toSelectableAsset(asset, selectedGarmentIds.includes(asset.asset.id)),
+        )}
         accent="green"
         action="导入"
         isImporting={importingType === "garment"}
@@ -1045,9 +821,9 @@ function AssetLibrary({
         action="刷新"
         onAction={onRefresh}
       />
-      <button className="all-assets" disabled type="button">
+      <button className="all-assets" onClick={onRefresh} type="button">
         <Archive size={16} />
-        全部资源
+        刷新全部资源
         <ChevronRight size={16} />
       </button>
     </aside>
@@ -1066,7 +842,7 @@ function AssetSection({
 }: {
   title: string;
   count: number;
-  assets: Asset[];
+  assets: SelectableAsset[];
   accent: "green" | "blue";
   action: "导入" | "刷新";
   isImporting?: boolean;
@@ -1111,7 +887,12 @@ function AssetSection({
           </div>
         )}
         {action === "导入" ? (
-          <button className="asset-thumb asset-thumb--add" onClick={onAction} type="button" aria-label={`添加${title}`}>
+          <button
+            className="asset-thumb asset-thumb--add"
+            onClick={onAction}
+            type="button"
+            aria-label={`添加${title}`}
+          >
             <Plus size={22} />
           </button>
         ) : null}
@@ -1120,51 +901,296 @@ function AssetSection({
   );
 }
 
-function CanvasToolbar({ validationResult }: { validationResult: ValidateCombinationResponse | null }) {
-  const executable = validationResult?.executable === true;
+function ComposerHeader({
+  credentialStatus,
+  latestTask,
+  selectedGarmentCount,
+  selectedPerson,
+  validationResult,
+}: {
+  credentialStatus: ProviderCredentialStatus | null;
+  latestTask: GenerationTaskDetail | null;
+  selectedGarmentCount: number;
+  selectedPerson: AssetFileView | null;
+  validationResult: ValidateCombinationResponse | null;
+}) {
   return (
-    <div className="canvas-toolbar">
-      <div className="tool-segment">
-        <button className="is-active" type="button" aria-label="平移">
-          <Hand size={17} />
-        </button>
-        <button disabled type="button" aria-label="选择">
-          <MousePointer2 size={17} />
-        </button>
-        <button disabled type="button" aria-label="框选">
-          <LayoutGrid size={17} />
-        </button>
+    <section className="composer-header">
+      <div>
+        <p>生成工作台</p>
+        <h1>配置图片、Prompt 和模型后直接提交生成</h1>
       </div>
-      <div className="zoom-control">
-        <button disabled type="button" aria-label="缩小">
-          <ZoomOut size={16} />
-        </button>
-        <span>100%</span>
-        <button disabled type="button" aria-label="放大">
-          <ZoomIn size={16} />
-        </button>
+      <div className="composer-status-row">
+        <StatusPill active={Boolean(selectedPerson)} label="人物图" />
+        <StatusPill active={selectedGarmentCount > 0} label={`${selectedGarmentCount} 件服装`} />
+        <StatusPill active={credentialStatus?.configured === true} label="API Key" />
+        <StatusPill
+          active={validationResult?.executable === true}
+          label={validationResult?.executable ? "可执行" : "待补齐"}
+        />
+        <StatusPill
+          active={latestTask?.task.status === "succeeded"}
+          label={latestTask ? getGenerationTaskStatusLabel(latestTask.task.status) : "暂无任务"}
+        />
       </div>
-      <button className="canvas-icon" disabled type="button" aria-label="适配视图">
-        <PanelRightClose size={17} />
-      </button>
-      <button className={`flow-help ${executable ? "is-ready" : ""}`} type="button">
-        {executable ? <CircleCheck size={15} /> : <CircleAlert size={15} />}
-        {executable ? "校验通过" : "待补充输入"}
-        <ChevronDown size={14} />
-      </button>
-    </div>
+    </section>
   );
 }
 
-function MinimapMock() {
+function StatusPill({ active, label }: { active: boolean; label: string }) {
   return (
-    <div className="minimap">
-      <div className="minimap__track">
-        <span />
-        <span />
-        <span />
-        <span />
-        <span />
+    <span className={`status-pill ${active ? "is-active" : ""}`}>
+      {active ? <CircleCheck size={13} /> : <Clock3 size={13} />}
+      {label}
+    </span>
+  );
+}
+
+function AssetInputCard({
+  asset,
+  icon,
+  isImporting,
+  title,
+  description,
+  actionLabel,
+  onImport,
+}: {
+  asset: AssetFileView | null;
+  icon: ReactNode;
+  isImporting: boolean;
+  title: string;
+  description: string;
+  actionLabel: string;
+  onImport: () => void;
+}) {
+  return (
+    <section className="composer-card asset-input-card">
+      <div className="composer-card__header">
+        <span>{icon}</span>
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      {asset ? (
+        <div className="selected-asset-preview">
+          <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+          <dl>
+            <dt>文件名</dt>
+            <dd>{asset.asset.originalName}</dd>
+            <dt>尺寸</dt>
+            <dd>{formatDimensions(asset.asset.width, asset.asset.height)}</dd>
+            <dt>类型</dt>
+            <dd>{asset.asset.mimeType}</dd>
+          </dl>
+        </div>
+      ) : (
+        <button className="upload-dropzone" onClick={onImport} type="button">
+          <ImageIcon size={28} />
+          <strong>选择本地图片</strong>
+          <span>支持 PNG/JPG/JPEG，导入后会复制到工作区并生成缩略图。</span>
+        </button>
+      )}
+      <button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
+        <Import size={15} />
+        {isImporting ? "导入中" : actionLabel}
+      </button>
+    </section>
+  );
+}
+
+function GarmentInputCard({
+  garments,
+  isImporting,
+  onImport,
+  onRemove,
+}: {
+  garments: AssetFileView[];
+  isImporting: boolean;
+  onImport: () => void;
+  onRemove: (assetId: string) => void;
+}) {
+  return (
+    <section className="composer-card garment-input-card">
+      <div className="composer-card__header">
+        <span>
+          <BriefcaseBusiness size={28} />
+        </span>
+        <div>
+          <h2>服装图片</h2>
+          <p>可选择 1-4 张服装图，任务快照会按当前顺序保存。</p>
+        </div>
+      </div>
+      {garments.length ? (
+        <div className="selected-garment-grid">
+          {garments.map((asset) => (
+            <article key={asset.asset.id}>
+              <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+              <button onClick={() => onRemove(asset.asset.id)} type="button" aria-label="移除服装">
+                <X size={13} />
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <button className="upload-dropzone" onClick={onImport} type="button">
+          <BriefcaseBusiness size={28} />
+          <strong>导入服装图</strong>
+          <span>至少一张服装图才能保存组合并执行生成。</span>
+        </button>
+      )}
+      <button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
+        <Import size={15} />
+        {isImporting ? "导入中" : "添加服装图"}
+      </button>
+    </section>
+  );
+}
+
+function PromptEditorCard({
+  promptText,
+  onPromptChange,
+}: {
+  promptText: string;
+  onPromptChange: (value: string) => void;
+}) {
+  return (
+    <section className="composer-card prompt-editor-card">
+      <div className="composer-card__header">
+        <span>
+          <FileText size={28} />
+        </span>
+        <div>
+          <h2>Prompt</h2>
+          <p>这里的文本会写入 prompt binding，并进入生成任务快照。</p>
+        </div>
+      </div>
+      <textarea
+        value={promptText}
+        onChange={(event) => onPromptChange(event.target.value)}
+        rows={9}
+      />
+      <div className="field-meta">
+        <span>{promptText.trim().length} 字符</span>
+        <button onClick={() => onPromptChange(DEFAULT_PROMPT_TEXT)} type="button">
+          恢复默认
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ModelSettingsCard({
+  apiKeyDraft,
+  credentialStatus,
+  isSavingApiKey,
+  modelSize,
+  outputCount,
+  onApiKeyDraftChange,
+  onModelSizeChange,
+  onOutputCountChange,
+  onSaveApiKey,
+}: {
+  apiKeyDraft: string;
+  credentialStatus: ProviderCredentialStatus | null;
+  isSavingApiKey: boolean;
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  onApiKeyDraftChange: (value: string) => void;
+  onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
+  onOutputCountChange: (value: number) => void;
+  onSaveApiKey: () => void;
+}) {
+  return (
+    <section className="composer-card model-settings-card">
+      <div className="composer-card__header">
+        <span>
+          <Settings size={28} />
+        </span>
+        <div>
+          <h2>模型参数</h2>
+          <p>当前 MVP 使用固定 OpenAI Provider，不暴露自定义 Base URL。</p>
+        </div>
+      </div>
+      <div className="settings-form-grid">
+        <label>
+          Provider
+          <input value={DEFAULT_PROVIDER} readOnly />
+        </label>
+        <label>
+          模型
+          <input value={DEFAULT_MODEL_ID} readOnly />
+        </label>
+        <label>
+          尺寸
+          <select
+            value={modelSize}
+            onChange={(event) =>
+              onModelSizeChange(event.target.value as (typeof MODEL_SIZES)[number])
+            }
+          >
+            {MODEL_SIZES.map((size) => (
+              <option key={size} value={size}>
+                {size}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          生成数量
+          <input
+            min={1}
+            max={4}
+            type="number"
+            value={outputCount}
+            onChange={(event) =>
+              onOutputCountChange(Math.max(1, Math.min(4, Number(event.target.value) || 1)))
+            }
+          />
+        </label>
+      </div>
+      <div className="credential-row">
+        <div>
+          <strong>{credentialStatus?.configured ? "API Key 已配置" : "API Key 未配置"}</strong>
+          <span>{credentialStatus?.maskedKey ?? "执行生成前需要保存 OpenAI API Key"}</span>
+        </div>
+        <KeyRound size={18} />
+      </div>
+      <div className="api-key-row">
+        <input
+          value={apiKeyDraft}
+          onChange={(event) => onApiKeyDraftChange(event.target.value)}
+          placeholder="粘贴 OpenAI API Key"
+          type="password"
+        />
+        <button disabled={!apiKeyDraft.trim() || isSavingApiKey} onClick={onSaveApiKey} type="button">
+          {isSavingApiKey ? "保存中" : "保存"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ValidationSummary({
+  validationResult,
+}: {
+  validationResult: ValidateCombinationResponse | null;
+}) {
+  const executable = validationResult?.executable === true;
+  return (
+    <div className={`validation-summary ${executable ? "is-ready" : ""}`}>
+      <span>{executable ? <CircleCheck size={18} /> : <CircleAlert size={18} />}</span>
+      <div>
+        <strong>{executable ? "当前组合可以执行" : "还不能执行生成"}</strong>
+        {validationResult?.reasons.length ? (
+          <ul>
+            {validationResult.reasons.slice(0, 3).map((reason) => (
+              <li key={`${reason.code}-${reason.field ?? reason.message}`}>{reason.message}</li>
+            ))}
+          </ul>
+        ) : (
+          <p>保存组合后会创建 prompt binding，并用当前模型参数提交任务。</p>
+        )}
       </div>
     </div>
   );
@@ -1191,72 +1217,94 @@ function WorkbenchMessages({
   );
 }
 
-function PropertyPanel({
+function InspectorPanel({
+  apiKeyDraft,
+  credentialStatus,
   currentCombination,
-  selectedPerson,
-  selectedGarments,
-  promptText,
-  validationResult,
+  mode,
   recentTasks,
-  onPromptChange,
+  selectedGarments,
+  selectedPerson,
+  validationResult,
+  onApiKeyDraftChange,
   onImport,
+  onModeChange,
+  onSaveApiKey,
   onTaskChanged,
 }: {
+  apiKeyDraft: string;
+  credentialStatus: ProviderCredentialStatus | null;
   currentCombination: ImageCombination | null;
-  selectedPerson: AssetFileView | null;
-  selectedGarments: AssetFileView[];
-  promptText: string;
-  validationResult: ValidateCombinationResponse | null;
+  mode: SidePanelMode;
   recentTasks: GenerationTaskDetail[];
-  onPromptChange: (value: string) => void;
+  selectedGarments: AssetFileView[];
+  selectedPerson: AssetFileView | null;
+  validationResult: ValidateCombinationResponse | null;
+  onApiKeyDraftChange: (value: string) => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+  onModeChange: (mode: SidePanelMode) => void;
+  onSaveApiKey: () => void;
   onTaskChanged: (detail: GenerationTaskDetail | null) => void;
 }) {
-  const selectedNode = useWorkbenchStore((state) => state.selectedNode);
-  const selectedTitle = getSelectedNodeTitle(selectedNode);
-
   return (
-    <aside className="property-panel">
+    <aside className="property-panel inspector-panel">
       <div className="property-panel__header">
         <div>
-          <h2>属性面板</h2>
+          <h2>检查器</h2>
           <p>
-            当前选择： <strong>{selectedTitle}</strong>
+            当前组合： <strong>{currentCombination?.name ?? "未保存组合"}</strong>
           </p>
         </div>
         <ChevronLeft size={18} />
       </div>
       <div className="tabs">
-        <button className="is-active" type="button">
-          详情
+        <button
+          className={mode === "summary" ? "is-active" : ""}
+          onClick={() => onModeChange("summary")}
+          type="button"
+        >
+          摘要
         </button>
-        <button disabled type="button">编辑</button>
-        <button disabled type="button">关联</button>
-        <button disabled type="button">历史</button>
+        <button
+          className={mode === "settings" ? "is-active" : ""}
+          onClick={() => onModeChange("settings")}
+          type="button"
+        >
+          设置
+        </button>
+        <button
+          className={mode === "history" ? "is-active" : ""}
+          onClick={() => onModeChange("history")}
+          type="button"
+        >
+          历史
+        </button>
       </div>
-      {selectedNode === "person" ? (
-        <AssetDetailBlock
-          title="人物图片"
-          asset={selectedPerson}
-          emptyText="还没有选择人物图"
-          onImport={() => onImport("person")}
+      {mode === "summary" ? (
+        <>
+          <AssetDetailBlock
+            title="人物图片"
+            asset={selectedPerson}
+            emptyText="还没有选择人物图"
+            onImport={() => onImport("person")}
+          />
+          <GarmentDetailBlock garments={selectedGarments} onImport={() => onImport("garment")} />
+          <ValidationDetailBlock
+            combinationName={currentCombination?.name ?? "未保存组合"}
+            validationResult={validationResult}
+          />
+        </>
+      ) : null}
+      {mode === "settings" ? (
+        <ApiKeyDetailBlock
+          apiKeyDraft={apiKeyDraft}
+          credentialStatus={credentialStatus}
+          onApiKeyDraftChange={onApiKeyDraftChange}
+          onSaveApiKey={onSaveApiKey}
         />
       ) : null}
-      {selectedNode === "garments" ? (
-        <GarmentDetailBlock garments={selectedGarments} onImport={() => onImport("garment")} />
-      ) : null}
-      {selectedNode === "prompt" ? (
-        <PromptDetailBlock promptText={promptText} onPromptChange={onPromptChange} />
-      ) : null}
-      {selectedNode === "model" ? <ModelDetailBlock /> : null}
-      {selectedNode === "execute" ? (
-        <ValidationDetailBlock
-          combinationName={currentCombination?.name ?? "未保存组合"}
-          validationResult={validationResult}
-        />
-      ) : null}
-      {selectedNode === "result" ? <ResultDetailBlock tasks={recentTasks} /> : null}
-      <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} />
+      {mode === "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
+      {mode !== "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
     </aside>
   );
 }
@@ -1318,7 +1366,11 @@ function GarmentDetailBlock({
       {garments.length ? (
         <div className="garment-detail-grid">
           {garments.map((asset) => (
-            <img alt={asset.asset.originalName} key={asset.asset.id} src={convertFileSrc(asset.thumbFilePath)} />
+            <img
+              alt={asset.asset.originalName}
+              key={asset.asset.id}
+              src={convertFileSrc(asset.thumbFilePath)}
+            />
           ))}
         </div>
       ) : (
@@ -1331,47 +1383,6 @@ function GarmentDetailBlock({
         <Import size={15} />
         导入服装图片
       </button>
-    </section>
-  );
-}
-
-function PromptDetailBlock({
-  promptText,
-  onPromptChange,
-}: {
-  promptText: string;
-  onPromptChange: (value: string) => void;
-}) {
-  return (
-    <section className="detail-block">
-      <h3>Prompt</h3>
-      <label>
-        用户提示词
-        <textarea
-          value={promptText}
-          onChange={(event) => onPromptChange(event.target.value)}
-          rows={7}
-        />
-      </label>
-      <p className="panel-note">{promptText.trim().length} 字符，会随组合保存。</p>
-    </section>
-  );
-}
-
-function ModelDetailBlock() {
-  return (
-    <section className="detail-block">
-      <h3>模型配置</h3>
-      <dl className="plain-dl">
-        <dt>Provider</dt>
-        <dd>{DEFAULT_MODEL_CONFIG.provider}</dd>
-        <dt>模型</dt>
-        <dd>{DEFAULT_MODEL_CONFIG.modelId}</dd>
-        <dt>尺寸</dt>
-        <dd>{String(DEFAULT_MODEL_CONFIG.paramsJson.size)}</dd>
-        <dt>生成数量</dt>
-        <dd>{String(DEFAULT_MODEL_CONFIG.paramsJson.outputCount)}</dd>
-      </dl>
     </section>
   );
 }
@@ -1405,12 +1416,38 @@ function ValidationDetailBlock({
   );
 }
 
-function ResultDetailBlock({ tasks }: { tasks: GenerationTaskDetail[] }) {
-  const resultCount = tasks.reduce((sum, task) => sum + task.results.length, 0);
+function ApiKeyDetailBlock({
+  apiKeyDraft,
+  credentialStatus,
+  onApiKeyDraftChange,
+  onSaveApiKey,
+}: {
+  apiKeyDraft: string;
+  credentialStatus: ProviderCredentialStatus | null;
+  onApiKeyDraftChange: (value: string) => void;
+  onSaveApiKey: () => void;
+}) {
   return (
     <section className="detail-block">
-      <h3>生成结果</h3>
-      <p className="panel-note">最近任务共 {resultCount} 张结果。</p>
+      <h3>API Key</h3>
+      <div className="credential-row">
+        <div>
+          <strong>{credentialStatus?.configured ? "已配置" : "未配置"}</strong>
+          <span>{credentialStatus?.maskedKey ?? "保存后用于调用 OpenAI 图片模型"}</span>
+        </div>
+        <KeyRound size={18} />
+      </div>
+      <div className="api-key-row api-key-row--stacked">
+        <input
+          value={apiKeyDraft}
+          onChange={(event) => onApiKeyDraftChange(event.target.value)}
+          placeholder="OpenAI API Key"
+          type="password"
+        />
+        <button disabled={!apiKeyDraft.trim()} onClick={onSaveApiKey} type="button">
+          保存 API Key
+        </button>
+      </div>
     </section>
   );
 }
@@ -1432,10 +1469,10 @@ function TaskHistory({
     <section className="history-block">
       <div className="history-block__header">
         <h3>历史任务</h3>
-        <button disabled type="button">查看全部</button>
+        <span>{tasks.length} 条</span>
       </div>
       {tasks.length ? (
-        tasks.slice(0, 5).map((item) => (
+        tasks.slice(0, 6).map((item) => (
           <article className="history-item" key={item.task.id}>
             {item.results[0] ? (
               <img alt="任务结果" src={convertFileSrc(item.results[0].thumbFilePath)} />
@@ -1474,9 +1511,6 @@ function TaskHistory({
           暂无历史任务
         </div>
       )}
-      <button className="ghost-wide" disabled type="button">
-        打开历史页面
-      </button>
     </section>
   );
 }
@@ -1529,86 +1563,72 @@ function BottomDashboard({
   }
 
   return (
-    <section className="bottom-dashboard">
-      <div className="task-status">
-        <h2>
-          任务状态 <ChevronDown size={15} />
-        </h2>
-        <div className="progress-layout">
-          <div className="progress-ring">
-            <svg viewBox="0 0 120 120">
-              <circle cx="60" cy="60" r="48" />
-              <circle
-                cx="60"
-                cy="60"
-                r="48"
-                className="progress-ring__value"
-                style={ringStyle}
-              />
-            </svg>
-            <strong>{progress}%</strong>
-            <span>{taskStatus}</span>
-          </div>
-          <div className="progress-steps">
-            {taskSteps.map((step) => (
-              <div
-                className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
-                key={step.label}
-              >
-                <span />
-                <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
-                <time>{step.state === "done" ? "完成" : "--"}</time>
-                {step.state === "done" ? (
-                  <CircleCheck size={14} fill="currentColor" />
-                ) : (
-                  <Clock3 size={14} />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="task-actions">
-          <button
-            className="danger-button"
-            disabled={!canCancel}
-            onClick={() => {
-              void handleCancelTask();
-            }}
-            type="button"
-          >
-            <CircleX size={15} />
-            {isCancelling ? "取消中" : "取消任务"}
-          </button>
-          <button className="toolbar-button" disabled type="button">
-            <Eye size={15} />
-            最小化面板
-          </button>
-        </div>
-        {cancellationNotice ? (
-          <p className="task-cancel-notice">{cancellationNotice}</p>
-        ) : null}
+    <section className="task-dashboard-card">
+      <div className="task-dashboard-card__header">
+        <h2>任务状态</h2>
+        <span>{taskStatus}</span>
       </div>
-      <ResultPreview results={results} />
-      <div className="task-info">
-        <h2>任务信息</h2>
-        <dl>
-          <dt>组合名称</dt>
-          <dd>{currentCombination?.name ?? "未选择组合"}</dd>
-          <dt>模型</dt>
-          <dd>{task?.modelId ?? "--"}</dd>
-          <dt>尺寸</dt>
-          <dd>{formatResultSize(results)}</dd>
-          <dt>生成数量</dt>
-          <dd>{task?.outputCount ?? "--"}</dd>
-          <dt>创建时间</dt>
-          <dd>{formatTaskTime(task?.createdAt)}</dd>
-          <dt>任务 ID</dt>
-          <dd>{task?.id ?? (hasTask ? "--" : "暂无任务")}</dd>
-        </dl>
-        <button className="ghost-wide" disabled type="button">
-          查看详情日志
+      <div className="progress-layout">
+        <div className="progress-ring">
+          <svg viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="48" />
+            <circle
+              cx="60"
+              cy="60"
+              r="48"
+              className="progress-ring__value"
+              style={ringStyle}
+            />
+          </svg>
+          <strong>{progress}%</strong>
+          <span>{taskStatus}</span>
+        </div>
+        <div className="progress-steps">
+          {taskSteps.map((step) => (
+            <div
+              className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
+              key={step.label}
+            >
+              <span />
+              <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
+              <time>{step.state === "done" ? "完成" : "--"}</time>
+              {step.state === "done" ? (
+                <CircleCheck size={14} fill="currentColor" />
+              ) : (
+                <Clock3 size={14} />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+      <dl className="task-summary-list">
+        <dt>组合名称</dt>
+        <dd>{currentCombination?.name ?? "未选择组合"}</dd>
+        <dt>模型</dt>
+        <dd>{task?.modelId ?? "--"}</dd>
+        <dt>尺寸</dt>
+        <dd>{formatResultSize(results)}</dd>
+        <dt>生成数量</dt>
+        <dd>{task?.outputCount ?? "--"}</dd>
+      </dl>
+      <div className="task-actions">
+        <button
+          className="danger-button"
+          disabled={!canCancel}
+          onClick={() => {
+            void handleCancelTask();
+          }}
+          type="button"
+        >
+          <CircleX size={15} />
+          {isCancelling ? "取消中" : "取消任务"}
+        </button>
+        <button className="toolbar-button" disabled={!hasTask} type="button">
+          <Eye size={15} />
+          查看日志
         </button>
       </div>
+      {cancellationNotice ? <p className="task-cancel-notice">{cancellationNotice}</p> : null}
     </section>
   );
 }
@@ -1707,26 +1727,7 @@ function formatTaskTime(value: string | undefined) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function getSelectedNodeTitle(nodeId: string) {
-  switch (nodeId) {
-    case "person":
-      return "人物图节点";
-    case "garments":
-      return "服装图组节点";
-    case "prompt":
-      return "Prompt 节点";
-    case "model":
-      return "模型节点";
-    case "execute":
-      return "执行节点";
-    case "result":
-      return "结果节点";
-    default:
-      return "未选择";
-  }
-}
-
-function AssetImage({ asset }: { asset: Asset }) {
+function AssetImage({ asset }: { asset: SelectableAsset }) {
   if (!asset.imageSrc) {
     return (
       <span className="node-empty">
@@ -1734,41 +1735,34 @@ function AssetImage({ asset }: { asset: Asset }) {
       </span>
     );
   }
-  return <img alt={asset.label ?? "素材缩略图"} src={asset.imageSrc} />;
-}
-
-function NodeEmpty({ icon, label }: { icon: ReactNode; label: string }) {
-  return (
-    <span className="node-empty">
-      {icon}
-      <small>{label}</small>
-    </span>
-  );
+  return <img alt={asset.label} src={asset.imageSrc} />;
 }
 
 function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
   if (!results.length) {
     return (
-      <div className="result-preview">
-        <h2>结果预览 <span>等待生成</span></h2>
-        <div className="preview-results">
-          {[1, 2, 3].map((item) => (
-            <div className="generating-card" key={item}>
-              <span className="loader-ring" />
-              <strong>暂无结果</strong>
-              <small>--</small>
-            </div>
-          ))}
+      <section className="result-preview-card">
+        <div className="task-dashboard-card__header">
+          <h2>结果预览</h2>
+          <span>等待生成</span>
         </div>
-      </div>
+        <div className="result-empty-state">
+          <ImageIcon size={34} />
+          <strong>暂无生成结果</strong>
+          <span>任务成功后会在这里显示缩略图，点击可打开大图。</span>
+        </div>
+      </section>
     );
   }
 
   return (
-    <div className="result-preview">
-      <h2>结果预览 <span>{results.length} 张</span></h2>
+    <section className="result-preview-card">
+      <div className="task-dashboard-card__header">
+        <h2>结果预览</h2>
+        <span>{results.length} 张</span>
+      </div>
       <div className="preview-results">
-        {results.slice(0, 3).map((result) => (
+        {results.slice(0, 6).map((result) => (
           <button
             className="result-card"
             key={result.id}
@@ -1783,7 +1777,7 @@ function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
           </button>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
