@@ -40,6 +40,18 @@ pub async fn create_generation_task_snapshot(
     let mut writer = database.writer().await;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
 
+    match get_running_task_id_for_writer(&mut *writer).await {
+        Ok(Some(existing_task_id)) => {
+            writer.execute("ROLLBACK").await?;
+            return Err(AppError::TaskAlreadyRunning(existing_task_id));
+        }
+        Ok(None) => {}
+        Err(err) => {
+            writer.execute("ROLLBACK").await?;
+            return Err(AppError::Storage(err));
+        }
+    }
+
     let write_result = async {
         sqlx::query(
             "INSERT INTO generation_tasks (
@@ -211,6 +223,20 @@ pub fn sanitize_source_url(source_url: &str) -> Option<String> {
         }
     }
     Some(source_url.to_string())
+}
+
+async fn get_running_task_id_for_writer(
+    writer: &mut sqlx::SqliteConnection,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM generation_tasks WHERE status IN (");
+    let mut separated = builder.separated(", ");
+    for status in RUNNING_TASK_STATUSES {
+        separated.push_bind(status);
+    }
+    separated.push_unseparated(") ORDER BY created_at DESC LIMIT 1");
+
+    builder.build_query_scalar().fetch_optional(writer).await
 }
 
 fn validate_safe_summary(summary: Option<&Value>) -> AppResult<()> {
@@ -488,6 +514,42 @@ mod tests {
             .await
             .expect("task count");
         assert_eq!(task_count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_generation_task_snapshot_rejects_existing_running_task() {
+        let (_temp_dir, database) = test_database().await;
+        seed_assets(&database).await;
+        create_minimal_task(&database, "task_first").await;
+
+        let second = create_generation_task_snapshot(
+            &database,
+            CreateGenerationTaskSnapshotRequest {
+                id: Some("task_second".to_string()),
+                combination_id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-1".to_string(),
+                request_summary_json: Some(json!({"provider": "openai"})),
+                input_snapshot_json: json!({}),
+                final_prompt_snapshot_json: json!({"user": "prompt"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                asset_snapshot_json: json!([]),
+                input_assets: vec![],
+                output_count: 1,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            second,
+            Err(AppError::TaskAlreadyRunning(task_id)) if task_id == "task_first"
+        ));
+
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generation_tasks")
+            .fetch_one(database.pool())
+            .await
+            .expect("task count");
+        assert_eq!(task_count, 1);
     }
 
     #[tokio::test]

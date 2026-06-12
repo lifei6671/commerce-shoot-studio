@@ -899,7 +899,7 @@ R6 第二期授权与支付
 
 **退出条件**：
 
-- [ ] 任务历史具备不可变快照和安全持久化边界。
+- [x] 任务历史具备不可变快照和安全持久化边界。
 
 ---
 
@@ -919,27 +919,28 @@ R6 第二期授权与支付
 - 创建：`desktop/src-tauri/src/services/task_runner.rs`
 - 创建：`desktop/src-tauri/src/commands/generation.rs`
 - 修改：`desktop/src-tauri/migrations/0001_init.sql`
+- 创建：`desktop/src/features/generation-task/services/taskService.ts`
 
 **执行清单**：
 
-- [ ] AppState 管理运行中任务。
-- [ ] AppState 管理 CancellationToken。
-- [ ] 前端不得保存取消句柄。
-- [ ] 数据库增加 partial unique index，限制全局运行中任务。
-- [ ] `start_generation` 使用事务创建任务。
-- [ ] Rust 单飞机制防止并发创建任务。
-- [ ] 任务结束后清理 CancellationToken。
+- [x] AppState 管理运行中任务。
+- [x] AppState 管理 CancellationToken。
+- [x] 前端不得保存取消句柄。
+- [x] 数据库增加 partial unique index，限制全局运行中任务。
+- [x] `start_generation` 使用事务创建任务。
+- [x] Rust 单飞机制防止并发创建任务。
+- [x] 任务结束后清理 CancellationToken。
 
 **验证清单**：
 
-- [ ] 快速双击执行按钮最多创建一个运行中任务。
-- [ ] 两个窗口同时调用 start_generation，最多创建一个运行中任务。
-- [ ] 第二个请求返回明确的已有任务运行中错误。
-- [ ] 任务成功、失败、取消后 CancellationToken 被清理。
+- [x] 快速双击执行按钮最多创建一个运行中任务。
+- [x] 两个窗口同时调用 start_generation，最多创建一个运行中任务。
+- [x] 第二个请求返回明确的已有任务运行中错误。
+- [x] 任务成功、失败、取消后 CancellationToken 被清理。
 
 **退出条件**：
 
-- [ ] 单任务并发由 Rust 和 SQLite 双重保证。
+- [x] 单任务并发由 Rust 和 SQLite 双重保证。
 
 ---
 

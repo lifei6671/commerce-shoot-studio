@@ -17,6 +17,8 @@ pub enum AppError {
     PromptRequiredVariableMissing(String),
     #[error("model config invalid: {0}")]
     ModelConfigInvalid(String),
+    #[error("generation task already running: {0}")]
+    TaskAlreadyRunning(String),
     #[error("{0}")]
     InvalidInput(String),
 }
@@ -41,6 +43,7 @@ impl serde::Serialize for AppError {
             AppError::PromptTemplateInvalid(_) => "PROMPT_TEMPLATE_INVALID",
             AppError::PromptRequiredVariableMissing(_) => "PROMPT_REQUIRED_VARIABLE_MISSING",
             AppError::ModelConfigInvalid(_) => "MODEL_CONFIG_INVALID",
+            AppError::TaskAlreadyRunning(_) => "TASK_ALREADY_RUNNING",
             AppError::InvalidInput(_) => "INVALID_INPUT",
         };
 

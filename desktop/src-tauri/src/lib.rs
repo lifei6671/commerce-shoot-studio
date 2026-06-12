@@ -26,6 +26,8 @@ pub fn run() {
             commands::combinations::get_image_combination,
             commands::combinations::list_image_combinations,
             commands::combinations::validate_combination,
+            commands::generation::start_generation,
+            commands::generation::cancel_generation_task,
             commands::models::list_model_definitions,
             commands::models::save_model_config,
             commands::models::get_model_config,
