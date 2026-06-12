@@ -64,11 +64,13 @@ mod tests {
             "INSERT INTO generation_tasks (
                 id,
                 status,
-                combination_snapshot_json,
-                prompt_snapshot_json,
-                model_snapshot_json,
-                input_assets_snapshot_json
-            ) VALUES ('task-running', 'queued', '{}', '{}', '{}', '[]')",
+                provider,
+                model_id,
+                input_snapshot_json,
+                final_prompt_snapshot_json,
+                model_config_snapshot_json,
+                asset_snapshot_json
+            ) VALUES ('task-running', 'queued', 'openai', 'gpt-image-1', '{}', '{}', '{}', '[]')",
         )
         .execute(&mut *writer)
         .await
@@ -80,10 +82,12 @@ mod tests {
         let restarted = AppState::initialize_with_workspace(temp_dir.path().to_path_buf())
             .await
             .expect("restart");
-        let row = sqlx::query("SELECT status, error_code FROM generation_tasks WHERE id = 'task-running'")
-            .fetch_one(restarted.database().pool())
-            .await
-            .expect("fetch task");
+        let row = sqlx::query(
+            "SELECT status, error_code FROM generation_tasks WHERE id = 'task-running'",
+        )
+        .fetch_one(restarted.database().pool())
+        .await
+        .expect("fetch task");
 
         assert_eq!(row.get::<String, _>("status"), "failed");
         assert_eq!(

@@ -877,24 +877,25 @@ R6 第二期授权与支付
 
 - 修改：`desktop/src-tauri/migrations/0001_init.sql`
 - 创建：`desktop/src-tauri/src/domain/task.rs`
+- 修改：`desktop/src-tauri/src/services/task_runner.rs`
 - 创建：`desktop/src/features/generation-task/model/taskTypes.ts`
 
 **执行清单**：
 
-- [ ] 创建 `generation_tasks` 表。
-- [ ] 创建 `generation_task_results` 表。
-- [ ] 创建 `generation_task_input_assets` 表。
-- [ ] 增加 `(combination_id, created_at DESC)` 复合索引。
-- [ ] 任务快照保存 final prompt、模型参数、输入 asset 相对路径。
-- [ ] `request_summary_json` 禁止保存 base64。
-- [ ] `rawResponse` 不持久化。
-- [ ] `source_url` 保存前脱敏，无法确认安全时保存为 `NULL`。
+- [x] 创建 `generation_tasks` 表。
+- [x] 创建 `generation_task_results` 表。
+- [x] 创建 `generation_task_input_assets` 表。
+- [x] 增加 `(combination_id, created_at DESC)` 复合索引。
+- [x] 任务快照保存 final prompt、模型参数、输入 asset 相对路径。
+- [x] `request_summary_json` 禁止保存 base64。
+- [x] `rawResponse` 不持久化。
+- [x] `source_url` 保存前脱敏，无法确认安全时保存为 `NULL`。
 
 **验证清单**：
 
-- [ ] 执行后修改组合、Prompt、模型参数，历史任务仍显示当时快照。
-- [ ] `workspace.db` 不包含 base64、API Key、Authorization Header、完整本地路径。
-- [ ] 输入 asset 与结果 asset 可结构化追溯。
+- [x] 执行后修改组合、Prompt、模型参数，历史任务仍显示当时快照。
+- [x] `workspace.db` 不包含 base64、API Key、Authorization Header、完整本地路径。
+- [x] 输入 asset 与结果 asset 可结构化追溯。
 
 **退出条件**：
 
