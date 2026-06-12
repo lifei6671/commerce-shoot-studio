@@ -33,6 +33,18 @@ export async function getLatestGenerationTaskByCombination(
   );
 }
 
+export async function listRunningGenerationTasks(): Promise<GenerationTaskDetail[]> {
+  return invoke<GenerationTaskDetail[]>("list_running_generation_tasks");
+}
+
+export async function listRecentGenerationTasks(
+  limit = 20,
+): Promise<GenerationTaskDetail[]> {
+  return invoke<GenerationTaskDetail[]>("list_recent_generation_tasks", {
+    limit,
+  });
+}
+
 export async function openGenerationResult(assetId: string): Promise<void> {
   return invoke<void>("open_generation_result", { assetId });
 }

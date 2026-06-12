@@ -50,6 +50,8 @@ struct GenerationPlan {
     provider_input: GenerateInput,
 }
 
+pub type GenerationTaskObserver<'a> = &'a (dyn Fn(LocalGenerationTask) + Send + Sync + 'a);
+
 pub async fn recover_interrupted_tasks(database: &WorkspaceDatabase) -> AppResult<u64> {
     let mut writer = database.writer().await;
     let mut builder =
@@ -85,6 +87,21 @@ pub async fn run_generation_flow_with_task_id<P: ImageGenerationProvider>(
     request: StartGenerationRequest,
     task_id: Option<String>,
 ) -> AppResult<LocalGenerationTask> {
+    run_generation_flow_with_task_id_and_observer(
+        database, paths, provider, api_key, request, task_id, None,
+    )
+    .await
+}
+
+pub async fn run_generation_flow_with_task_id_and_observer<P: ImageGenerationProvider>(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    provider: &P,
+    api_key: &str,
+    request: StartGenerationRequest,
+    task_id: Option<String>,
+    observer: Option<GenerationTaskObserver<'_>>,
+) -> AppResult<LocalGenerationTask> {
     let plan = build_generation_plan(database, paths, request).await?;
     if plan.provider != provider.provider_name() {
         return Err(AppError::InvalidInput(format!(
@@ -111,12 +128,16 @@ pub async fn run_generation_flow_with_task_id<P: ImageGenerationProvider>(
         },
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
 
-    if let Err(err) = execute_generation_task(database, paths, provider, api_key, &task, plan).await
+    if let Err(err) =
+        execute_generation_task(database, paths, provider, api_key, &task, plan, observer).await
     {
         mark_generation_task_failed(database, &task.id, &err).await?;
+        notify_generation_task_change(database, &task.id, observer).await?;
         return Err(err);
     }
+    notify_generation_task_change(database, &task.id, observer).await?;
 
     get_generation_task_by_id(database, &task.id)
         .await?
@@ -330,6 +351,39 @@ pub async fn get_latest_generation_task_detail_by_combination(
     }
 }
 
+pub async fn list_running_generation_task_details(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+) -> AppResult<Vec<GenerationTaskDetail>> {
+    let mut builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM generation_tasks WHERE status IN (");
+    let mut separated = builder.separated(", ");
+    for status in RUNNING_TASK_STATUSES {
+        separated.push_bind(status);
+    }
+    separated.push_unseparated(") ORDER BY created_at DESC, id DESC");
+
+    let task_ids: Vec<String> = builder.build_query_scalar().fetch_all(database.pool()).await?;
+    list_generation_task_details_by_ids(database, paths, task_ids).await
+}
+
+pub async fn list_recent_generation_task_details(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    limit: i64,
+) -> AppResult<Vec<GenerationTaskDetail>> {
+    let limit = limit.clamp(1, 50);
+    let task_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM generation_tasks
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(database.pool())
+    .await?;
+    list_generation_task_details_by_ids(database, paths, task_ids).await
+}
+
 pub async fn open_generation_result_asset(
     database: &WorkspaceDatabase,
     paths: &WorkspacePaths,
@@ -519,9 +573,11 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     api_key: &str,
     task: &LocalGenerationTask,
     mut plan: GenerationPlan,
+    observer: Option<GenerationTaskObserver<'_>>,
 ) -> AppResult<()> {
     update_generation_task_status(database, &task.id, "preparing", 10, Some("Preparing inputs"))
         .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
     plan.provider_input.task_id = task.id.clone();
 
     update_generation_task_status(
@@ -532,6 +588,7 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
         Some("Calling image provider"),
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
     update_generation_task_status(
         database,
         &task.id,
@@ -540,6 +597,7 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
         Some("Waiting for provider result"),
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
     let result = provider
         .generate(plan.provider_input, api_key)
         .await
@@ -555,6 +613,7 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
         Some("Saving generated results"),
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
 
     for (index, image) in result.images.into_iter().enumerate() {
         let source_url = image.source_url.clone();
@@ -573,6 +632,35 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     }
 
     mark_generation_task_succeeded(database, &task.id).await
+}
+
+async fn notify_generation_task_change(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    observer: Option<GenerationTaskObserver<'_>>,
+) -> AppResult<()> {
+    let Some(observer) = observer else {
+        return Ok(());
+    };
+    let task = get_generation_task_by_id(database, task_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput(format!("generation task {task_id} was not found")))?;
+    observer(task);
+    Ok(())
+}
+
+async fn list_generation_task_details_by_ids(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    task_ids: Vec<String>,
+) -> AppResult<Vec<GenerationTaskDetail>> {
+    let mut details = Vec::with_capacity(task_ids.len());
+    for task_id in task_ids {
+        if let Some(detail) = get_generation_task_detail_by_id(database, paths, &task_id).await? {
+            details.push(detail);
+        }
+    }
+    Ok(details)
 }
 
 pub fn sanitize_source_url(source_url: &str) -> Option<String> {
@@ -991,6 +1079,8 @@ fn parse_required_json(value: String) -> AppResult<Value> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use serde_json::json;
     use sqlx::Row;
 
@@ -1300,6 +1390,98 @@ mod tests {
                     1,
                     None,
                 ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_generation_tasks_returns_running_and_recent_details() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        seed_assets(&database).await;
+
+        create_minimal_task(&database, "task_done").await;
+        mark_generation_task_succeeded(&database, "task_done")
+            .await
+            .expect("mark done");
+        create_generation_task_result(
+            &database,
+            CreateGenerationTaskResultRequest {
+                id: Some("result_done".to_string()),
+                task_id: "task_done".to_string(),
+                asset_id: "result_1".to_string(),
+                sort_order: 0,
+                source_url: Some("https://cdn.example.com/result.png".to_string()),
+            },
+        )
+        .await
+        .expect("result");
+
+        create_minimal_task(&database, "task_running").await;
+        update_generation_task_status(&database, "task_running", "calling_model", 45, None)
+            .await
+            .expect("status");
+
+        let running = list_running_generation_task_details(&database, &paths)
+            .await
+            .expect("running tasks");
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].task.id, "task_running");
+        assert_eq!(running[0].task.status, "calling_model");
+
+        let recent = list_recent_generation_task_details(&database, &paths, 10)
+            .await
+            .expect("recent tasks");
+        let recent_ids: Vec<String> = recent.iter().map(|detail| detail.task.id.clone()).collect();
+        assert_eq!(recent_ids, vec!["task_running", "task_done"]);
+        assert_eq!(recent[1].results.len(), 1);
+        assert_eq!(recent[1].results[0].asset_id, "result_1");
+    }
+
+    #[tokio::test]
+    async fn run_generation_flow_notifies_task_status_changes() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_callback = Arc::clone(&observed);
+        let observer = move |task: LocalGenerationTask| {
+            observed_for_callback
+                .lock()
+                .expect("lock observed")
+                .push(task.status);
+        };
+
+        let task = run_generation_flow_with_task_id_and_observer(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_observed".to_string()),
+            Some(&observer),
+        )
+        .await
+        .expect("run generation");
+
+        assert_eq!(task.status, "succeeded");
+        assert_eq!(
+            observed.lock().expect("observed").as_slice(),
+            &[
+                "queued",
+                "preparing",
+                "calling_model",
+                "waiting_result",
+                "saving_result",
+                "succeeded"
             ]
         );
     }

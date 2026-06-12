@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 use ulid::Ulid;
@@ -16,7 +16,8 @@ use crate::error::{AppError, AppResult};
 use crate::providers::openai_provider::OpenAiImageProvider;
 use crate::services::credential_service::ProviderCredentialService;
 use crate::services::task_runner::{
-    create_generation_task_snapshot, recover_interrupted_tasks, run_generation_flow_with_task_id,
+    create_generation_task_snapshot, recover_interrupted_tasks,
+    run_generation_flow_with_task_id_and_observer, GenerationTaskObserver,
 };
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::migrations::run_workspace_migrations;
@@ -119,6 +120,25 @@ impl AppState {
         &self,
         request: StartGenerationRequest,
     ) -> AppResult<LocalGenerationTask> {
+        self.run_generation_internal(request, None).await
+    }
+
+    pub async fn run_generation_with_events(
+        &self,
+        app_handle: tauri::AppHandle,
+        request: StartGenerationRequest,
+    ) -> AppResult<LocalGenerationTask> {
+        let observer = |task: LocalGenerationTask| {
+            emit_generation_task_events(&app_handle, &task);
+        };
+        self.run_generation_internal(request, Some(&observer)).await
+    }
+
+    async fn run_generation_internal(
+        &self,
+        request: StartGenerationRequest,
+        observer: Option<GenerationTaskObserver<'_>>,
+    ) -> AppResult<LocalGenerationTask> {
         let _start_guard = self.generation_task_runtime.start_lock.lock().await;
 
         if let Some(task_id) = self.running_generation_task_id().await {
@@ -143,13 +163,14 @@ impl AppState {
             });
         }
 
-        let result = run_generation_flow_with_task_id(
+        let result = run_generation_flow_with_task_id_and_observer(
             &self.database,
             &self.workspace_paths,
             &OpenAiImageProvider::new(),
             &api_key,
             request,
             Some(task_id.clone()),
+            observer,
         )
         .await;
         self.clear_generation_task(&task_id).await;
@@ -195,6 +216,20 @@ impl AppState {
             return true;
         }
         false
+    }
+}
+
+fn emit_generation_task_events(app_handle: &tauri::AppHandle, task: &LocalGenerationTask) {
+    let _ = app_handle.emit("generation://task-updated", task.clone());
+    let terminal_event = match task.status.as_str() {
+        "queued" => Some("generation://task-created"),
+        "succeeded" => Some("generation://task-finished"),
+        "failed" => Some("generation://task-failed"),
+        "cancelled" => Some("generation://task-cancelled"),
+        _ => None,
+    };
+    if let Some(event) = terminal_event {
+        let _ = app_handle.emit(event, task.clone());
     }
 }
 

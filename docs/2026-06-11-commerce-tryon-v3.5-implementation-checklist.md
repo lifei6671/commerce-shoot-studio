@@ -1050,16 +1050,18 @@ R6 第二期授权与支付
 - 修改：`desktop/src-tauri/src/commands/generation.rs`
 - 创建：`desktop/src/features/generation-task/store/taskStore.ts`
 - 创建：`desktop/src/features/generation-task/services/taskEventService.ts`
+- 修改：`desktop/src/features/generation-task/services/taskService.ts`
+- 修改：`desktop/src/features/workflow/components/WorkflowCanvas.tsx`
 
 **执行清单**：
 
-- [ ] Rust 推送 `task-updated` 事件。
-- [ ] 前端监听 `task-updated`。
-- [ ] 实现 `get_generation_task`。
-- [ ] 实现 `list_running_generation_tasks`。
-- [ ] 实现 `list_recent_generation_tasks`。
-- [ ] 前端启动时主动拉取运行中任务。
-- [ ] 进入任务页面时主动拉取最新任务状态。
+- [x] Rust 推送 `task-updated` 事件。
+- [x] 前端监听 `task-updated`。
+- [x] 实现 `get_generation_task`。
+- [x] 实现 `list_running_generation_tasks`。
+- [x] 实现 `list_recent_generation_tasks`。
+- [x] 前端启动时主动拉取运行中任务。
+- [x] 进入任务页面时主动拉取最新任务状态。
 
 **验证清单**：
 

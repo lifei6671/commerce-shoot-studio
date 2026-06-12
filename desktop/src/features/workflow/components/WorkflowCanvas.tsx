@@ -62,10 +62,15 @@ import type {
   GenerationTaskDetail,
   GenerationTaskResultAsset,
 } from "../../generation-task/model/taskTypes";
+import { listenGenerationTaskUpdates } from "../../generation-task/services/taskEventService";
 import {
+  getGenerationTaskDetail,
   getLatestGenerationTaskByCombination,
+  listRecentGenerationTasks,
+  listRunningGenerationTasks,
   openGenerationResult,
 } from "../../generation-task/services/taskService";
+import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
 import { useWorkbenchStore } from "../store/workflowStore";
 import type { Asset, WorkflowNodeData } from "../model/workflowTypes";
 import "@xyflow/react/dist/style.css";
@@ -300,8 +305,11 @@ const edgeTypes = { flow: FlowEdge };
 
 export function WorkflowCanvas() {
   const [currentCombination, setCurrentCombination] = useState<ImageCombination | null>(null);
-  const [latestTask, setLatestTask] = useState<GenerationTaskDetail | null>(null);
   const validationResult = useWorkbenchStore((state) => state.validationResult);
+  const latestTask = useGenerationTaskStore((state) => state.latestTask);
+  const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
+  const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
+  const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -311,10 +319,22 @@ export function WorkflowCanvas() {
     let canceled = false;
 
     async function loadLatestCombination() {
-      const combinations = await listImageCombinations();
-      const latest = combinations[0];
+      const [combinations, runningTasks, recentTasks] = await Promise.all([
+        listImageCombinations(),
+        listRunningGenerationTasks(),
+        listRecentGenerationTasks(),
+      ]);
+      if (!canceled) {
+        setRunningTasks(runningTasks);
+        setRecentTasks(recentTasks);
+      }
 
+      const latest = combinations[0];
       if (!latest) {
+        if (!canceled) {
+          setCurrentCombination(null);
+          setLatestTask(null);
+        }
         return;
       }
 
@@ -341,7 +361,50 @@ export function WorkflowCanvas() {
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [setLatestTask, setRecentTasks, setRunningTasks]);
+
+  useEffect(() => {
+    if (!isTauriRuntime() || !currentCombination) {
+      return;
+    }
+
+    let canceled = false;
+    let unlisten: (() => void) | undefined;
+
+    listenGenerationTaskUpdates((task) => {
+      if (task.combinationId !== currentCombination.id) {
+        return;
+      }
+      getGenerationTaskDetail(task.id)
+        .then((detail) => {
+          if (!canceled) {
+            setLatestTask(detail);
+          }
+        })
+        .catch(() => undefined);
+      Promise.all([listRunningGenerationTasks(), listRecentGenerationTasks()])
+        .then(([runningTasks, recentTasks]) => {
+          if (!canceled) {
+            setRunningTasks(runningTasks);
+            setRecentTasks(recentTasks);
+          }
+        })
+        .catch(() => undefined);
+    })
+      .then((cleanup) => {
+        if (canceled) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      canceled = true;
+      unlisten?.();
+    };
+  }, [currentCombination, setLatestTask, setRecentTasks, setRunningTasks]);
 
   const flowNodes = buildWorkflowNodes(currentCombination, validationResult, latestTask);
 

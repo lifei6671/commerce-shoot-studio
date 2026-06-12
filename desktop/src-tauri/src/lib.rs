@@ -33,6 +33,8 @@ pub fn run() {
             commands::generation::cancel_generation_task,
             commands::generation::get_generation_task_detail,
             commands::generation::get_latest_generation_task_by_combination,
+            commands::generation::list_running_generation_tasks,
+            commands::generation::list_recent_generation_tasks,
             commands::generation::open_generation_result,
             commands::models::list_model_definitions,
             commands::models::save_model_config,
