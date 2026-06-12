@@ -5,6 +5,7 @@ import type {
   LocalGenerationTask,
   StartGenerationRequest,
 } from "../model/taskTypes";
+import type { SaveModelConfigRequest } from "../../model-config/model/modelTypes";
 
 export async function startGeneration(
   request: StartGenerationRequest,
@@ -47,4 +48,18 @@ export async function listRecentGenerationTasks(
 
 export async function openGenerationResult(assetId: string): Promise<void> {
   return invoke<void>("open_generation_result", { assetId });
+}
+
+export async function retryGenerationTask(taskId: string): Promise<LocalGenerationTask> {
+  return invoke<LocalGenerationTask>("retry_generation_task", { taskId });
+}
+
+export async function rerunGenerationFromCurrentCombination(
+  combinationId: string,
+  modelConfig: SaveModelConfigRequest,
+): Promise<LocalGenerationTask> {
+  return invoke<LocalGenerationTask>("rerun_generation_from_current_combination", {
+    combinationId,
+    modelConfig,
+  });
 }

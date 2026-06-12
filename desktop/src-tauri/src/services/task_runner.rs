@@ -175,6 +175,122 @@ pub async fn run_generation_flow_with_task_id_observer_and_cancellation<
         .ok_or_else(|| AppError::InvalidInput("generation task was not found".to_string()))
 }
 
+pub async fn retry_generation_task_with_provider<P: ImageGenerationProvider>(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    provider: &P,
+    api_key: &str,
+    source_task_id: &str,
+    task_id: Option<String>,
+) -> AppResult<LocalGenerationTask> {
+    let source_task = get_generation_task_by_id(database, source_task_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("generation task {source_task_id} was not found"))
+        })?;
+    if source_task.provider != provider.provider_name() {
+        return Err(AppError::InvalidInput(format!(
+            "provider {} is not supported by {} adapter",
+            source_task.provider,
+            provider.provider_name()
+        )));
+    }
+    let plan = build_retry_generation_plan(database, paths, &source_task).await?;
+    let task = create_generation_task_snapshot(
+        database,
+        CreateGenerationTaskSnapshotRequest {
+            id: task_id,
+            combination_id: source_task.combination_id.clone(),
+            provider: plan.provider.clone(),
+            model_id: plan.model_id.clone(),
+            request_summary_json: Some(plan.request_summary_json.clone()),
+            input_snapshot_json: plan.input_snapshot_json.clone(),
+            final_prompt_snapshot_json: plan.final_prompt_snapshot_json.clone(),
+            model_config_snapshot_json: plan.model_config_snapshot_json.clone(),
+            asset_snapshot_json: plan.asset_snapshot_json.clone(),
+            input_assets: plan.input_assets.clone(),
+            output_count: i64::from(plan.output_count),
+        },
+    )
+    .await?;
+
+    if let Err(err) =
+        execute_generation_task(database, paths, provider, api_key, &task, plan, None, None).await
+    {
+        if !matches!(err, AppError::GenerationCancelled(_)) {
+            mark_generation_task_failed(database, &task.id, &err).await?;
+        }
+        return Err(err);
+    }
+
+    get_generation_task_by_id(database, &task.id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("generation task was not found".to_string()))
+}
+
+pub async fn rerun_generation_from_current_combination_with_provider<P: ImageGenerationProvider>(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    provider: &P,
+    api_key: &str,
+    combination_id: &str,
+    model_config: crate::domain::model::SaveModelConfigRequest,
+    task_id: Option<String>,
+) -> AppResult<LocalGenerationTask> {
+    let mut plan = build_generation_plan(
+        database,
+        paths,
+        StartGenerationRequest {
+            combination_id: combination_id.to_string(),
+            draft_prompt_binding: None,
+            draft_model_config: Some(model_config),
+            revision: None,
+        },
+    )
+    .await?;
+    if plan.provider != provider.provider_name() {
+        return Err(AppError::InvalidInput(format!(
+            "provider {} is not supported by {} adapter",
+            plan.provider,
+            provider.provider_name()
+        )));
+    }
+    if let Some(summary) = plan.request_summary_json.as_object_mut() {
+        summary.insert("source".to_string(), json!("rerun"));
+        summary.insert("sourceCombinationId".to_string(), json!(combination_id));
+    }
+    let task = create_generation_task_snapshot(
+        database,
+        CreateGenerationTaskSnapshotRequest {
+            id: task_id,
+            combination_id: Some(plan.combination_id.clone()),
+            provider: plan.provider.clone(),
+            model_id: plan.model_id.clone(),
+            request_summary_json: Some(plan.request_summary_json.clone()),
+            input_snapshot_json: plan.input_snapshot_json.clone(),
+            final_prompt_snapshot_json: plan.final_prompt_snapshot_json.clone(),
+            model_config_snapshot_json: plan.model_config_snapshot_json.clone(),
+            asset_snapshot_json: plan.asset_snapshot_json.clone(),
+            input_assets: plan.input_assets.clone(),
+            output_count: i64::from(plan.output_count),
+        },
+    )
+    .await?;
+
+    if let Err(err) =
+        execute_generation_task(database, paths, provider, api_key, &task, plan, None, None).await
+    {
+        if !matches!(err, AppError::GenerationCancelled(_)) {
+            mark_generation_task_failed(database, &task.id, &err).await?;
+        }
+        return Err(err);
+    }
+
+    get_generation_task_by_id(database, &task.id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput("generation task was not found".to_string()))
+}
+
 pub async fn create_generation_task_snapshot(
     database: &WorkspaceDatabase,
     request: CreateGenerationTaskSnapshotRequest,
@@ -652,6 +768,136 @@ async fn build_generation_plan(
             params: draft_model_config.params_json,
         },
     })
+}
+
+async fn build_retry_generation_plan(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    source_task: &LocalGenerationTask,
+) -> AppResult<GenerationPlan> {
+    let input_assets = list_generation_task_input_assets(database, &source_task.id).await?;
+    let mut provider_images = Vec::new();
+    for input_asset in &input_assets {
+        let asset = get_asset_by_id(database, &input_asset.asset_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "asset {} was not found for retry",
+                    input_asset.asset_id
+                ))
+            })?;
+        let file_path = paths.root().join(&asset.relative_path);
+        if !file_path.is_file() {
+            return Err(asset_file_missing_error(
+                &input_asset.asset_id,
+                &asset.original_name,
+                input_asset.role.as_str(),
+            ));
+        }
+        provider_images.push(GenerateInputImage {
+            asset_id: asset.id,
+            role: input_asset.role.as_str().to_string(),
+            mime_type: asset.mime_type,
+            resolved_local_path: file_path,
+        });
+    }
+
+    let mut request_summary_json = source_task
+        .request_summary_json
+        .clone()
+        .unwrap_or_else(|| json!({}));
+    if let Some(summary) = request_summary_json.as_object_mut() {
+        summary.insert("source".to_string(), json!("retry"));
+        summary.insert("sourceTaskId".to_string(), json!(source_task.id.clone()));
+    }
+
+    Ok(GenerationPlan {
+        combination_id: source_task.combination_id.clone().unwrap_or_default(),
+        provider: source_task.provider.clone(),
+        model_id: source_task.model_id.clone(),
+        output_count: u32::try_from(source_task.output_count).map_err(|_| {
+            AppError::InvalidInput("source task output_count is invalid".to_string())
+        })?,
+        request_summary_json,
+        input_snapshot_json: source_task.input_snapshot_json.clone(),
+        final_prompt_snapshot_json: source_task.final_prompt_snapshot_json.clone(),
+        model_config_snapshot_json: source_task.model_config_snapshot_json.clone(),
+        asset_snapshot_json: source_task.asset_snapshot_json.clone(),
+        input_assets,
+        provider_input: GenerateInput {
+            task_id: String::new(),
+            provider: source_task.provider.clone(),
+            model_id: source_task.model_id.clone(),
+            images: provider_images,
+            prompt: PromptPayload {
+                system: source_task
+                    .final_prompt_snapshot_json
+                    .get("system")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                user: source_task
+                    .final_prompt_snapshot_json
+                    .get("user")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                negative: source_task
+                    .final_prompt_snapshot_json
+                    .get("negative")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+            params: source_task
+                .model_config_snapshot_json
+                .get("paramsJson")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        },
+    })
+}
+
+async fn list_generation_task_input_assets(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+) -> AppResult<Vec<GenerationTaskInputAsset>> {
+    let rows = sqlx::query(
+        "SELECT asset_id, role, view_type, sort_order, is_primary
+         FROM generation_task_input_assets
+         WHERE task_id = ?
+         ORDER BY sort_order ASC, asset_id ASC",
+    )
+    .bind(task_id)
+    .fetch_all(database.pool())
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(GenerationTaskInputAsset {
+                asset_id: row.get("asset_id"),
+                role: generation_task_input_role_from_str(row.get::<String, _>("role").as_str())?,
+                view_type: row.get("view_type"),
+                sort_order: row.get("sort_order"),
+                is_primary: row.get::<i64, _>("is_primary") != 0,
+            })
+        })
+        .collect()
+}
+
+fn generation_task_input_role_from_str(value: &str) -> AppResult<GenerationTaskInputRole> {
+    match value {
+        "person" => Ok(GenerationTaskInputRole::Person),
+        "garment" => Ok(GenerationTaskInputRole::Garment),
+        "reference" => Ok(GenerationTaskInputRole::Reference),
+        "mask" => Ok(GenerationTaskInputRole::Mask),
+        _ => Err(AppError::InvalidInput(format!(
+            "generation task input role {value} is invalid"
+        ))),
+    }
+}
+
+fn asset_file_missing_error(asset_id: &str, file_name: &str, role: &str) -> AppError {
+    AppError::InvalidInput(format!(
+        "ASSET_FILE_MISSING assetId={asset_id} fileName={file_name} role={role}"
+    ))
 }
 
 async fn execute_generation_task<P: ImageGenerationProvider>(
@@ -1890,6 +2136,198 @@ mod tests {
             .contains("provider unavailable"));
     }
 
+    #[tokio::test]
+    async fn retry_generation_task_reuses_original_snapshots() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let original = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id: combination_id.clone(),
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_retry_source".to_string()),
+        )
+        .await
+        .expect("original generation");
+        save_prompt_binding_request(
+            &database,
+            SavePromptBindingRequest {
+                id: None,
+                combination_id,
+                system: PromptBindingSection {
+                    mode: PromptMode::Default,
+                    base_template_id: None,
+                    append_text: String::new(),
+                    override_text: String::new(),
+                },
+                user: PromptBindingSection {
+                    mode: PromptMode::Override,
+                    base_template_id: None,
+                    append_text: String::new(),
+                    override_text: "changed prompt".to_string(),
+                },
+                negative: None,
+                variables_json: json!({}),
+            },
+        )
+        .await
+        .expect("change prompt");
+
+        let retried = retry_generation_task_with_provider(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            &original.id,
+            Some("task_retry_new".to_string()),
+        )
+        .await
+        .expect("retry generation");
+
+        assert_eq!(retried.status, "succeeded");
+        assert_eq!(retried.final_prompt_snapshot_json["user"], "wear linen dress");
+        assert_eq!(
+            retried.request_summary_json.expect("summary")["source"],
+            "retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_generation_task_rejects_missing_input_file() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let original = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_retry_missing_source".to_string()),
+        )
+        .await
+        .expect("original generation");
+        let garment_path: String = sqlx::query_scalar(
+            "SELECT a.relative_path
+             FROM generation_task_input_assets tia
+             INNER JOIN assets a ON a.id = tia.asset_id
+             WHERE tia.task_id = ? AND tia.role = 'garment'",
+        )
+        .bind(&original.id)
+        .fetch_one(database.pool())
+        .await
+        .expect("garment path");
+        std::fs::remove_file(paths.root().join(garment_path)).expect("remove garment file");
+
+        let result = retry_generation_task_with_provider(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            &original.id,
+            Some("task_retry_missing_new".to_string()),
+        )
+        .await;
+
+        let message = match result {
+            Err(AppError::InvalidInput(message)) => message,
+            other => panic!("unexpected retry result: {other:?}"),
+        };
+        assert!(message.contains("ASSET_FILE_MISSING"));
+        assert!(message.contains("role=garment"));
+        assert!(message.contains("assetId="));
+        assert!(message.contains("fileName="));
+    }
+
+    #[tokio::test]
+    async fn rerun_generation_from_current_combination_uses_current_prompt() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        run_generation_flow(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id: combination_id.clone(),
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+        )
+        .await
+        .expect("original generation");
+        save_prompt_binding_request(
+            &database,
+            SavePromptBindingRequest {
+                id: None,
+                combination_id: combination_id.clone(),
+                system: PromptBindingSection {
+                    mode: PromptMode::Default,
+                    base_template_id: None,
+                    append_text: String::new(),
+                    override_text: String::new(),
+                },
+                user: PromptBindingSection {
+                    mode: PromptMode::Override,
+                    base_template_id: None,
+                    append_text: String::new(),
+                    override_text: "changed prompt".to_string(),
+                },
+                negative: None,
+                variables_json: json!({}),
+            },
+        )
+        .await
+        .expect("change prompt");
+
+        let rerun = rerun_generation_from_current_combination_with_provider(
+            &database,
+            &paths,
+            &ChangedPromptProvider,
+            "placeholder-api-key",
+            &combination_id,
+            SaveModelConfigRequest {
+                id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-1".to_string(),
+                params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+            },
+            Some("task_rerun_current".to_string()),
+        )
+        .await
+        .expect("rerun generation");
+
+        assert_eq!(rerun.status, "succeeded");
+        assert_eq!(rerun.final_prompt_snapshot_json["user"], "changed prompt");
+        assert_eq!(rerun.request_summary_json.expect("summary")["source"], "rerun");
+    }
+
     #[test]
     fn sanitize_source_url_drops_signed_or_sensitive_urls() {
         assert_eq!(
@@ -2110,6 +2548,38 @@ mod tests {
                     ProviderErrorCode::RemoteError,
                     "provider unavailable",
                 ))
+            })
+        }
+    }
+
+    struct ChangedPromptProvider;
+
+    impl ImageGenerationProvider for ChangedPromptProvider {
+        fn provider_name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn generate<'a>(
+            &'a self,
+            input: GenerateInput,
+            _api_key: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                assert_eq!(input.prompt.user, "changed prompt");
+                Ok(GenerateResult {
+                    provider: "openai".to_string(),
+                    model_id: input.model_id,
+                    images: vec![GeneratedImage {
+                        bytes: png_bytes([4, 5, 6, 255]),
+                        mime_type: "image/png".to_string(),
+                        source_url: None,
+                    }],
+                    response_summary_json: json!({"provider": "openai"}),
+                })
             })
         }
     }

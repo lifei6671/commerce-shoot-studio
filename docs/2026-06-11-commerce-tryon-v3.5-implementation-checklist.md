@@ -1143,19 +1143,19 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 实现 `retry_generation_task(taskId)`。
-- [ ] retry 使用原任务快照。
-- [ ] retry 前检查输入文件存在。
-- [ ] 输入文件缺失返回 `ASSET_FILE_MISSING`，包含 assetId、fileName、role。
-- [ ] 实现 `rerun_generation_from_current_combination(combinationId)`。
-- [ ] rerun 使用当前组合、Prompt 和模型配置。
-- [ ] 两种任务的快照来源可在历史中区分。
+- [x] 实现 `retry_generation_task(taskId)`。
+- [x] retry 使用原任务快照。
+- [x] retry 前检查输入文件存在。
+- [x] 输入文件缺失返回 `ASSET_FILE_MISSING`，包含 assetId、fileName、role。
+- [x] 实现 `rerun_generation_from_current_combination(combinationId)`。
+- [x] rerun 使用当前组合、Prompt 和模型配置。
+- [x] 两种任务的快照来源可在历史中区分。
 
 **验证清单**：
 
-- [ ] retry 结果中的 `final_prompt_snapshot_json` 与原任务一致。
-- [ ] rerun 结果中的 `final_prompt_snapshot_json` 使用当前配置。
-- [ ] 删除原输入图片后 retry 返回 `ASSET_FILE_MISSING`。
+- [x] retry 结果中的 `final_prompt_snapshot_json` 与原任务一致。
+- [x] rerun 结果中的 `final_prompt_snapshot_json` 使用当前配置。
+- [x] 删除原输入图片后 retry 返回 `ASSET_FILE_MISSING`。
 
 **退出条件**：
 
