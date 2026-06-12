@@ -188,6 +188,7 @@ export function WorkflowCanvas() {
   const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
   const [canvasTool, setCanvasTool] = useState<CanvasTool>("hand");
   const [zoom, setZoom] = useState(100);
+  const [canvasResetRevision, setCanvasResetRevision] = useState(0);
   const [isAssetLibraryCollapsed, setIsAssetLibraryCollapsed] = useState(false);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
   const [isBottomDashboardCollapsed, setIsBottomDashboardCollapsed] = useState(false);
@@ -421,7 +422,7 @@ export function WorkflowCanvas() {
 
   async function handleImport(assetType: Extract<AssetType, "person" | "garment">) {
     const selected = await open({
-      multiple: false,
+      multiple: true,
       title: getImageDialogTitle(assetType),
       filters: [
         {
@@ -431,7 +432,8 @@ export function WorkflowCanvas() {
       ],
     });
 
-    if (!selected || Array.isArray(selected)) {
+    const selectedPaths = normalizeSelectedImagePaths(selected);
+    if (!selectedPaths.length) {
       return;
     }
 
@@ -439,21 +441,18 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     try {
-      const response = await importImage(selected, assetType);
-      const view = await getAsset(response.asset.id);
-      if (!view) {
-        throw new Error("导入后未找到资产记录");
-      }
+      const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
       if (assetType === "person") {
-        setPeople((items) => upsertAsset(items, view));
-        setSelectedPersonId(view.asset.id);
+        setPeople((items) => upsertAssets(items, views));
+        setSelectedPersonId(views[0].asset.id);
       } else {
-        setGarments((items) => upsertAsset(items, view));
+        const importedIds = views.map((view) => view.asset.id);
+        setGarments((items) => upsertAssets(items, views));
         setSelectedGarmentIds((ids) =>
-          [view.asset.id, ...ids.filter((id) => id !== view.asset.id)].slice(0, 4),
+          [...importedIds, ...ids.filter((id) => !importedIds.includes(id))].slice(0, 4),
         );
       }
-      setActionMessage(response.duplicate ? "已选择已存在的相同图片" : "图片导入成功");
+      setActionMessage(buildImportSuccessMessage(views.length, duplicateCount));
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "导入图片失败");
     } finally {
@@ -465,7 +464,7 @@ export function WorkflowCanvas() {
     assetType: Extract<AssetType, "person" | "garment">,
   ) {
     const selected = await open({
-      multiple: false,
+      multiple: true,
       title: getImageDialogTitle(assetType),
       filters: [
         {
@@ -475,37 +474,35 @@ export function WorkflowCanvas() {
       ],
     });
 
-    if (!selected || Array.isArray(selected)) {
+    const selectedPaths = normalizeSelectedImagePaths(selected);
+    if (!selectedPaths.length) {
       return;
     }
 
     setImportingType(assetType);
     setNewCombinationError(null);
     try {
-      const response = await importImage(selected, assetType);
-      const view = await getAsset(response.asset.id);
-      if (!view) {
-        throw new Error("导入后未找到资产记录");
-      }
+      const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
 
       if (assetType === "person") {
-        setPeople((items) => upsertAsset(items, view));
+        setPeople((items) => upsertAssets(items, views));
         setNewCombinationForm((form) => ({
           ...form,
-          personAssetId: view.asset.id,
+          personAssetId: views[0].asset.id,
         }));
       } else {
-        setGarments((items) => upsertAsset(items, view));
+        const importedIds = views.map((view) => view.asset.id);
+        setGarments((items) => upsertAssets(items, views));
         setNewCombinationForm((form) => ({
           ...form,
           garmentAssetIds: [
-            view.asset.id,
-            ...form.garmentAssetIds.filter((id) => id !== view.asset.id),
+            ...importedIds,
+            ...form.garmentAssetIds.filter((id) => !importedIds.includes(id)),
           ].slice(0, 4),
         }));
       }
 
-      setActionMessage(response.duplicate ? "已选择已存在的相同图片" : "图片导入成功");
+      setActionMessage(buildImportSuccessMessage(views.length, duplicateCount));
     } catch (error) {
       setNewCombinationError(error instanceof Error ? error.message : "导入图片失败");
     } finally {
@@ -593,15 +590,7 @@ export function WorkflowCanvas() {
   }
 
   function openNewCombinationModal() {
-    setNewCombinationForm(
-      buildNewCombinationForm({
-        name: buildCombinationName(),
-        personAssetId: selectedPersonId,
-        garmentAssetIds: selectedGarmentIds,
-        size: modelSize,
-        outputCount,
-      }),
-    );
+    setNewCombinationForm(buildNewCombinationForm());
     setNewCombinationError(null);
     setIsNewCombinationModalOpen(true);
   }
@@ -675,6 +664,12 @@ export function WorkflowCanvas() {
       );
   }
 
+  function handleRefreshWorkspace() {
+    setZoom(100);
+    setCanvasResetRevision((revision) => revision + 1);
+    handleRefreshAll();
+  }
+
   const showWindowChrome = isWindowsPlatform();
   const workbenchBodyClassName = [
     "workbench__body",
@@ -706,7 +701,7 @@ export function WorkflowCanvas() {
           }}
           onNew={openNewCombinationModal}
           onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
-          onRefresh={handleRefreshAll}
+          onRefresh={handleRefreshWorkspace}
           onSelectCombination={(combinationId) => {
             void handleSelectCombination(combinationId);
           }}
@@ -761,6 +756,7 @@ export function WorkflowCanvas() {
               selectedGarments={selectedGarments}
               selectedPerson={selectedPerson}
               validationResult={validationResult}
+              resetRevision={canvasResetRevision}
               zoom={zoom}
               onCanvasToolChange={setCanvasTool}
               onNodeSelect={(nodeId) => {
@@ -882,26 +878,12 @@ function buildCombinationName() {
   })}`;
 }
 
-function buildCombinationCode() {
-  const now = new Date();
-  const datePart = [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("");
-  const timePart = [
-    String(now.getHours()).padStart(2, "0"),
-    String(now.getMinutes()).padStart(2, "0"),
-  ].join("");
-  return `tryon-${datePart}-${timePart}`;
-}
-
 function buildNewCombinationForm(
   override: Partial<NewCombinationForm> = {},
 ): NewCombinationForm {
   return {
-    name: buildCombinationName(),
-    code: buildCombinationCode(),
+    name: "",
+    code: "",
     description: "",
     personAssetId: null,
     garmentAssetIds: [],
@@ -912,6 +894,43 @@ function buildNewCombinationForm(
     openAfterCreate: true,
     ...override,
   };
+}
+
+function normalizeSelectedImagePaths(selected: string | string[] | null): string[] {
+  if (!selected) {
+    return [];
+  }
+  return Array.isArray(selected) ? selected : [selected];
+}
+
+async function importSelectedImages(
+  selectedPaths: string[],
+  assetType: Extract<AssetType, "person" | "garment">,
+) {
+  const views: AssetFileView[] = [];
+  let duplicateCount = 0;
+  for (const path of selectedPaths) {
+    const response = await importImage(path, assetType);
+    if (response.duplicate) {
+      duplicateCount += 1;
+    }
+    const view = await getAsset(response.asset.id);
+    if (!view) {
+      throw new Error("导入后未找到资产记录");
+    }
+    views.push(view);
+  }
+  return { views, duplicateCount };
+}
+
+function buildImportSuccessMessage(totalCount: number, duplicateCount: number) {
+  if (totalCount === duplicateCount) {
+    return totalCount > 1 ? `已选择 ${totalCount} 张已存在的相同图片` : "已选择已存在的相同图片";
+  }
+  if (duplicateCount > 0) {
+    return `图片导入成功，${duplicateCount} 张已存在`;
+  }
+  return totalCount > 1 ? `已导入 ${totalCount} 张图片` : "图片导入成功";
 }
 
 function buildPromptBinding(
@@ -945,6 +964,10 @@ function buildPromptBinding(
 
 function upsertAsset(items: AssetFileView[], asset: AssetFileView) {
   return [asset, ...items.filter((item) => item.asset.id !== asset.asset.id)];
+}
+
+function upsertAssets(items: AssetFileView[], assets: AssetFileView[]) {
+  return assets.reduceRight((nextItems, asset) => upsertAsset(nextItems, asset), items);
 }
 
 function upsertCombinationSummary(
@@ -1610,6 +1633,7 @@ function FlowWorkbench({
   selectedGarments,
   selectedPerson,
   validationResult,
+  resetRevision,
   zoom,
   onCanvasToolChange,
   onNodeSelect,
@@ -1629,6 +1653,7 @@ function FlowWorkbench({
   selectedGarments: AssetFileView[];
   selectedPerson: AssetFileView | null;
   validationResult: ValidateCombinationResponse | null;
+  resetRevision: number;
   zoom: number;
   onCanvasToolChange: (tool: CanvasTool) => void;
   onNodeSelect: (nodeId: FlowNodeId) => void;
@@ -1674,6 +1699,16 @@ function FlowWorkbench({
   useEffect(() => {
     latestZoomRef.current = zoom;
   }, [zoom]);
+
+  useEffect(() => {
+    dragStartRef.current = null;
+    nodeDragStartRef.current = null;
+    suppressNextNodeClickRef.current = false;
+    setPan({ x: 0, y: 0 });
+    setIsPanning(false);
+    setIsWheelInteracting(false);
+    setNodePositions(cloneInitialFlowNodePositions());
+  }, [resetRevision]);
 
   useEffect(
     () => () => {
