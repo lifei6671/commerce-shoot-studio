@@ -232,8 +232,8 @@ button {
 .new-combination-modal {
   width: min(848px, calc(100vw - 76px));
   max-height: calc(100vh - 92px);
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid #dce3ee;
   border-radius: 8px;
@@ -278,6 +278,7 @@ button {
 
 .new-combination-modal form {
   min-height: 0;
+  flex: 1;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
 }
@@ -322,6 +323,10 @@ button {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.modal-field-block {
+  margin-top: 16px;
 }
 
 .modal-field-grid label,
@@ -424,16 +429,51 @@ button {
   gap: 7px;
 }
 
-.modal-resource-grid button {
+.modal-asset-picker__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal-asset-picker__header button {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  color: #334155;
+  border: 1px solid #dce3ee;
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.modal-asset-picker__header button:disabled {
+  opacity: 0.5;
+}
+
+.modal-dropzone[role="button"] {
+  cursor: pointer;
+}
+
+.modal-dropzone.has-assets {
+  align-content: stretch;
+}
+
+.modal-resource-grid span {
   position: relative;
+  display: block;
   aspect-ratio: 1 / 1;
   overflow: hidden;
   border: 1px solid #e1e7f0;
   border-radius: 6px;
   background: #eef2f7;
+  cursor: pointer;
 }
 
-.modal-resource-grid button.is-selected {
+.modal-resource-grid span.is-selected {
   border: 2px solid #2563eb;
 }
 
@@ -443,7 +483,7 @@ button {
   object-fit: cover;
 }
 
-.modal-resource-grid span {
+.modal-resource-grid i {
   position: absolute;
   right: 4px;
   bottom: 4px;
@@ -452,6 +492,13 @@ button {
   color: #2563eb;
   border-radius: 999px;
   background: #ffffff;
+}
+
+.modal-picker-hint {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .modal-preview-single {

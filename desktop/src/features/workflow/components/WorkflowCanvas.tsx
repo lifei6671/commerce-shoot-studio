@@ -369,6 +369,57 @@ export function WorkflowCanvas() {
     }
   }
 
+  async function handleImportForNewCombination(
+    assetType: Extract<AssetType, "person" | "garment">,
+  ) {
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Images",
+          extensions: ["png", "jpg", "jpeg"],
+        },
+      ],
+    });
+
+    if (!selected || Array.isArray(selected)) {
+      return;
+    }
+
+    setImportingType(assetType);
+    setNewCombinationError(null);
+    try {
+      const response = await importImage(selected, assetType);
+      const view = await getAsset(response.asset.id);
+      if (!view) {
+        throw new Error("导入后未找到资产记录");
+      }
+
+      if (assetType === "person") {
+        setPeople((items) => upsertAsset(items, view));
+        setNewCombinationForm((form) => ({
+          ...form,
+          personAssetId: view.asset.id,
+        }));
+      } else {
+        setGarments((items) => upsertAsset(items, view));
+        setNewCombinationForm((form) => ({
+          ...form,
+          garmentAssetIds: [
+            view.asset.id,
+            ...form.garmentAssetIds.filter((id) => id !== view.asset.id),
+          ].slice(0, 4),
+        }));
+      }
+
+      setActionMessage(response.duplicate ? "已选择已存在的相同图片" : "图片导入成功");
+    } catch (error) {
+      setNewCombinationError(error instanceof Error ? error.message : "导入图片失败");
+    } finally {
+      setImportingType(null);
+    }
+  }
+
   async function handleSaveCombination() {
     setIsSaving(true);
     setActionError(null);
@@ -469,6 +520,15 @@ export function WorkflowCanvas() {
     }
 
     const nextGarmentIds = newCombinationForm.garmentAssetIds.slice(0, 4);
+    if (!newCombinationForm.personAssetId) {
+      setNewCombinationError("请选择或导入一张人物图片");
+      return;
+    }
+    if (!nextGarmentIds.length) {
+      setNewCombinationError("请选择或导入至少一张服装图片");
+      return;
+    }
+
     setActionError(null);
     setActionMessage(null);
     setNewCombinationError(null);
@@ -477,17 +537,6 @@ export function WorkflowCanvas() {
     setOutputCount(newCombinationForm.outputCount);
     setSelectedPersonId(newCombinationForm.personAssetId);
     setSelectedGarmentIds(nextGarmentIds);
-
-    if (!newCombinationForm.personAssetId || !nextGarmentIds.length) {
-      setCurrentCombination(null);
-      setDraftCombinationName(name);
-      setLatestTask(null);
-      setIsNewCombinationModalOpen(false);
-      setSelectedFlowNode(newCombinationForm.openAfterCreate ? "person" : selectedFlowNode);
-      setSidePanelMode("details");
-      setActionMessage("已创建本地草稿，选择人物图和服装图后可保存");
-      return;
-    }
 
     setIsSaving(true);
     try {
@@ -649,6 +698,7 @@ export function WorkflowCanvas() {
           form={newCombinationForm}
           garments={garments}
           isSaving={isSaving}
+          importingType={importingType}
           people={people}
           onCancel={() => {
             setIsNewCombinationModalOpen(false);
@@ -658,6 +708,9 @@ export function WorkflowCanvas() {
             void handleCreateCombination();
           }}
           onFormChange={setNewCombinationForm}
+          onImport={(assetType) => {
+            void handleImportForNewCombination(assetType);
+          }}
         />
       ) : null}
       <StatusBar />
@@ -866,20 +919,24 @@ function NewCombinationModal({
   error,
   form,
   garments,
+  importingType,
   isSaving,
   people,
   onCancel,
   onCreate,
   onFormChange,
+  onImport,
 }: {
   error: string | null;
   form: NewCombinationForm;
   garments: AssetFileView[];
+  importingType: Extract<AssetType, "person" | "garment"> | null;
   isSaving: boolean;
   people: AssetFileView[];
   onCancel: () => void;
   onCreate: () => void;
   onFormChange: (form: NewCombinationForm) => void;
+  onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
 }) {
   const selectedPerson = people.find((asset) => asset.asset.id === form.personAssetId) ?? null;
   const selectedGarments = form.garmentAssetIds
@@ -965,13 +1022,17 @@ function NewCombinationModal({
               </label>
             </section>
             <section className="modal-section">
-              <h3>2. 选择初始素材 <span>（非必填，可在后续补充）</span></h3>
+              <h3>2. 选择初始素材 <span>（创建入库前必须选择人物图和服装图）</span></h3>
               <div className="modal-asset-layout">
                 <ModalAssetPicker
                   assets={people}
                   emptyText="暂无人物图"
+                  importLabel={importingType === "person" ? "导入中" : "导入人物图"}
+                  isImporting={importingType === "person"}
                   label="人物图片"
                   selectedIds={form.personAssetId ? [form.personAssetId] : []}
+                  helperText="点击缩略图选择，或从本地导入新人物图"
+                  onImport={() => onImport("person")}
                   onSelect={(assetId) => updateForm({ personAssetId: assetId })}
                 />
                 <ModalAssetPreview
@@ -983,8 +1044,12 @@ function NewCombinationModal({
                 <ModalAssetPicker
                   assets={garments}
                   emptyText="暂无服装图"
+                  importLabel={importingType === "garment" ? "导入中" : "导入服装图"}
+                  isImporting={importingType === "garment"}
                   label="服装图片（至少 1 张建议多角度）"
                   selectedIds={form.garmentAssetIds}
+                  helperText="可选择多张，最多 4 张，顺序按选择时间排列"
+                  onImport={() => onImport("garment")}
                   onSelect={toggleGarmentForDraft}
                 />
                 <ModalAssetPreview
@@ -1082,46 +1147,85 @@ function NewCombinationModal({
 function ModalAssetPicker({
   assets,
   emptyText,
+  helperText,
+  importLabel,
+  isImporting,
   label,
   selectedIds,
+  onImport,
   onSelect,
 }: {
   assets: AssetFileView[];
   emptyText: string;
+  helperText: string;
+  importLabel: string;
+  isImporting: boolean;
   label: string;
   selectedIds: string[];
+  onImport: () => void;
   onSelect: (assetId: string) => void;
 }) {
   return (
     <div className="modal-asset-picker">
-      <strong>{label}</strong>
-      <div className="modal-dropzone">
+      <div className="modal-asset-picker__header">
+        <strong>{label}</strong>
+        <button disabled={isImporting} onClick={onImport} type="button">
+          <Import size={13} />
+          {importLabel}
+        </button>
+      </div>
+      <div
+        className={`modal-dropzone ${assets.length ? "has-assets" : ""}`}
+        onClick={assets.length || isImporting ? undefined : onImport}
+        role={assets.length ? undefined : "button"}
+        tabIndex={assets.length ? undefined : 0}
+        onKeyDown={(event) => {
+          if (assets.length || isImporting) {
+            return;
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onImport();
+          }
+        }}
+      >
         {assets.length ? (
           <div className="modal-resource-grid">
             {assets.slice(0, 8).map((asset) => (
-              <button
+              <span
                 className={selectedIds.includes(asset.asset.id) ? "is-selected" : ""}
                 key={asset.asset.id}
-                onClick={() => onSelect(asset.asset.id)}
-                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect(asset.asset.id);
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(asset.asset.id);
+                  }
+                }}
               >
                 <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
                 {selectedIds.includes(asset.asset.id) ? (
-                  <span>
+                  <i>
                     <CircleCheck size={13} fill="currentColor" />
-                  </span>
+                  </i>
                 ) : null}
-              </button>
+              </span>
             ))}
           </div>
         ) : (
           <>
             <Import size={30} />
             <span>{emptyText}</span>
-            <small>请先在左侧资源库导入素材</small>
+            <small>点击这里从本地选择图片</small>
           </>
         )}
       </div>
+      <small className="modal-picker-hint">{helperText}</small>
     </div>
   );
 }
