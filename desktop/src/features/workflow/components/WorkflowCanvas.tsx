@@ -84,6 +84,10 @@ import {
   startGeneration,
 } from "../../generation-task/services/taskService";
 import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
+import {
+  buildFlowConnectorPath,
+  type FlowNodePosition,
+} from "./flowConnectorPath";
 
 const DEFAULT_PROMPT_TEXT =
   "Create a clean commercial fashion try-on image. Preserve the person's identity and pose, apply the selected garments naturally, keep realistic fabric texture, studio lighting, and ecommerce-ready composition.";
@@ -106,7 +110,6 @@ type SelectableAsset = {
 type SidePanelMode = "details" | "edit" | "links" | "history";
 type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
 type CanvasTool = "hand" | "select" | "grid";
-type FlowNodePosition = { x: number; y: number };
 
 const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
@@ -118,9 +121,6 @@ const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
 const ACTION_MESSAGE_AUTO_DISMISS_MS = 2400;
 const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
-const FLOW_NODE_WIDTH = 124;
-const FLOW_NODE_HEIGHT = 210;
-const FLOW_ARROW_EDGE_GAP = 12;
 const FLOW_NODE_ORDER: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
 const INITIAL_FLOW_NODE_POSITIONS: Record<FlowNodeId, FlowNodePosition> = {
   person: { x: 0, y: 40 },
@@ -2256,80 +2256,6 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
       <small>{text}</small>
     </div>
   );
-}
-
-type FlowConnectorSide = "left" | "right" | "top" | "bottom";
-
-type FlowNodeRect = {
-  left: number;
-  right: number;
-  top: number;
-  bottom: number;
-  centerX: number;
-  centerY: number;
-};
-
-type FlowConnectorPoint = {
-  side: FlowConnectorSide;
-  x: number;
-  y: number;
-};
-
-function getFlowNodeRect(position: FlowNodePosition): FlowNodeRect {
-  return {
-    left: position.x,
-    right: position.x + FLOW_NODE_WIDTH,
-    top: position.y,
-    bottom: position.y + FLOW_NODE_HEIGHT,
-    centerX: position.x + FLOW_NODE_WIDTH / 2,
-    centerY: position.y + FLOW_NODE_HEIGHT / 2,
-  };
-}
-
-function getFlowConnectorPoint(rect: FlowNodeRect, side: FlowConnectorSide): FlowConnectorPoint {
-  switch (side) {
-    case "left":
-      return { side, x: rect.left - FLOW_ARROW_EDGE_GAP, y: rect.centerY };
-    case "right":
-      return { side, x: rect.right + FLOW_ARROW_EDGE_GAP, y: rect.centerY };
-    case "top":
-      return { side, x: rect.centerX, y: rect.top - FLOW_ARROW_EDGE_GAP };
-    case "bottom":
-      return { side, x: rect.centerX, y: rect.bottom + FLOW_ARROW_EDGE_GAP };
-    default:
-      return { side: "right", x: rect.right + FLOW_ARROW_EDGE_GAP, y: rect.centerY };
-  }
-}
-
-function buildFlowConnectorPath(from: FlowNodePosition, to: FlowNodePosition) {
-  const fromRect = getFlowNodeRect(from);
-  const toRect = getFlowNodeRect(to);
-  let startSide: FlowConnectorSide = "right";
-  let endSide: FlowConnectorSide = "left";
-
-  if (toRect.left >= fromRect.right) {
-    startSide = "right";
-    endSide = "left";
-  } else if (toRect.right <= fromRect.left) {
-    startSide = "left";
-    endSide = "right";
-  } else if (toRect.centerY >= fromRect.centerY) {
-    startSide = "bottom";
-    endSide = "top";
-  } else {
-    startSide = "top";
-    endSide = "bottom";
-  }
-
-  const start = getFlowConnectorPoint(fromRect, startSide);
-  const end = getFlowConnectorPoint(toRect, endSide);
-  if (start.side === "left" || start.side === "right") {
-    const midX = start.x + (end.x - start.x) / 2;
-    return `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`;
-  }
-
-  const midY = start.y + (end.y - start.y) / 2;
-  return `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`;
 }
 
 function FlowArrows({ nodePositions }: { nodePositions: Record<FlowNodeId, FlowNodePosition> }) {
