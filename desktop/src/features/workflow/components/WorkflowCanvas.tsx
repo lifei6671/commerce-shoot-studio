@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Archive,
+  Box,
   BriefcaseBusiness,
   ChevronDown,
   ChevronLeft,
@@ -15,11 +16,15 @@ import {
   Eye,
   FileText,
   FolderOpen,
+  Grid3X3,
+  Hand,
   ImageIcon,
   Import,
   KeyRound,
+  Maximize2,
   Menu,
   Minus,
+  MousePointer2,
   Play,
   Plus,
   RefreshCw,
@@ -87,7 +92,9 @@ type SelectableAsset = {
   createdAt?: string;
 };
 
-type SidePanelMode = "summary" | "settings" | "history";
+type SidePanelMode = "details" | "edit" | "links" | "history";
+type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
+type CanvasTool = "hand" | "select" | "grid";
 
 // Backwards-compatible export for the node wrapper files.
 export function WorkflowNode() {
@@ -116,7 +123,10 @@ export function WorkflowCanvas() {
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [validationResult, setValidationResult] =
     useState<ValidateCombinationResponse | null>(null);
-  const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("summary");
+  const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("details");
+  const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
+  const [canvasTool, setCanvasTool] = useState<CanvasTool>("hand");
+  const [zoom, setZoom] = useState(100);
   const latestTask = useGenerationTaskStore((state) => state.latestTask);
   const recentTasks = useGenerationTaskStore((state) => state.recentTasks);
   const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
@@ -455,8 +465,14 @@ export function WorkflowCanvas() {
           canRun={canRun}
           isSaving={isSaving}
           isStarting={isStarting}
-          onHistory={() => setSidePanelMode("history")}
-          onModelSettings={() => setSidePanelMode("settings")}
+          onHistory={() => {
+            setSelectedFlowNode("result");
+            setSidePanelMode("history");
+          }}
+          onModelSettings={() => {
+            setSelectedFlowNode("model");
+            setSidePanelMode("edit");
+          }}
           onNew={handleNewCombination}
           onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
           onRefresh={handleRefreshAll}
@@ -482,92 +498,54 @@ export function WorkflowCanvas() {
             onSelectPerson={setSelectedPersonId}
             onToggleGarment={toggleGarment}
           />
-          <main className="generation-workbench">
+          <main className="canvas-column">
             <WorkbenchMessages
               loadingError={loadingError}
               actionError={actionError}
               actionMessage={actionMessage}
             />
-            <ComposerHeader
+            <FlowWorkbench
+              canRun={canRun}
+              canvasTool={canvasTool}
               credentialStatus={credentialStatus}
+              currentCombination={currentCombination}
               latestTask={latestTask}
-              selectedGarmentCount={selectedGarments.length}
+              modelSize={modelSize}
+              outputCount={outputCount}
+              promptText={promptText}
+              results={resultAssets}
+              selectedFlowNode={selectedFlowNode}
+              selectedGarments={selectedGarments}
               selectedPerson={selectedPerson}
               validationResult={validationResult}
+              zoom={zoom}
+              onCanvasToolChange={setCanvasTool}
+              onNodeSelect={(nodeId) => {
+                setSelectedFlowNode(nodeId);
+                setSidePanelMode("details");
+              }}
+              onRun={() => {
+                void handleStartGeneration();
+              }}
+              onZoomChange={setZoom}
             />
-            <section className="composer-grid">
-              <AssetInputCard
-                asset={selectedPerson}
-                icon={<UserRound size={28} />}
-                isImporting={importingType === "person"}
-                title="人物图片"
-                description="选择一张主体人物图，后续生成会保持人物身份和姿态。"
-                actionLabel={selectedPerson ? "替换人物图" : "导入人物图"}
-                onImport={() => {
-                  void handleImport("person");
-                }}
-              />
-              <GarmentInputCard
-                garments={selectedGarments}
-                isImporting={importingType === "garment"}
-                onImport={() => {
-                  void handleImport("garment");
-                }}
-                onRemove={(assetId) => toggleGarment(assetId)}
-              />
-              <PromptEditorCard promptText={promptText} onPromptChange={setPromptText} />
-              <ModelSettingsCard
-                apiKeyDraft={apiKeyDraft}
-                credentialStatus={credentialStatus}
-                isSavingApiKey={isSavingApiKey}
-                modelSize={modelSize}
-                outputCount={outputCount}
-                onApiKeyDraftChange={setApiKeyDraft}
-                onModelSizeChange={setModelSize}
-                onOutputCountChange={setOutputCount}
-                onSaveApiKey={() => {
-                  void handleSaveApiKey();
-                }}
-              />
-            </section>
-            <section className="execution-strip">
-              <ValidationSummary validationResult={validationResult} />
-              <div className="execution-actions">
-                <button
-                  className="toolbar-button"
-                  disabled={isSaving}
-                  onClick={() => {
-                    void handleSaveCombination();
-                  }}
-                  type="button"
-                >
-                  <Save size={16} />
-                  {isSaving ? "保存中" : "保存组合"}
-                </button>
-                <button
-                  className="run-button"
-                  disabled={!canRun}
-                  onClick={() => {
-                    void handleStartGeneration();
-                  }}
-                  type="button"
-                >
-                  <Play size={17} fill="currentColor" />
-                  {isStarting ? "提交中" : "执行生成"}
-                </button>
-              </div>
-            </section>
-            <section className="result-workspace">
-              <BottomDashboard currentCombination={currentCombination} latestTask={latestTask} />
-              <ResultPreview results={resultAssets} />
-            </section>
+            <BottomDashboard
+              currentCombination={currentCombination}
+              latestTask={latestTask}
+            />
           </main>
           <InspectorPanel
             apiKeyDraft={apiKeyDraft}
             credentialStatus={credentialStatus}
             currentCombination={currentCombination}
+            latestTask={latestTask}
             mode={sidePanelMode}
+            modelSize={modelSize}
+            outputCount={outputCount}
+            promptText={promptText}
             recentTasks={recentTasks}
+            results={resultAssets}
+            selectedFlowNode={selectedFlowNode}
             selectedGarments={selectedGarments}
             selectedPerson={selectedPerson}
             validationResult={validationResult}
@@ -575,10 +553,14 @@ export function WorkflowCanvas() {
             onImport={(assetType) => {
               void handleImport(assetType);
             }}
+            onModelSizeChange={setModelSize}
             onModeChange={setSidePanelMode}
+            onOutputCountChange={setOutputCount}
+            onPromptChange={setPromptText}
             onSaveApiKey={() => {
               void handleSaveApiKey();
             }}
+            onSelectNode={setSelectedFlowNode}
             onTaskChanged={(detail) => {
               setLatestTask(detail);
               void refreshTaskLists();
@@ -898,6 +880,348 @@ function AssetSection({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function FlowWorkbench({
+  canRun,
+  canvasTool,
+  credentialStatus,
+  currentCombination,
+  latestTask,
+  modelSize,
+  outputCount,
+  promptText,
+  results,
+  selectedFlowNode,
+  selectedGarments,
+  selectedPerson,
+  validationResult,
+  zoom,
+  onCanvasToolChange,
+  onNodeSelect,
+  onRun,
+  onZoomChange,
+}: {
+  canRun: boolean;
+  canvasTool: CanvasTool;
+  credentialStatus: ProviderCredentialStatus | null;
+  currentCombination: ImageCombination | null;
+  latestTask: GenerationTaskDetail | null;
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  promptText: string;
+  results: GenerationTaskResultAsset[];
+  selectedFlowNode: FlowNodeId;
+  selectedGarments: AssetFileView[];
+  selectedPerson: AssetFileView | null;
+  validationResult: ValidateCombinationResponse | null;
+  zoom: number;
+  onCanvasToolChange: (tool: CanvasTool) => void;
+  onNodeSelect: (nodeId: FlowNodeId) => void;
+  onRun: () => void;
+  onZoomChange: (zoom: number) => void;
+}) {
+  const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
+  const modelReady = credentialStatus?.configured === true;
+  const viewportWidth = typeof window === "undefined" ? 1600 : window.innerWidth;
+  const fitScale = Math.min(1, Math.max(0.55, (viewportWidth - 690) / 1160));
+  const canvasScale = Math.min(zoom / 100, fitScale);
+
+  return (
+    <section className="canvas-shell">
+      <CanvasToolbar
+        canvasTool={canvasTool}
+        zoom={zoom}
+        onCanvasToolChange={onCanvasToolChange}
+        onZoomChange={onZoomChange}
+      />
+      <div className="flow-canvas">
+        <div
+          className="flow-canvas__inner"
+          style={{ transform: `translateY(-50%) scale(${canvasScale})` }}
+        >
+          <FlowNode
+            accent="green"
+            id="person"
+            selected={selectedFlowNode === "person"}
+            status={selectedPerson ? "done" : "required"}
+            subtitle={selectedPerson ? "必选" : "未选择"}
+            title="人物图"
+            onSelect={onNodeSelect}
+          >
+            {selectedPerson ? (
+              <>
+                <img
+                  className="flow-node__hero-image"
+                  alt={selectedPerson.asset.originalName}
+                  src={convertFileSrc(selectedPerson.thumbFilePath)}
+                />
+                <small>{selectedPerson.asset.originalName}</small>
+                <strong>{formatDimensions(selectedPerson.asset.width, selectedPerson.asset.height)}</strong>
+              </>
+            ) : (
+              <NodeEmpty icon={<UserRound size={24} />} text="导入人物图" />
+            )}
+          </FlowNode>
+          <FlowArrow left={132} width={66} />
+          <FlowNode
+            accent="blue"
+            id="garments"
+            selected={selectedFlowNode === "garments"}
+            status={selectedGarments.length ? "done" : "required"}
+            subtitle="至少 1 张"
+            title="服装图组"
+            onSelect={onNodeSelect}
+          >
+            {selectedGarments.length ? (
+              <>
+                <div className="flow-node__image-grid">
+                  {selectedGarments.slice(0, 4).map((asset) => (
+                    <img
+                      alt={asset.asset.originalName}
+                      key={asset.asset.id}
+                      src={convertFileSrc(asset.thumbFilePath)}
+                    />
+                  ))}
+                </div>
+                <span className="flow-node__count">{selectedGarments.length} 张</span>
+              </>
+            ) : (
+              <NodeEmpty icon={<BriefcaseBusiness size={24} />} text="导入服装图" />
+            )}
+          </FlowNode>
+          <FlowArrow left={330} width={66} />
+          <FlowNode
+            accent="purple"
+            id="prompt"
+            selected={selectedFlowNode === "prompt"}
+            status={promptText.trim() ? "done" : "required"}
+            subtitle={promptText.trim() ? "已配置" : "未配置"}
+            title="Prompt"
+            onSelect={onNodeSelect}
+          >
+            <div className="flow-node__document">
+              <FileText size={42} />
+              <span>用户 Prompt</span>
+            </div>
+            <strong>{promptText.trim().length} 字符</strong>
+          </FlowNode>
+          <FlowArrow left={528} width={66} />
+          <FlowNode
+            accent="orange"
+            id="model"
+            selected={selectedFlowNode === "model"}
+            status={modelReady ? "done" : "pending"}
+            subtitle={modelReady ? "已选择" : "待配置"}
+            title="模型"
+            onSelect={onNodeSelect}
+          >
+            <div className="flow-node__model">
+              <Box size={52} />
+            </div>
+            <strong>{DEFAULT_MODEL_ID}</strong>
+            <small>{modelSize} / {outputCount} 张</small>
+          </FlowNode>
+          <FlowArrow left={726} width={66} />
+          <FlowNode
+            accent="blue"
+            id="execute"
+            selected={selectedFlowNode === "execute"}
+            status={validationResult?.executable ? "done" : "required"}
+            subtitle={canRun ? "就绪" : "待补齐"}
+            title="执行"
+            onSelect={onNodeSelect}
+          >
+            <button
+              className="flow-node__play"
+              disabled={!canRun}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRun();
+              }}
+              type="button"
+            >
+              <Play size={30} fill="currentColor" />
+            </button>
+            <small>{canRun ? "点击执行生成" : "输入未完整"}</small>
+          </FlowNode>
+          <FlowArrow left={924} width={66} />
+          <FlowNode
+            accent="gray"
+            id="result"
+            selected={selectedFlowNode === "result"}
+            status={results.length ? "done" : "pending"}
+            subtitle={taskStatus}
+            title="结果"
+            onSelect={onNodeSelect}
+          >
+            {results.length ? (
+              <div className="flow-node__image-grid flow-node__image-grid--results">
+                {results.slice(0, 4).map((result) => (
+                  <img alt="生成结果" key={result.id} src={convertFileSrc(result.thumbFilePath)} />
+                ))}
+              </div>
+            ) : (
+              <NodeEmpty icon={<ImageIcon size={28} />} text={`将生成 ${outputCount} 张图片`} />
+            )}
+          </FlowNode>
+        </div>
+      </div>
+      <FlowMiniMap selectedFlowNode={selectedFlowNode} />
+      <div className="flow-context">
+        <span>{currentCombination?.name ?? "未保存组合"}</span>
+        <strong>{validationResult?.executable ? "流程已就绪" : "待补充输入"}</strong>
+      </div>
+    </section>
+  );
+}
+
+function CanvasToolbar({
+  canvasTool,
+  zoom,
+  onCanvasToolChange,
+  onZoomChange,
+}: {
+  canvasTool: CanvasTool;
+  zoom: number;
+  onCanvasToolChange: (tool: CanvasTool) => void;
+  onZoomChange: (zoom: number) => void;
+}) {
+  const tools: Array<{ id: CanvasTool; icon: ReactNode; label: string }> = [
+    { id: "hand", icon: <Hand size={17} />, label: "拖拽画布" },
+    { id: "select", icon: <MousePointer2 size={17} />, label: "选择节点" },
+    { id: "grid", icon: <Grid3X3 size={17} />, label: "网格视图" },
+  ];
+
+  function updateZoom(nextZoom: number) {
+    onZoomChange(Math.max(80, Math.min(120, nextZoom)));
+  }
+
+  return (
+    <div className="canvas-toolbar">
+      <div className="tool-segment" role="group" aria-label="画布工具">
+        {tools.map((tool) => (
+          <button
+            aria-label={tool.label}
+            className={canvasTool === tool.id ? "is-active" : ""}
+            key={tool.id}
+            onClick={() => onCanvasToolChange(tool.id)}
+            title={tool.label}
+            type="button"
+          >
+            {tool.icon}
+          </button>
+        ))}
+      </div>
+      <div className="zoom-control" role="group" aria-label="缩放">
+        <button onClick={() => updateZoom(zoom - 10)} type="button" aria-label="缩小">
+          <Minus size={16} />
+        </button>
+        <span>{zoom}%</span>
+        <button onClick={() => updateZoom(zoom + 10)} type="button" aria-label="放大">
+          <Plus size={16} />
+        </button>
+      </div>
+      <button
+        className="canvas-icon"
+        onClick={() => onZoomChange(100)}
+        title="适配画布"
+        type="button"
+        aria-label="适配画布"
+      >
+        <Maximize2 size={17} />
+      </button>
+      <button className="flow-help" type="button">
+        <CircleAlert size={16} />
+        流程说明
+        <ChevronDown size={15} />
+      </button>
+    </div>
+  );
+}
+
+function FlowNode({
+  accent,
+  children,
+  id,
+  selected,
+  status,
+  subtitle,
+  title,
+  onSelect,
+}: {
+  accent: "green" | "blue" | "purple" | "orange" | "gray";
+  children: ReactNode;
+  id: FlowNodeId;
+  selected: boolean;
+  status: "done" | "pending" | "required";
+  subtitle: string;
+  title: string;
+  onSelect: (nodeId: FlowNodeId) => void;
+}) {
+  return (
+    <button
+      className={`flow-node flow-node--${accent} ${selected ? "is-selected" : ""}`}
+      data-node-id={id}
+      onClick={() => onSelect(id)}
+      type="button"
+    >
+      <div className="flow-node__header">
+        <div>
+          <strong>{title}</strong>
+          <span>{subtitle}</span>
+        </div>
+        <StatusMark status={status} />
+      </div>
+      <div className="flow-node__body">{children}</div>
+    </button>
+  );
+}
+
+function StatusMark({ status }: { status: "done" | "pending" | "required" }) {
+  if (status === "done") {
+    return (
+      <span className="flow-node__status is-done">
+        <CircleCheck size={14} fill="currentColor" />
+      </span>
+    );
+  }
+  if (status === "required") {
+    return (
+      <span className="flow-node__status is-required">
+        <CircleAlert size={14} />
+      </span>
+    );
+  }
+  return (
+    <span className="flow-node__status">
+      <Clock3 size={14} />
+    </span>
+  );
+}
+
+function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
+  return (
+    <div className="flow-node__empty">
+      {icon}
+      <small>{text}</small>
+    </div>
+  );
+}
+
+function FlowArrow({ left, width }: { left: number; width: number }) {
+  return <span className="flow-arrow" style={{ left, width }} aria-hidden="true" />;
+}
+
+function FlowMiniMap({ selectedFlowNode }: { selectedFlowNode: FlowNodeId }) {
+  const nodes: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
+  return (
+    <div className="flow-minimap" aria-label="流程缩略图">
+      {nodes.map((nodeId) => (
+        <span className={selectedFlowNode === nodeId ? "is-active" : ""} key={nodeId} />
+      ))}
+    </div>
   );
 }
 
@@ -1221,56 +1545,84 @@ function InspectorPanel({
   apiKeyDraft,
   credentialStatus,
   currentCombination,
+  latestTask,
   mode,
+  modelSize,
+  outputCount,
+  promptText,
   recentTasks,
+  results,
+  selectedFlowNode,
   selectedGarments,
   selectedPerson,
   validationResult,
   onApiKeyDraftChange,
   onImport,
+  onModelSizeChange,
   onModeChange,
+  onOutputCountChange,
+  onPromptChange,
   onSaveApiKey,
+  onSelectNode,
   onTaskChanged,
 }: {
   apiKeyDraft: string;
   credentialStatus: ProviderCredentialStatus | null;
   currentCombination: ImageCombination | null;
+  latestTask: GenerationTaskDetail | null;
   mode: SidePanelMode;
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  promptText: string;
   recentTasks: GenerationTaskDetail[];
+  results: GenerationTaskResultAsset[];
+  selectedFlowNode: FlowNodeId;
   selectedGarments: AssetFileView[];
   selectedPerson: AssetFileView | null;
   validationResult: ValidateCombinationResponse | null;
   onApiKeyDraftChange: (value: string) => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+  onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
   onModeChange: (mode: SidePanelMode) => void;
+  onOutputCountChange: (value: number) => void;
+  onPromptChange: (value: string) => void;
   onSaveApiKey: () => void;
+  onSelectNode: (nodeId: FlowNodeId) => void;
   onTaskChanged: (detail: GenerationTaskDetail | null) => void;
 }) {
+  const nodeLabel = getFlowNodeLabel(selectedFlowNode);
   return (
-    <aside className="property-panel inspector-panel">
+    <aside className="property-panel">
       <div className="property-panel__header">
         <div>
-          <h2>检查器</h2>
+          <h2>属性面板</h2>
           <p>
-            当前组合： <strong>{currentCombination?.name ?? "未保存组合"}</strong>
+            当前选择： <strong>{nodeLabel}</strong>
           </p>
         </div>
         <ChevronLeft size={18} />
       </div>
       <div className="tabs">
         <button
-          className={mode === "summary" ? "is-active" : ""}
-          onClick={() => onModeChange("summary")}
+          className={mode === "details" ? "is-active" : ""}
+          onClick={() => onModeChange("details")}
           type="button"
         >
-          摘要
+          详情
         </button>
         <button
-          className={mode === "settings" ? "is-active" : ""}
-          onClick={() => onModeChange("settings")}
+          className={mode === "edit" ? "is-active" : ""}
+          onClick={() => onModeChange("edit")}
           type="button"
         >
-          设置
+          编辑
+        </button>
+        <button
+          className={mode === "links" ? "is-active" : ""}
+          onClick={() => onModeChange("links")}
+          type="button"
+        >
+          关联
         </button>
         <button
           className={mode === "history" ? "is-active" : ""}
@@ -1280,32 +1632,306 @@ function InspectorPanel({
           历史
         </button>
       </div>
-      {mode === "summary" ? (
-        <>
-          <AssetDetailBlock
-            title="人物图片"
-            asset={selectedPerson}
-            emptyText="还没有选择人物图"
-            onImport={() => onImport("person")}
-          />
-          <GarmentDetailBlock garments={selectedGarments} onImport={() => onImport("garment")} />
-          <ValidationDetailBlock
-            combinationName={currentCombination?.name ?? "未保存组合"}
-            validationResult={validationResult}
-          />
-        </>
+      {mode === "details" ? (
+        <NodeDetails
+          currentCombination={currentCombination}
+          latestTask={latestTask}
+          modelSize={modelSize}
+          outputCount={outputCount}
+          promptText={promptText}
+          results={results}
+          selectedFlowNode={selectedFlowNode}
+          selectedGarments={selectedGarments}
+          selectedPerson={selectedPerson}
+          validationResult={validationResult}
+          onImport={onImport}
+        />
       ) : null}
-      {mode === "settings" ? (
+      {mode === "edit" ? (
+        <NodeEditor
+          apiKeyDraft={apiKeyDraft}
+          credentialStatus={credentialStatus}
+          modelSize={modelSize}
+          outputCount={outputCount}
+          promptText={promptText}
+          selectedFlowNode={selectedFlowNode}
+          onApiKeyDraftChange={onApiKeyDraftChange}
+          onImport={onImport}
+          onModelSizeChange={onModelSizeChange}
+          onOutputCountChange={onOutputCountChange}
+          onPromptChange={onPromptChange}
+          onSaveApiKey={onSaveApiKey}
+        />
+      ) : null}
+      {mode === "links" ? (
+        <NodeLinks
+          selectedFlowNode={selectedFlowNode}
+          onSelectNode={(nodeId) => {
+            onSelectNode(nodeId);
+            onModeChange("details");
+          }}
+        />
+      ) : null}
+      {mode === "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
+      {mode !== "history" ? <TaskHistory tasks={recentTasks.slice(0, 3)} onTaskChanged={onTaskChanged} /> : null}
+    </aside>
+  );
+}
+
+function NodeDetails({
+  currentCombination,
+  latestTask,
+  modelSize,
+  outputCount,
+  promptText,
+  results,
+  selectedFlowNode,
+  selectedGarments,
+  selectedPerson,
+  validationResult,
+  onImport,
+}: {
+  currentCombination: ImageCombination | null;
+  latestTask: GenerationTaskDetail | null;
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  promptText: string;
+  results: GenerationTaskResultAsset[];
+  selectedFlowNode: FlowNodeId;
+  selectedGarments: AssetFileView[];
+  selectedPerson: AssetFileView | null;
+  validationResult: ValidateCombinationResponse | null;
+  onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+}) {
+  if (selectedFlowNode === "person") {
+    return (
+      <AssetDetailBlock
+        title="图片预览"
+        asset={selectedPerson}
+        emptyText="还没有选择人物图"
+        onImport={() => onImport("person")}
+      />
+    );
+  }
+
+  if (selectedFlowNode === "garments") {
+    return <GarmentDetailBlock garments={selectedGarments} onImport={() => onImport("garment")} />;
+  }
+
+  if (selectedFlowNode === "prompt") {
+    return (
+      <section className="detail-block">
+        <h3>Prompt 摘要</h3>
+        <dl className="plain-dl">
+          <dt>来源</dt>
+          <dd>当前组合内置 Prompt</dd>
+          <dt>字符数</dt>
+          <dd>{promptText.trim().length}</dd>
+          <dt>状态</dt>
+          <dd>{promptText.trim() ? "已配置" : "未配置"}</dd>
+        </dl>
+        <p className="panel-note">{promptText || "还没有填写 Prompt。"}</p>
+      </section>
+    );
+  }
+
+  if (selectedFlowNode === "model") {
+    return (
+      <section className="detail-block">
+        <h3>模型配置</h3>
+        <dl className="plain-dl">
+          <dt>Provider</dt>
+          <dd>{DEFAULT_PROVIDER}</dd>
+          <dt>模型</dt>
+          <dd>{DEFAULT_MODEL_ID}</dd>
+          <dt>尺寸</dt>
+          <dd>{modelSize}</dd>
+          <dt>生成数量</dt>
+          <dd>{outputCount}</dd>
+        </dl>
+      </section>
+    );
+  }
+
+  if (selectedFlowNode === "execute") {
+    return (
+      <ValidationDetailBlock
+        combinationName={currentCombination?.name ?? "未保存组合"}
+        validationResult={validationResult}
+      />
+    );
+  }
+
+  return (
+    <section className="detail-block">
+      <h3>结果预览</h3>
+      {results.length ? (
+        <div className="garment-detail-grid">
+          {results.slice(0, 6).map((result) => (
+            <button
+              key={result.id}
+              onClick={() => {
+                openGenerationResult(result.assetId).catch(() => undefined);
+              }}
+              type="button"
+            >
+              <img alt="生成结果" src={convertFileSrc(result.thumbFilePath)} />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="panel-empty">
+          <ImageIcon size={24} />
+          还没有生成结果
+        </div>
+      )}
+      <dl className="plain-dl panel-dl-space">
+        <dt>任务状态</dt>
+        <dd>{getGenerationTaskStatusLabel(latestTask?.task.status)}</dd>
+        <dt>任务 ID</dt>
+        <dd>{latestTask?.task.id ?? "--"}</dd>
+      </dl>
+    </section>
+  );
+}
+
+function NodeEditor({
+  apiKeyDraft,
+  credentialStatus,
+  modelSize,
+  outputCount,
+  promptText,
+  selectedFlowNode,
+  onApiKeyDraftChange,
+  onImport,
+  onModelSizeChange,
+  onOutputCountChange,
+  onPromptChange,
+  onSaveApiKey,
+}: {
+  apiKeyDraft: string;
+  credentialStatus: ProviderCredentialStatus | null;
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  promptText: string;
+  selectedFlowNode: FlowNodeId;
+  onApiKeyDraftChange: (value: string) => void;
+  onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+  onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
+  onOutputCountChange: (value: number) => void;
+  onPromptChange: (value: string) => void;
+  onSaveApiKey: () => void;
+}) {
+  if (selectedFlowNode === "person" || selectedFlowNode === "garments") {
+    const assetType = selectedFlowNode === "person" ? "person" : "garment";
+    return (
+      <section className="detail-block">
+        <h3>{selectedFlowNode === "person" ? "人物图片" : "服装图片"}</h3>
+        <button className="ghost-wide" onClick={() => onImport(assetType)} type="button">
+          <Import size={15} />
+          {selectedFlowNode === "person" ? "替换人物图" : "添加服装图"}
+        </button>
+      </section>
+    );
+  }
+
+  if (selectedFlowNode === "prompt") {
+    return (
+      <section className="detail-block">
+        <h3>Prompt 编辑</h3>
+        <textarea
+          rows={10}
+          value={promptText}
+          onChange={(event) => onPromptChange(event.target.value)}
+        />
+        <button className="ghost-wide" onClick={() => onPromptChange(DEFAULT_PROMPT_TEXT)} type="button">
+          <RefreshCw size={15} />
+          恢复默认 Prompt
+        </button>
+      </section>
+    );
+  }
+
+  if (selectedFlowNode === "model") {
+    return (
+      <>
+        <section className="detail-block">
+          <h3>模型参数</h3>
+          <label>
+            尺寸
+            <select
+              value={modelSize}
+              onChange={(event) =>
+                onModelSizeChange(event.target.value as (typeof MODEL_SIZES)[number])
+              }
+            >
+              {MODEL_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            生成数量
+            <input
+              min={1}
+              max={4}
+              type="number"
+              value={outputCount}
+              onChange={(event) =>
+                onOutputCountChange(Math.max(1, Math.min(4, Number(event.target.value) || 1)))
+              }
+            />
+          </label>
+        </section>
         <ApiKeyDetailBlock
           apiKeyDraft={apiKeyDraft}
           credentialStatus={credentialStatus}
           onApiKeyDraftChange={onApiKeyDraftChange}
           onSaveApiKey={onSaveApiKey}
         />
-      ) : null}
-      {mode === "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
-      {mode !== "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
-    </aside>
+      </>
+    );
+  }
+
+  return (
+    <section className="detail-block">
+      <h3>{getFlowNodeLabel(selectedFlowNode)}</h3>
+      <p className="panel-note">该节点由当前组合、任务状态和生成结果自动驱动。</p>
+    </section>
+  );
+}
+
+function NodeLinks({
+  selectedFlowNode,
+  onSelectNode,
+}: {
+  selectedFlowNode: FlowNodeId;
+  onSelectNode: (nodeId: FlowNodeId) => void;
+}) {
+  const nodeOrder: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
+  const selectedIndex = nodeOrder.indexOf(selectedFlowNode);
+  const related = nodeOrder.filter(
+    (nodeId, index) => Math.abs(index - selectedIndex) === 1 || nodeId === selectedFlowNode,
+  );
+  return (
+    <section className="detail-block">
+      <h3>节点关联</h3>
+      <div className="node-link-list">
+        {related.map((nodeId) => (
+          <button
+            className={nodeId === selectedFlowNode ? "is-active" : ""}
+            key={nodeId}
+            onClick={() => onSelectNode(nodeId)}
+            type="button"
+          >
+            {getFlowNodeLabel(nodeId)}
+            <ChevronRight size={14} />
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1563,72 +2189,82 @@ function BottomDashboard({
   }
 
   return (
-    <section className="task-dashboard-card">
-      <div className="task-dashboard-card__header">
-        <h2>任务状态</h2>
-        <span>{taskStatus}</span>
-      </div>
-      <div className="progress-layout">
-        <div className="progress-ring">
-          <svg viewBox="0 0 120 120">
-            <circle cx="60" cy="60" r="48" />
-            <circle
-              cx="60"
-              cy="60"
-              r="48"
-              className="progress-ring__value"
-              style={ringStyle}
-            />
-          </svg>
-          <strong>{progress}%</strong>
-          <span>{taskStatus}</span>
+    <section className="bottom-dashboard">
+      <div className="task-status">
+        <h2>
+          任务状态
+          <ChevronDown size={15} />
+        </h2>
+        <div className="progress-layout">
+          <div className="progress-ring">
+            <svg viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="48" />
+              <circle
+                cx="60"
+                cy="60"
+                r="48"
+                className="progress-ring__value"
+                style={ringStyle}
+              />
+            </svg>
+            <strong>{progress}%</strong>
+            <span>{taskStatus}</span>
+          </div>
+          <div className="progress-steps">
+            {taskSteps.map((step) => (
+              <div
+                className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
+                key={step.label}
+              >
+                <span />
+                <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
+                <time>{step.state === "done" ? "完成" : "--"}</time>
+                {step.state === "done" ? (
+                  <CircleCheck size={14} fill="currentColor" />
+                ) : (
+                  <Clock3 size={14} />
+                )}
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="progress-steps">
-          {taskSteps.map((step) => (
-            <div
-              className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
-              key={step.label}
-            >
-              <span />
-              <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
-              <time>{step.state === "done" ? "完成" : "--"}</time>
-              {step.state === "done" ? (
-                <CircleCheck size={14} fill="currentColor" />
-              ) : (
-                <Clock3 size={14} />
-              )}
-            </div>
-          ))}
+        <div className="task-actions">
+          <button
+            className="danger-button"
+            disabled={!canCancel}
+            onClick={() => {
+              void handleCancelTask();
+            }}
+            type="button"
+          >
+            <CircleX size={15} />
+            {isCancelling ? "取消中" : "取消任务"}
+          </button>
+          <button className="toolbar-button" disabled={!hasTask} type="button">
+            <Eye size={15} />
+            最小化面板
+          </button>
         </div>
+        {cancellationNotice ? <p className="task-cancel-notice">{cancellationNotice}</p> : null}
       </div>
-      <dl className="task-summary-list">
-        <dt>组合名称</dt>
-        <dd>{currentCombination?.name ?? "未选择组合"}</dd>
-        <dt>模型</dt>
-        <dd>{task?.modelId ?? "--"}</dd>
-        <dt>尺寸</dt>
-        <dd>{formatResultSize(results)}</dd>
-        <dt>生成数量</dt>
-        <dd>{task?.outputCount ?? "--"}</dd>
-      </dl>
-      <div className="task-actions">
-        <button
-          className="danger-button"
-          disabled={!canCancel}
-          onClick={() => {
-            void handleCancelTask();
-          }}
-          type="button"
-        >
-          <CircleX size={15} />
-          {isCancelling ? "取消中" : "取消任务"}
-        </button>
-        <button className="toolbar-button" disabled={!hasTask} type="button">
-          <Eye size={15} />
-          查看日志
-        </button>
+      <ResultPreview results={results} />
+      <div className="task-info">
+        <h2>任务信息</h2>
+        <dl>
+          <dt>组合名称</dt>
+          <dd>{currentCombination?.name ?? "未选择组合"}</dd>
+          <dt>模型</dt>
+          <dd>{task?.modelId ?? "--"}</dd>
+          <dt>尺寸</dt>
+          <dd>{formatResultSize(results)}</dd>
+          <dt>生成数量</dt>
+          <dd>{task?.outputCount ?? "--"}</dd>
+          <dt>创建时间</dt>
+          <dd>{formatTaskTime(task?.createdAt)}</dd>
+          <dt>任务 ID</dt>
+          <dd>{task?.id ?? "暂无任务"}</dd>
+        </dl>
       </div>
-      {cancellationNotice ? <p className="task-cancel-notice">{cancellationNotice}</p> : null}
     </section>
   );
 }
@@ -1727,6 +2363,25 @@ function formatTaskTime(value: string | undefined) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function getFlowNodeLabel(nodeId: FlowNodeId) {
+  switch (nodeId) {
+    case "person":
+      return "人物图节点";
+    case "garments":
+      return "服装图组节点";
+    case "prompt":
+      return "Prompt 节点";
+    case "model":
+      return "模型节点";
+    case "execute":
+      return "执行节点";
+    case "result":
+      return "结果节点";
+    default:
+      return "流程节点";
+  }
+}
+
 function AssetImage({ asset }: { asset: SelectableAsset }) {
   if (!asset.imageSrc) {
     return (
@@ -1741,28 +2396,32 @@ function AssetImage({ asset }: { asset: SelectableAsset }) {
 function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
   if (!results.length) {
     return (
-      <section className="result-preview-card">
-        <div className="task-dashboard-card__header">
-          <h2>结果预览</h2>
+      <section className="result-preview">
+        <h2>
+          结果预览
           <span>等待生成</span>
-        </div>
-        <div className="result-empty-state">
-          <ImageIcon size={34} />
-          <strong>暂无生成结果</strong>
-          <span>任务成功后会在这里显示缩略图，点击可打开大图。</span>
+        </h2>
+        <div className="preview-results">
+          {[0, 1, 2].map((item) => (
+            <div className="generating-card" key={item}>
+              <span className="loader-ring" />
+              <strong>暂无结果</strong>
+              <small>--</small>
+            </div>
+          ))}
         </div>
       </section>
     );
   }
 
   return (
-    <section className="result-preview-card">
-      <div className="task-dashboard-card__header">
-        <h2>结果预览</h2>
+    <section className="result-preview">
+      <h2>
+        结果预览
         <span>{results.length} 张</span>
-      </div>
+      </h2>
       <div className="preview-results">
-        {results.slice(0, 6).map((result) => (
+        {results.slice(0, 3).map((result) => (
           <button
             className="result-card"
             key={result.id}
