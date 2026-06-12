@@ -16,6 +16,13 @@ export type RunningGenerationTaskStatus = Extract<
   "queued" | "preparing" | "calling_model" | "waiting_result" | "saving_result"
 >;
 
+export type GenerationTaskCancelMode =
+  | "local_only"
+  | "remote_requested"
+  | "remote_confirmed"
+  | "remote_not_supported"
+  | "remote_failed";
+
 export type GenerationTaskInputRole = "person" | "garment" | "reference" | "mask";
 
 export type GenerationTaskInputAsset = {
@@ -56,12 +63,14 @@ export type LocalGenerationTask = {
   modelId: string;
   status: GenerationTaskStatus;
   progress: number;
+  message?: string | null;
   requestSummaryJson?: GenerationTaskRequestSummary | null;
   inputSnapshotJson: Record<string, unknown>;
   finalPromptSnapshotJson: Record<string, unknown>;
   modelConfigSnapshotJson: Record<string, unknown>;
   assetSnapshotJson: Record<string, unknown>;
   outputCount: number;
+  cancelMode?: GenerationTaskCancelMode | null;
   createdAt: string;
   updatedAt: string;
 };

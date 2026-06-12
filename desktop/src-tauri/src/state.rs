@@ -16,8 +16,9 @@ use crate::error::{AppError, AppResult};
 use crate::providers::openai_provider::OpenAiImageProvider;
 use crate::services::credential_service::ProviderCredentialService;
 use crate::services::task_runner::{
-    create_generation_task_snapshot, recover_interrupted_tasks,
-    run_generation_flow_with_task_id_and_observer, GenerationTaskObserver,
+    cancel_generation_task_by_id, create_generation_task_snapshot, get_generation_task_by_id,
+    recover_interrupted_tasks, run_generation_flow_with_task_id_observer_and_cancellation,
+    GenerationTaskObserver,
 };
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::migrations::run_workspace_migrations;
@@ -155,15 +156,17 @@ impl AppState {
             .read_provider_api_key(&provider)
             .await?;
 
+        let cancellation_token = CancellationToken::new();
         {
             let mut active_task = self.generation_task_runtime.running_task.lock().await;
             *active_task = Some(RunningGenerationTask {
                 task_id: task_id.clone(),
-                cancellation_token: CancellationToken::new(),
+                cancellation_token: cancellation_token.clone(),
             });
         }
+        let cancellation_checker = || cancellation_token.is_cancelled();
 
-        let result = run_generation_flow_with_task_id_and_observer(
+        let result = run_generation_flow_with_task_id_observer_and_cancellation(
             &self.database,
             &self.workspace_paths,
             &OpenAiImageProvider::new(),
@@ -171,6 +174,7 @@ impl AppState {
             request,
             Some(task_id.clone()),
             observer,
+            Some(&cancellation_checker),
         )
         .await;
         self.clear_generation_task(&task_id).await;
@@ -196,14 +200,28 @@ impl AppState {
             .map(|task| task.cancellation_token.clone())
     }
 
-    pub async fn cancel_generation_task(&self, task_id: &str) -> AppResult<()> {
+    pub async fn cancel_generation_task(&self, task_id: &str) -> AppResult<LocalGenerationTask> {
         let Some(token) = self.generation_cancellation_token(task_id).await else {
             return Err(AppError::InvalidInput(format!(
                 "generation task {task_id} is not running"
             )));
         };
         token.cancel();
-        Ok(())
+
+        let task = get_generation_task_by_id(&self.database, task_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!("generation task {task_id} was not found"))
+            })?;
+        let api_key = ProviderCredentialService::system()
+            .read_provider_api_key(&task.provider)
+            .await
+            .unwrap_or_default();
+        let provider = OpenAiImageProvider::new();
+        let task =
+            cancel_generation_task_by_id(&self.database, &provider, &api_key, task_id).await?;
+        self.clear_generation_task(task_id).await;
+        Ok(task)
     }
 
     pub async fn clear_generation_task(&self, task_id: &str) -> bool {
@@ -313,9 +331,29 @@ mod tests {
             .expect("cancel task");
         assert!(token.is_cancelled());
 
-        assert!(state.clear_generation_task(&task.id).await);
+        let cancelled =
+            sqlx::query("SELECT status, cancel_mode FROM generation_tasks WHERE id = ?")
+                .bind(&task.id)
+                .fetch_one(state.database().pool())
+                .await
+                .expect("cancelled task");
+        assert_eq!(cancelled.get::<String, _>("status"), "cancelled");
+        assert_eq!(
+            cancelled.get::<Option<String>, _>("cancel_mode").as_deref(),
+            Some("remote_not_supported")
+        );
+
         assert_eq!(state.running_generation_task_id().await, None);
-        assert!(state.generation_cancellation_token(&task.id).await.is_none());
+        assert!(state
+            .generation_cancellation_token(&task.id)
+            .await
+            .is_none());
+
+        let next = state
+            .start_generation_task(test_generation_request("task_after_cancel"))
+            .await
+            .expect("start after cancel");
+        assert_eq!(next.id, "task_after_cancel");
     }
 
     #[tokio::test]

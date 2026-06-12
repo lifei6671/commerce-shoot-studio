@@ -64,6 +64,7 @@ import type {
 } from "../../generation-task/model/taskTypes";
 import { listenGenerationTaskUpdates } from "../../generation-task/services/taskEventService";
 import {
+  cancelGenerationTask,
   getGenerationTaskDetail,
   getLatestGenerationTaskByCombination,
   listRecentGenerationTasks,
@@ -311,6 +312,15 @@ export function WorkflowCanvas() {
   const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
   const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
 
+  async function refreshTaskLists() {
+    const [runningTasks, recentTasks] = await Promise.all([
+      listRunningGenerationTasks(),
+      listRecentGenerationTasks(),
+    ]);
+    setRunningTasks(runningTasks);
+    setRecentTasks(recentTasks);
+  }
+
   useEffect(() => {
     if (!isTauriRuntime()) {
       return;
@@ -319,15 +329,10 @@ export function WorkflowCanvas() {
     let canceled = false;
 
     async function loadLatestCombination() {
-      const [combinations, runningTasks, recentTasks] = await Promise.all([
+      const [combinations] = await Promise.all([
         listImageCombinations(),
-        listRunningGenerationTasks(),
-        listRecentGenerationTasks(),
+        refreshTaskLists(),
       ]);
-      if (!canceled) {
-        setRunningTasks(runningTasks);
-        setRecentTasks(recentTasks);
-      }
 
       const latest = combinations[0];
       if (!latest) {
@@ -382,13 +387,7 @@ export function WorkflowCanvas() {
           }
         })
         .catch(() => undefined);
-      Promise.all([listRunningGenerationTasks(), listRecentGenerationTasks()])
-        .then(([runningTasks, recentTasks]) => {
-          if (!canceled) {
-            setRunningTasks(runningTasks);
-            setRecentTasks(recentTasks);
-          }
-        })
+      refreshTaskLists()
         .catch(() => undefined);
     })
       .then((cleanup) => {
@@ -927,6 +926,11 @@ function BottomDashboard({
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
 }) {
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
+  const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
+  const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
   const task = latestTask?.task ?? null;
   const results = latestTask?.results ?? [];
   const progress = Math.max(0, Math.min(100, task?.progress ?? 0));
@@ -936,6 +940,31 @@ function BottomDashboard({
   const taskStatus = getGenerationTaskStatusLabel(task?.status);
   const taskSteps = buildTaskProgressSteps(task?.status);
   const hasTask = Boolean(task);
+  const canCancel = Boolean(task && isRunningTaskStatus(task.status) && !isCancelling);
+  const cancellationNotice =
+    cancelError ?? getCancellationNotice(task?.status, task?.cancelMode);
+
+  async function handleCancelTask() {
+    if (!task || !canCancel) {
+      return;
+    }
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      const cancelledTask = await cancelGenerationTask(task.id);
+      setLatestTask(latestTask ? { ...latestTask, task: cancelledTask } : null);
+      const [runningTasks, recentTasks] = await Promise.all([
+        listRunningGenerationTasks(),
+        listRecentGenerationTasks(),
+      ]);
+      setRunningTasks(runningTasks);
+      setRecentTasks(recentTasks);
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : "取消任务失败");
+    } finally {
+      setIsCancelling(false);
+    }
+  }
 
   return (
     <section className="bottom-dashboard">
@@ -977,15 +1006,25 @@ function BottomDashboard({
           </div>
         </div>
         <div className="task-actions">
-          <button className="danger-button" disabled type="button">
+          <button
+            className="danger-button"
+            disabled={!canCancel}
+            onClick={() => {
+              void handleCancelTask();
+            }}
+            type="button"
+          >
             <CircleX size={15} />
-            取消任务
+            {isCancelling ? "取消中" : "取消任务"}
           </button>
           <button className="toolbar-button" disabled type="button">
             <Eye size={15} />
             最小化面板
           </button>
         </div>
+        {cancellationNotice ? (
+          <p className="task-cancel-notice">{cancellationNotice}</p>
+        ) : null}
       </div>
       <ResultPreview results={results} />
       <div className="task-info">
@@ -1058,6 +1097,32 @@ function getGenerationTaskStatusLabel(status: string | undefined) {
     default:
       return "暂无任务";
   }
+}
+
+function isRunningTaskStatus(status: string) {
+  return [
+    "queued",
+    "preparing",
+    "calling_model",
+    "waiting_result",
+    "saving_result",
+  ].includes(status);
+}
+
+function getCancellationNotice(status: string | undefined, cancelMode: string | null | undefined) {
+  if (status && isRunningTaskStatus(status)) {
+    return "取消会停止本地等待；如 Provider 不支持远端取消，可能仍继续处理或计费。";
+  }
+  if (cancelMode === "remote_not_supported") {
+    return "已停止本地等待；Provider 不支持远端取消，可能仍继续处理或计费。";
+  }
+  if (cancelMode === "remote_failed") {
+    return "已停止本地等待；远端取消失败，Provider 可能仍继续处理或计费。";
+  }
+  if (cancelMode === "remote_confirmed") {
+    return "远端取消已确认。";
+  }
+  return null;
 }
 
 function formatResultSize(results: GenerationTaskResultAsset[]) {

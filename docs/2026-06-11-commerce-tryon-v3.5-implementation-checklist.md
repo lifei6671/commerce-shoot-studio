@@ -1092,27 +1092,31 @@ R6 第二期授权与支付
 - 修改：`desktop/src-tauri/src/commands/generation.rs`
 - 修改：`desktop/src-tauri/src/services/task_runner.rs`
 - 修改：`desktop/src-tauri/src/providers/provider_trait.rs`
-- 修改：`desktop/src/features/workflow/components/nodes/ExecuteNode.tsx`
+- 修改：`desktop/src-tauri/src/state.rs`
+- 修改：`desktop/src/features/generation-task/model/taskTypes.ts`
+- 修改：`desktop/src/features/generation-task/services/taskService.ts`
+- 修改：`desktop/src/features/workflow/components/WorkflowCanvas.tsx`
+- 修改：`desktop/src/shared/styles/global.css`
 
 **执行清单**：
 
-- [ ] 实现 `cancel_generation_task`。
-- [ ] 本地取消触发 AppState 中 CancellationToken。
-- [ ] Provider 支持远端取消时记录 `remote_confirmed`。
-- [ ] Provider 不支持远端取消时记录 `remote_not_supported`。
-- [ ] UI 提示可能继续计费的场景。
-- [ ] `CancelMode` 持久化值使用 snake_case。
+- [x] 实现 `cancel_generation_task`。
+- [x] 本地取消触发 AppState 中 CancellationToken。
+- [x] Provider 支持远端取消时记录 `remote_confirmed`。
+- [x] Provider 不支持远端取消时记录 `remote_not_supported`。
+- [x] UI 提示可能继续计费的场景。
+- [x] `CancelMode` 持久化值使用 snake_case。
 
 **验证清单**：
 
-- [ ] 执行中任务可取消。
-- [ ] Provider 支持远端取消时状态记录正确。
-- [ ] Provider 不支持远端取消时提示正确。
-- [ ] 取消后可再次创建新任务。
+- [x] 执行中任务可取消。
+- [x] Provider 支持远端取消时状态记录正确。
+- [x] Provider 不支持远端取消时提示正确。
+- [x] 取消后可再次创建新任务。
 
 **退出条件**：
 
-- [ ] 用户可停止本地等待，并获得清晰取消结果。
+- [x] 用户可停止本地等待，并获得清晰取消结果。
 
 ---
 

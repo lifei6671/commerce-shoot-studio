@@ -12,8 +12,8 @@ export async function startGeneration(
   return invoke<LocalGenerationTask>("start_generation", { request });
 }
 
-export async function cancelGenerationTask(taskId: string): Promise<void> {
-  return invoke<void>("cancel_generation_task", { taskId });
+export async function cancelGenerationTask(taskId: string): Promise<LocalGenerationTask> {
+  return invoke<LocalGenerationTask>("cancel_generation_task", { taskId });
 }
 
 export async function getGenerationTaskDetail(

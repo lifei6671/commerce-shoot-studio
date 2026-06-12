@@ -40,6 +40,13 @@ pub struct ProviderRuntimeContext {
     pub cancelled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCancelResult {
+    Confirmed,
+    NotSupported,
+}
+
 impl Default for ProviderRuntimeContext {
     fn default() -> Self {
         Self {
@@ -123,4 +130,12 @@ pub trait ImageGenerationProvider: Send + Sync {
         input: GenerateInput,
         api_key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a>>;
+
+    fn cancel_remote<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _api_key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteCancelResult, ProviderError>> + Send + 'a>> {
+        Box::pin(async { Ok(RemoteCancelResult::NotSupported) })
+    }
 }

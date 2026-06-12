@@ -22,7 +22,7 @@ pub async fn start_generation(
 pub async fn cancel_generation_task(
     state: State<'_, AppState>,
     task_id: String,
-) -> AppResult<()> {
+) -> AppResult<LocalGenerationTask> {
     state.cancel_generation_task(&task_id).await
 }
 
@@ -68,9 +68,6 @@ pub async fn list_recent_generation_tasks(
 }
 
 #[tauri::command]
-pub async fn open_generation_result(
-    state: State<'_, AppState>,
-    asset_id: String,
-) -> AppResult<()> {
+pub async fn open_generation_result(state: State<'_, AppState>, asset_id: String) -> AppResult<()> {
     open_generation_result_asset(state.database(), state.workspace_paths(), &asset_id).await
 }

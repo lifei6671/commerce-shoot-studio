@@ -11,14 +11,15 @@ use ulid::Ulid;
 use crate::domain::asset::{Asset, AssetType};
 use crate::domain::combination::{DraftImageCombination, ValidateCombinationRequest};
 use crate::domain::task::{
-    CreateGenerationTaskResultRequest, CreateGenerationTaskSnapshotRequest, GenerationTaskResult,
-    GenerationTaskDetail, GenerationTaskInputAsset, GenerationTaskInputRole,
-    GenerationTaskResultAsset, LocalGenerationTask, StartGenerationRequest, APP_UNEXPECTED_SHUTDOWN,
-    RUNNING_TASK_STATUSES,
+    CreateGenerationTaskResultRequest, CreateGenerationTaskSnapshotRequest, GenerationTaskDetail,
+    GenerationTaskInputAsset, GenerationTaskInputRole, GenerationTaskResult,
+    GenerationTaskResultAsset, LocalGenerationTask, StartGenerationRequest,
+    APP_UNEXPECTED_SHUTDOWN, RUNNING_TASK_STATUSES,
 };
 use crate::error::{AppError, AppResult};
 use crate::providers::provider_trait::{
     GenerateInput, GenerateInputImage, GeneratedImage, ImageGenerationProvider, PromptPayload,
+    RemoteCancelResult,
 };
 use crate::services::assets::get_asset_by_id;
 use crate::services::combinations::get_image_combination_by_id;
@@ -51,6 +52,7 @@ struct GenerationPlan {
 }
 
 pub type GenerationTaskObserver<'a> = &'a (dyn Fn(LocalGenerationTask) + Send + Sync + 'a);
+pub type GenerationTaskCancellationChecker<'a> = &'a (dyn Fn() -> bool + Send + Sync + 'a);
 
 pub async fn recover_interrupted_tasks(database: &WorkspaceDatabase) -> AppResult<u64> {
     let mut writer = database.writer().await;
@@ -102,6 +104,24 @@ pub async fn run_generation_flow_with_task_id_and_observer<P: ImageGenerationPro
     task_id: Option<String>,
     observer: Option<GenerationTaskObserver<'_>>,
 ) -> AppResult<LocalGenerationTask> {
+    run_generation_flow_with_task_id_observer_and_cancellation(
+        database, paths, provider, api_key, request, task_id, observer, None,
+    )
+    .await
+}
+
+pub async fn run_generation_flow_with_task_id_observer_and_cancellation<
+    P: ImageGenerationProvider,
+>(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    provider: &P,
+    api_key: &str,
+    request: StartGenerationRequest,
+    task_id: Option<String>,
+    observer: Option<GenerationTaskObserver<'_>>,
+    cancellation_checker: Option<GenerationTaskCancellationChecker<'_>>,
+) -> AppResult<LocalGenerationTask> {
     let plan = build_generation_plan(database, paths, request).await?;
     if plan.provider != provider.provider_name() {
         return Err(AppError::InvalidInput(format!(
@@ -130,10 +150,21 @@ pub async fn run_generation_flow_with_task_id_and_observer<P: ImageGenerationPro
     .await?;
     notify_generation_task_change(database, &task.id, observer).await?;
 
-    if let Err(err) =
-        execute_generation_task(database, paths, provider, api_key, &task, plan, observer).await
+    if let Err(err) = execute_generation_task(
+        database,
+        paths,
+        provider,
+        api_key,
+        &task,
+        plan,
+        observer,
+        cancellation_checker,
+    )
+    .await
     {
-        mark_generation_task_failed(database, &task.id, &err).await?;
+        if !matches!(err, AppError::GenerationCancelled(_)) {
+            mark_generation_task_failed(database, &task.id, &err).await?;
+        }
         notify_generation_task_change(database, &task.id, observer).await?;
         return Err(err);
     }
@@ -250,12 +281,14 @@ pub async fn get_generation_task_by_id(
             model_id,
             status,
             progress,
+            message,
             request_summary_json,
             input_snapshot_json,
             final_prompt_snapshot_json,
             model_config_snapshot_json,
             asset_snapshot_json,
             output_count,
+            cancel_mode,
             created_at,
             updated_at
          FROM generation_tasks
@@ -300,6 +333,44 @@ pub async fn create_generation_task_result(
         .ok_or_else(|| {
             AppError::InvalidInput("created generation task result was not found".to_string())
         })
+}
+
+pub async fn cancel_generation_task_by_id<P: ImageGenerationProvider>(
+    database: &WorkspaceDatabase,
+    provider: &P,
+    api_key: &str,
+    task_id: &str,
+) -> AppResult<LocalGenerationTask> {
+    let task = get_generation_task_by_id(database, task_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("generation task {task_id} was not found"))
+        })?;
+    if !RUNNING_TASK_STATUSES.contains(&task.status.as_str()) {
+        return Err(AppError::InvalidInput(format!(
+            "generation task {task_id} is not running"
+        )));
+    }
+
+    let (cancel_mode, message) = match provider.cancel_remote(task_id, api_key).await {
+        Ok(RemoteCancelResult::Confirmed) => (
+            "remote_confirmed",
+            "Remote cancellation was confirmed by provider",
+        ),
+        Ok(RemoteCancelResult::NotSupported) => (
+            "remote_not_supported",
+            "Local waiting was cancelled; provider may continue processing or billing",
+        ),
+        Err(_) => (
+            "remote_failed",
+            "Local waiting was cancelled; remote cancellation failed",
+        ),
+    };
+
+    mark_generation_task_cancelled(database, task_id, cancel_mode, Some(message)).await?;
+    get_generation_task_by_id(database, task_id)
+        .await?
+        .ok_or_else(|| AppError::InvalidInput(format!("generation task {task_id} was not found")))
 }
 
 pub async fn get_generation_task_result_by_id(
@@ -363,7 +434,10 @@ pub async fn list_running_generation_task_details(
     }
     separated.push_unseparated(") ORDER BY created_at DESC, id DESC");
 
-    let task_ids: Vec<String> = builder.build_query_scalar().fetch_all(database.pool()).await?;
+    let task_ids: Vec<String> = builder
+        .build_query_scalar()
+        .fetch_all(database.pool())
+        .await?;
     list_generation_task_details_by_ids(database, paths, task_ids).await
 }
 
@@ -407,7 +481,10 @@ async fn build_generation_plan(
     let combination = get_image_combination_by_id(database, &request.combination_id)
         .await?
         .ok_or_else(|| {
-            AppError::InvalidInput(format!("combination {} was not found", request.combination_id))
+            AppError::InvalidInput(format!(
+                "combination {} was not found",
+                request.combination_id
+            ))
         })?;
 
     let draft_model_config = request.draft_model_config.clone().ok_or_else(|| {
@@ -460,7 +537,8 @@ async fn build_generation_plan(
     let output_count = validation.effective_limits.normalized_output_count;
 
     let mut assets = Vec::new();
-    let person = get_required_asset(database, &combination.person_asset_id, AssetType::Person).await?;
+    let person =
+        get_required_asset(database, &combination.person_asset_id, AssetType::Person).await?;
     assets.push(TaskAssetRole {
         asset: person,
         role: GenerationTaskInputRole::Person,
@@ -523,8 +601,9 @@ async fn build_generation_plan(
         "personAssetId": combination.person_asset_id.clone(),
         "garmentAssetIds": combination.garment_asset_ids.clone()
     });
-    let final_prompt_snapshot_json = serde_json::to_value(&resolved_prompt)
-        .map_err(|err| AppError::InvalidInput(format!("resolved prompt snapshot invalid: {err}")))?;
+    let final_prompt_snapshot_json = serde_json::to_value(&resolved_prompt).map_err(|err| {
+        AppError::InvalidInput(format!("resolved prompt snapshot invalid: {err}"))
+    })?;
     let model_config_snapshot_json = json!({
         "provider": provider_name.clone(),
         "modelId": model_id.clone(),
@@ -574,12 +653,23 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     task: &LocalGenerationTask,
     mut plan: GenerationPlan,
     observer: Option<GenerationTaskObserver<'_>>,
+    cancellation_checker: Option<GenerationTaskCancellationChecker<'_>>,
 ) -> AppResult<()> {
-    update_generation_task_status(database, &task.id, "preparing", 10, Some("Preparing inputs"))
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
         .await?;
+    update_generation_task_status(
+        database,
+        &task.id,
+        "preparing",
+        10,
+        Some("Preparing inputs"),
+    )
+    .await?;
     notify_generation_task_change(database, &task.id, observer).await?;
     plan.provider_input.task_id = task.id.clone();
 
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
+        .await?;
     update_generation_task_status(
         database,
         &task.id,
@@ -589,6 +679,8 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     )
     .await?;
     notify_generation_task_change(database, &task.id, observer).await?;
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
+        .await?;
     update_generation_task_status(
         database,
         &task.id,
@@ -603,7 +695,11 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
         .await
         .map_err(provider_error_to_app_error)?;
 
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
+        .await?;
     update_generation_task_response_summary(database, &task.id, &result.response_summary_json)
+        .await?;
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
         .await?;
     update_generation_task_status(
         database,
@@ -616,6 +712,8 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     notify_generation_task_change(database, &task.id, observer).await?;
 
     for (index, image) in result.images.into_iter().enumerate() {
+        ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
+            .await?;
         let source_url = image.source_url.clone();
         let asset = store_generated_result_asset(database, paths, &task.id, index, image).await?;
         create_generation_task_result(
@@ -631,7 +729,37 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
         .await?;
     }
 
+    ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
+        .await?;
     mark_generation_task_succeeded(database, &task.id).await
+}
+
+async fn ensure_generation_task_not_cancelled(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    observer: Option<GenerationTaskObserver<'_>>,
+    cancellation_checker: Option<GenerationTaskCancellationChecker<'_>>,
+) -> AppResult<()> {
+    let task = get_generation_task_by_id(database, task_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("generation task {task_id} was not found"))
+        })?;
+    if task.status == "cancelled" {
+        return Err(AppError::GenerationCancelled(task_id.to_string()));
+    }
+    if cancellation_checker.is_some_and(|checker| checker()) {
+        mark_generation_task_cancelled(
+            database,
+            task_id,
+            "local_only",
+            Some("Local waiting was cancelled before saving generated results"),
+        )
+        .await?;
+        notify_generation_task_change(database, task_id, observer).await?;
+        return Err(AppError::GenerationCancelled(task_id.to_string()));
+    }
+    Ok(())
 }
 
 async fn notify_generation_task_change(
@@ -644,7 +772,9 @@ async fn notify_generation_task_change(
     };
     let task = get_generation_task_by_id(database, task_id)
         .await?
-        .ok_or_else(|| AppError::InvalidInput(format!("generation task {task_id} was not found")))?;
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!("generation task {task_id} was not found"))
+        })?;
     observer(task);
     Ok(())
 }
@@ -800,6 +930,30 @@ async fn mark_generation_task_failed(
     Ok(())
 }
 
+async fn mark_generation_task_cancelled(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    cancel_mode: &str,
+    message: Option<&str>,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE generation_tasks
+         SET status = 'cancelled',
+             progress = 100,
+             cancel_mode = ?,
+             message = ?,
+             updated_at = datetime('now'),
+             finished_at = datetime('now')
+         WHERE id = ?",
+    )
+    .bind(cancel_mode)
+    .bind(message)
+    .bind(task_id)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
 async fn store_generated_result_asset(
     database: &WorkspaceDatabase,
     paths: &WorkspacePaths,
@@ -843,7 +997,9 @@ async fn store_generated_result_asset(
         .thumbnail(320, 320)
         .to_rgb8()
         .save_with_format(&thumb_path, image::ImageFormat::Jpeg)
-        .map_err(|err| AppError::InvalidInput(format!("failed to create result thumbnail: {err}")))?;
+        .map_err(|err| {
+            AppError::InvalidInput(format!("failed to create result thumbnail: {err}"))
+        })?;
 
     let mut writer = database.writer().await;
     sqlx::query(
@@ -873,12 +1029,11 @@ async fn find_result_asset_by_sha256(
     database: &WorkspaceDatabase,
     sha256: &str,
 ) -> AppResult<Option<Asset>> {
-    let asset_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM assets WHERE asset_type = 'result' AND sha256 = ?",
-    )
-    .bind(sha256)
-    .fetch_optional(database.pool())
-    .await?;
+    let asset_id: Option<String> =
+        sqlx::query_scalar("SELECT id FROM assets WHERE asset_type = 'result' AND sha256 = ?")
+            .bind(sha256)
+            .fetch_optional(database.pool())
+            .await?;
     match asset_id {
         Some(asset_id) => get_asset_by_id(database, &asset_id).await,
         None => Ok(None),
@@ -905,6 +1060,7 @@ fn app_error_code(err: &AppError) -> &'static str {
         AppError::PromptRequiredVariableMissing(_) => "PROMPT_REQUIRED_VARIABLE_MISSING",
         AppError::ModelConfigInvalid(_) => "MODEL_CONFIG_INVALID",
         AppError::TaskAlreadyRunning(_) => "TASK_ALREADY_RUNNING",
+        AppError::GenerationCancelled(_) => "GENERATION_CANCELLED",
         AppError::InvalidInput(_) => "INVALID_INPUT",
     }
 }
@@ -985,12 +1141,14 @@ fn row_to_generation_task(row: sqlx::sqlite::SqliteRow) -> AppResult<LocalGenera
         model_id: row.get("model_id"),
         status: row.get("status"),
         progress: row.get("progress"),
+        message: row.get("message"),
         request_summary_json: parse_optional_json(row.get("request_summary_json"))?,
         input_snapshot_json: parse_required_json(row.get("input_snapshot_json"))?,
         final_prompt_snapshot_json: parse_required_json(row.get("final_prompt_snapshot_json"))?,
         model_config_snapshot_json: parse_required_json(row.get("model_config_snapshot_json"))?,
         asset_snapshot_json: parse_required_json(row.get("asset_snapshot_json"))?,
         output_count: row.get("output_count"),
+        cancel_mode: row.get("cancel_mode"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -1085,23 +1243,21 @@ mod tests {
     use sqlx::Row;
 
     use super::*;
+    use crate::domain::asset::AssetType;
+    use crate::domain::combination::SaveImageCombinationRequest;
     use crate::domain::model::SaveModelConfigRequest;
-    use crate::domain::prompt::{
-        PromptBindingSection, PromptMode, SavePromptBindingRequest,
-    };
+    use crate::domain::prompt::{PromptBindingSection, PromptMode, SavePromptBindingRequest};
     use crate::domain::task::{
-        StartGenerationRequest,
         CreateGenerationTaskResultRequest, CreateGenerationTaskSnapshotRequest,
-        GenerationTaskInputAsset, GenerationTaskInputRole,
+        GenerationTaskInputAsset, GenerationTaskInputRole, StartGenerationRequest,
     };
     use crate::providers::provider_trait::{
         GenerateInput, GenerateResult, GeneratedImage, ImageGenerationProvider, ProviderError,
+        RemoteCancelResult,
     };
+    use crate::services::assets::import_image_file;
     use crate::services::combinations::save_image_combination_request;
     use crate::services::prompt_resolver::save_prompt_binding_request;
-    use crate::domain::asset::AssetType;
-    use crate::domain::combination::SaveImageCombinationRequest;
-    use crate::services::assets::import_image_file;
     use crate::storage::file_store::WorkspacePaths;
     use crate::storage::migrations::run_workspace_migrations;
 
@@ -1346,7 +1502,9 @@ mod tests {
                 task_id: "task_for_result".to_string(),
                 asset_id: "result_1".to_string(),
                 sort_order: 1,
-                source_url: Some("https://cdn.example.com/result.png?token=placeholder".to_string()),
+                source_url: Some(
+                    "https://cdn.example.com/result.png?token=placeholder".to_string(),
+                ),
             },
         )
         .await
@@ -1438,6 +1596,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_generation_task_records_remote_not_supported_by_default() {
+        let (_temp_dir, database) = test_database().await;
+        seed_assets(&database).await;
+        create_minimal_task(&database, "task_cancel_default").await;
+        update_generation_task_status(&database, "task_cancel_default", "calling_model", 45, None)
+            .await
+            .expect("status");
+
+        let task = cancel_generation_task_by_id(
+            &database,
+            &StaticProvider,
+            "placeholder-api-key",
+            "task_cancel_default",
+        )
+        .await
+        .expect("cancel");
+
+        assert_eq!(task.status, "cancelled");
+        assert_eq!(task.cancel_mode.as_deref(), Some("remote_not_supported"));
+    }
+
+    #[tokio::test]
+    async fn cancel_generation_task_records_remote_confirmed_when_provider_supports_it() {
+        let (_temp_dir, database) = test_database().await;
+        seed_assets(&database).await;
+        create_minimal_task(&database, "task_cancel_remote").await;
+        update_generation_task_status(&database, "task_cancel_remote", "calling_model", 45, None)
+            .await
+            .expect("status");
+
+        let task = cancel_generation_task_by_id(
+            &database,
+            &RemoteCancelProvider,
+            "placeholder-api-key",
+            "task_cancel_remote",
+        )
+        .await
+        .expect("cancel");
+
+        assert_eq!(task.status, "cancelled");
+        assert_eq!(task.cancel_mode.as_deref(), Some("remote_confirmed"));
+    }
+
+    #[tokio::test]
     async fn run_generation_flow_notifies_task_status_changes() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let combination_id = seed_generation_inputs(&database, &paths).await;
@@ -1484,6 +1686,56 @@ mod tests {
                 "succeeded"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn run_generation_flow_stops_before_saving_when_cancelled_after_provider_returns() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_for_provider = Arc::clone(&cancelled);
+        let cancellation_checker = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
+
+        let result = run_generation_flow_with_task_id_observer_and_cancellation(
+            &database,
+            &paths,
+            &CancellingProvider {
+                cancelled: cancelled_for_provider,
+            },
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_cancelled_during_flow".to_string()),
+            None,
+            Some(&cancellation_checker),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::GenerationCancelled(task_id)) if task_id == "task_cancelled_during_flow")
+        );
+        let task = get_generation_task_by_id(&database, "task_cancelled_during_flow")
+            .await
+            .expect("task")
+            .expect("task");
+        assert_eq!(task.status, "cancelled");
+        assert_eq!(task.cancel_mode.as_deref(), Some("local_only"));
+        let result_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM generation_task_results WHERE task_id = ?")
+                .bind("task_cancelled_during_flow")
+                .fetch_one(database.pool())
+                .await
+                .expect("result count");
+        assert_eq!(result_count, 0);
     }
 
     #[tokio::test]
@@ -1578,7 +1830,10 @@ mod tests {
             .await
             .expect("reload task")
             .expect("task");
-        assert_eq!(reloaded.final_prompt_snapshot_json["user"], "wear linen dress");
+        assert_eq!(
+            reloaded.final_prompt_snapshot_json["user"],
+            "wear linen dress"
+        );
     }
 
     #[test]
@@ -1696,11 +1951,8 @@ mod tests {
     }
 
     fn write_png(path: &std::path::Path, color: [u8; 4]) {
-        let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
-            16,
-            12,
-            image::Rgba(color),
-        );
+        let image =
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(16, 12, image::Rgba(color));
         image.save(path).expect("write png");
     }
 
@@ -1717,9 +1969,7 @@ mod tests {
             _api_key: &'a str,
         ) -> std::pin::Pin<
             Box<
-                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>>
-                    + Send
-                    + 'a,
+                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a,
             >,
         > {
             Box::pin(async move {
@@ -1744,12 +1994,82 @@ mod tests {
         }
     }
 
+    struct RemoteCancelProvider;
+
+    impl ImageGenerationProvider for RemoteCancelProvider {
+        fn provider_name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn generate<'a>(
+            &'a self,
+            _input: GenerateInput,
+            _api_key: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async {
+                panic!("remote cancel test does not generate");
+            })
+        }
+
+        fn cancel_remote<'a>(
+            &'a self,
+            task_id: &'a str,
+            _api_key: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<RemoteCancelResult, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                assert_eq!(task_id, "task_cancel_remote");
+                Ok(RemoteCancelResult::Confirmed)
+            })
+        }
+    }
+
+    struct CancellingProvider {
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ImageGenerationProvider for CancellingProvider {
+        fn provider_name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn generate<'a>(
+            &'a self,
+            input: GenerateInput,
+            _api_key: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                self.cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(GenerateResult {
+                    provider: "openai".to_string(),
+                    model_id: input.model_id,
+                    images: vec![GeneratedImage {
+                        bytes: png_bytes([1, 2, 3, 255]),
+                        mime_type: "image/png".to_string(),
+                        source_url: None,
+                    }],
+                    response_summary_json: json!({"provider": "openai"}),
+                })
+            })
+        }
+    }
+
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
-        let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
-            8,
-            8,
-            image::Rgba(color),
-        );
+        let image = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(8, 8, image::Rgba(color));
         let mut bytes = Vec::new();
         image
             .write_to(
