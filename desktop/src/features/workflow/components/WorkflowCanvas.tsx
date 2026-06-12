@@ -110,8 +110,8 @@ const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
 const CANVAS_MAX_ZOOM = 300;
 const CANVAS_ZOOM_STEP = 10;
-const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.015;
-const CANVAS_WHEEL_ZOOM_FRAME_LIMIT = 2;
+const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.15;
+const CANVAS_WHEEL_ZOOM_FRAME_LIMIT = 20;
 const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
 const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
@@ -1845,6 +1845,7 @@ function CanvasToolbar({
   onFitCanvas: () => void;
   onZoomChange: (zoom: number) => void;
 }) {
+  const zoomLabel = Math.round(zoom);
   const tools: Array<{ id: CanvasTool; icon: ReactNode; label: string }> = [
     { id: "hand", icon: <Hand size={17} />, label: "拖拽画布" },
     { id: "select", icon: <MousePointer2 size={17} />, label: "选择节点" },
@@ -1875,7 +1876,7 @@ function CanvasToolbar({
         <button onClick={() => updateZoom(zoom - CANVAS_ZOOM_STEP)} type="button" aria-label="缩小">
           <Minus size={16} />
         </button>
-        <span>{zoom}%</span>
+        <span>{zoomLabel}%</span>
         <button onClick={() => updateZoom(zoom + CANVAS_ZOOM_STEP)} type="button" aria-label="放大">
           <Plus size={16} />
         </button>
