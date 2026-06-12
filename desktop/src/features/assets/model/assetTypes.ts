@@ -18,3 +18,9 @@ export type ImportImageResponse = {
   duplicate: boolean;
   thumbFilePath: string;
 };
+
+export type AssetFileView = {
+  asset: ImportedAsset;
+  filePath: string;
+  thumbFilePath: string;
+};

@@ -1,9 +1,12 @@
 export type Asset = {
   id: string;
-  visual: string;
   imageSrc?: string;
   label?: string;
   selected?: boolean;
+  width?: number;
+  height?: number;
+  mimeType?: string;
+  createdAt?: string;
 };
 
 export type WorkflowNodeTone =
@@ -19,6 +22,9 @@ export type WorkflowNodeData = {
   subtitle: string;
   tone: WorkflowNodeTone;
   status: "done" | "ready" | "pending";
+  assets?: Asset[];
+  details?: string[];
+  actionLabel?: string;
   results?: Array<{
     assetId: string;
     thumbFilePath: string;

@@ -6,7 +6,7 @@ use image::GenericImageView;
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
-use crate::domain::asset::{Asset, AssetType, ImportImageResponse};
+use crate::domain::asset::{Asset, AssetFileView, AssetType, ImportImageResponse};
 use crate::error::{AppError, AppResult};
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::sqlite::WorkspaceDatabase;
@@ -124,6 +124,86 @@ pub async fn get_asset_by_id(database: &WorkspaceDatabase, id: &str) -> AppResul
     .await?;
 
     row.map(AssetRow::try_into_asset).transpose()
+}
+
+pub async fn get_asset_file_view_by_id(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    id: &str,
+) -> AppResult<Option<AssetFileView>> {
+    Ok(get_asset_by_id(database, id)
+        .await?
+        .map(|asset| asset_file_view(paths, asset)))
+}
+
+pub async fn list_asset_file_views(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    asset_type: Option<AssetType>,
+) -> AppResult<Vec<AssetFileView>> {
+    let rows = match asset_type {
+        Some(asset_type) => {
+            sqlx::query_as::<_, AssetRow>(
+                "SELECT
+                    id,
+                    asset_type,
+                    original_name,
+                    relative_path,
+                    thumb_relative_path,
+                    mime_type,
+                    sha256,
+                    width,
+                    height,
+                    created_at
+                 FROM assets
+                 WHERE asset_type = ?
+                 ORDER BY created_at DESC, id DESC",
+            )
+            .bind(asset_type.as_str())
+            .fetch_all(database.pool())
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, AssetRow>(
+                "SELECT
+                    id,
+                    asset_type,
+                    original_name,
+                    relative_path,
+                    thumb_relative_path,
+                    mime_type,
+                    sha256,
+                    width,
+                    height,
+                    created_at
+                 FROM assets
+                 ORDER BY created_at DESC, id DESC",
+            )
+            .fetch_all(database.pool())
+            .await?
+        }
+    };
+
+    rows.into_iter()
+        .map(AssetRow::try_into_asset)
+        .map(|result| result.map(|asset| asset_file_view(paths, asset)))
+        .collect()
+}
+
+fn asset_file_view(paths: &WorkspacePaths, asset: Asset) -> AssetFileView {
+    AssetFileView {
+        file_path: paths
+            .root()
+            .join(&asset.relative_path)
+            .to_string_lossy()
+            .to_string(),
+        thumb_file_path: paths
+            .root()
+            .join(&asset.thumb_relative_path)
+            .to_string_lossy()
+            .to_string(),
+        asset,
+    }
 }
 
 pub async fn delete_asset(
@@ -468,6 +548,32 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_ne!(first.asset.id, other_type.asset.id);
         assert!(!other_type.duplicate);
+    }
+
+    #[tokio::test]
+    async fn list_asset_file_views_filters_type_and_resolves_paths() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let person_path = paths.root().join("person.png");
+        let garment_path = paths.root().join("garment.png");
+        write_png(&person_path);
+        write_png(&garment_path);
+        let person = import_image_file(&database, &paths, person_path, AssetType::Person)
+            .await
+            .expect("person import");
+        let garment = import_image_file(&database, &paths, garment_path, AssetType::Garment)
+            .await
+            .expect("garment import");
+
+        let people = list_asset_file_views(&database, &paths, Some(AssetType::Person))
+            .await
+            .expect("list people");
+
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].asset.id, person.asset.id);
+        assert!(people[0]
+            .thumb_file_path
+            .ends_with(&person.asset.thumb_relative_path));
+        assert_ne!(people[0].asset.id, garment.asset.id);
     }
 
     #[tokio::test]

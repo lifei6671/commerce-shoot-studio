@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AssetType, ImportImageResponse } from "../model/assetTypes";
+import type { AssetFileView, AssetType, ImportImageResponse } from "../model/assetTypes";
 
 export async function importImage(
   sourcePath: string,
@@ -9,6 +9,16 @@ export async function importImage(
   return invoke<ImportImageResponse>("import_image", {
     sourcePath,
     assetType,
+  });
+}
+
+export async function getAsset(assetId: string): Promise<AssetFileView | null> {
+  return invoke<AssetFileView | null>("get_asset", { assetId });
+}
+
+export async function listAssets(assetType?: AssetType): Promise<AssetFileView[]> {
+  return invoke<AssetFileView[]>("list_assets", {
+    assetType: assetType ?? null,
   });
 }
 

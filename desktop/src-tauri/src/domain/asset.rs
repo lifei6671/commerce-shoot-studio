@@ -41,3 +41,11 @@ pub struct ImportImageResponse {
     pub duplicate: bool,
     pub thumb_file_path: String,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetFileView {
+    pub asset: Asset,
+    pub file_path: String,
+    pub thumb_file_path: String,
+}

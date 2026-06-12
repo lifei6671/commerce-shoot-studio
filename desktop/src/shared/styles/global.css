@@ -331,7 +331,8 @@ button {
   border-radius: 4px;
 }
 
-.asset-thumb__image {
+.asset-thumb__image,
+.asset-thumb img {
   display: block;
   width: 100%;
   height: 100%;
@@ -359,6 +360,16 @@ button {
   place-items: center;
   color: #697789;
   background: linear-gradient(145deg, #f3f5f8, #e7ebf1);
+}
+
+.asset-empty {
+  min-height: 62px;
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  color: #64748b;
+  font-size: 12px;
+  text-align: center;
 }
 
 .mock-visual {
@@ -741,12 +752,14 @@ button {
   margin-top: 16px;
 }
 
-.workflow-node__image-card .mock-visual {
+.workflow-node__image-card img,
+.workflow-node__image-card .node-empty {
   width: 84px;
   height: 120px;
   display: block;
   border-radius: 5px;
   background: #e2e8f0;
+  object-fit: cover;
 }
 
 .workflow-node__image-card span,
@@ -764,11 +777,14 @@ button {
   gap: 6px;
 }
 
-.workflow-node__garments .mock-visual {
+.workflow-node__garments img,
+.workflow-node__garments .node-empty {
   width: 39px;
   height: 52px;
   border-radius: 4px;
   background: #ffffff;
+  object-fit: cover;
+  border: 1px solid #dbe4f1;
 }
 
 .workflow-node__garments span {
@@ -824,6 +840,21 @@ button {
   color: #ffffff;
   background: linear-gradient(135deg, #2f7cff, #2351e8);
   box-shadow: 0 12px 32px rgba(37, 99, 235, 0.34);
+}
+
+.node-empty {
+  display: grid !important;
+  place-items: center;
+  color: #94a3b8;
+  border: 1px dashed #cbd5e1;
+}
+
+.node-empty small {
+  padding: 0 6px;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.25;
+  text-align: center;
 }
 
 .workflow-node__result {
@@ -977,12 +1008,13 @@ button {
   gap: 14px;
 }
 
-.preview-card .mock-visual {
+.preview-card img {
   width: 136px;
   height: 188px;
   border-radius: 6px;
   border: 1px solid #dbe3ee;
   background: #eef2f7;
+  object-fit: cover;
 }
 
 .preview-card dl,
@@ -1003,6 +1035,70 @@ button {
 .preview-card dd,
 .task-info dd {
   margin: 0;
+}
+
+.panel-empty {
+  min-height: 74px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 13px;
+  text-align: center;
+  border: 1px dashed #d5deeb;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.panel-note {
+  margin: 10px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.plain-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  row-gap: 8px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.plain-dl dt {
+  color: #64748b;
+}
+
+.plain-dl dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.garment-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.garment-detail-grid img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border: 1px solid #dbe4f1;
+  border-radius: 6px;
+  background: #eef2f7;
+}
+
+.validation-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .ghost-wide {
@@ -1028,6 +1124,19 @@ button {
   outline: none;
   color: #1f2937;
   background: #ffffff;
+}
+
+.detail-block textarea {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #dce3ee;
+  border-radius: 5px;
+  outline: none;
+  color: #1f2937;
+  background: #ffffff;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.45;
 }
 
 .detail-block input::placeholder {
@@ -1072,11 +1181,20 @@ button {
   margin-bottom: 10px;
 }
 
-.history-item .mock-visual {
+.history-item img,
+.history-item__placeholder {
   width: 36px;
   height: 42px;
   border-radius: 5px;
   background: #eef2f7;
+  object-fit: cover;
+}
+
+.history-item__placeholder {
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  border: 1px solid #dbe4f1;
 }
 
 .history-item strong,
@@ -1122,7 +1240,7 @@ button {
 .bottom-dashboard {
   min-height: 0;
   display: grid;
-  grid-template-columns: 340px minmax(300px, 1fr) 260px;
+  grid-template-columns: minmax(250px, 0.9fr) minmax(220px, 1fr) minmax(180px, 0.7fr);
   border-top: 1px solid #d8e0ec;
   background: rgba(255, 255, 255, 0.92);
 }
@@ -1149,15 +1267,15 @@ button {
 
 .progress-layout {
   display: grid;
-  grid-template-columns: 126px 1fr;
-  gap: 16px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
 }
 
 .progress-ring {
   position: relative;
-  width: 126px;
-  height: 126px;
+  width: 88px;
+  height: 88px;
   display: grid;
   place-items: center;
 }
@@ -1171,7 +1289,7 @@ button {
 .progress-ring circle {
   fill: none;
   stroke: #e2e8f0;
-  stroke-width: 10;
+  stroke-width: 9;
 }
 
 .progress-ring__value {
@@ -1182,16 +1300,16 @@ button {
 }
 
 .progress-ring strong {
-  margin-top: 10px;
+  margin-top: 6px;
   color: #111827;
-  font-size: 24px;
+  font-size: 20px;
 }
 
 .progress-ring span {
-  margin-top: 42px;
+  margin-top: 32px;
   position: absolute;
   color: #245cff;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1202,11 +1320,11 @@ button {
 
 .progress-step {
   display: grid;
-  grid-template-columns: 10px 1fr 42px 16px;
+  grid-template-columns: 10px minmax(64px, 1fr) 28px 16px;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   color: #64748b;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .progress-step span {
@@ -1219,6 +1337,7 @@ button {
 .progress-step strong {
   color: #334155;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .progress-step svg {

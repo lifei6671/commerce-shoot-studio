@@ -1,8 +1,11 @@
 use tauri::State;
 
-use crate::domain::asset::{AssetType, ImportImageResponse};
+use crate::domain::asset::{AssetFileView, AssetType, ImportImageResponse};
 use crate::error::AppResult;
-use crate::services::assets::{delete_asset as delete_asset_file, import_image_file, run_asset_gc};
+use crate::services::assets::{
+    delete_asset as delete_asset_file, get_asset_file_view_by_id, import_image_file,
+    list_asset_file_views, run_asset_gc,
+};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -18,6 +21,22 @@ pub async fn import_image(
         asset_type,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_asset(
+    state: State<'_, AppState>,
+    asset_id: String,
+) -> AppResult<Option<AssetFileView>> {
+    get_asset_file_view_by_id(state.database(), state.workspace_paths(), &asset_id).await
+}
+
+#[tauri::command]
+pub async fn list_assets(
+    state: State<'_, AppState>,
+    asset_type: Option<AssetType>,
+) -> AppResult<Vec<AssetFileView>> {
+    list_asset_file_views(state.database(), state.workspace_paths(), asset_type).await
 }
 
 #[tauri::command]
