@@ -105,6 +105,13 @@ type SelectableAsset = {
 type SidePanelMode = "details" | "edit" | "links" | "history";
 type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
 type CanvasTool = "hand" | "select" | "grid";
+
+const CANVAS_BASE_SCALE = 1.8;
+const CANVAS_MIN_ZOOM = 33;
+const CANVAS_MAX_ZOOM = 300;
+const CANVAS_ZOOM_STEP = 10;
+const CANVAS_WHEEL_ZOOM_STEP = 8;
+
 type NewCombinationForm = {
   name: string;
   code: string;
@@ -1545,13 +1552,15 @@ function FlowWorkbench({
   const modelReady = credentialStatus?.configured === true;
   const viewportWidth = typeof window === "undefined" ? 1600 : window.innerWidth;
   const fitScale = Math.min(1, Math.max(0.55, (viewportWidth - 690) / 1160));
-  const canvasScale = fitScale * (zoom / 100);
+  const canvasScale = fitScale * CANVAS_BASE_SCALE * (zoom / 100);
 
   function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
 
     if (event.ctrlKey || event.metaKey) {
-      onZoomChange(clampZoom(zoom + (event.deltaY > 0 ? -8 : 8)));
+      onZoomChange(
+        clampZoom(zoom + (event.deltaY > 0 ? -CANVAS_WHEEL_ZOOM_STEP : CANVAS_WHEEL_ZOOM_STEP)),
+      );
       return;
     }
 
@@ -1804,11 +1813,11 @@ function CanvasToolbar({
         ))}
       </div>
       <div className="zoom-control" role="group" aria-label="缩放">
-        <button onClick={() => updateZoom(zoom - 10)} type="button" aria-label="缩小">
+        <button onClick={() => updateZoom(zoom - CANVAS_ZOOM_STEP)} type="button" aria-label="缩小">
           <Minus size={16} />
         </button>
         <span>{zoom}%</span>
-        <button onClick={() => updateZoom(zoom + 10)} type="button" aria-label="放大">
+        <button onClick={() => updateZoom(zoom + CANVAS_ZOOM_STEP)} type="button" aria-label="放大">
           <Plus size={16} />
         </button>
       </div>
@@ -1904,7 +1913,7 @@ function FlowArrow({ left, width }: { left: number; width: number }) {
 }
 
 function clampZoom(zoom: number) {
-  return Math.max(50, Math.min(180, zoom));
+  return Math.max(CANVAS_MIN_ZOOM, Math.min(CANVAS_MAX_ZOOM, zoom));
 }
 
 function FlowMiniMap({ selectedFlowNode }: { selectedFlowNode: FlowNodeId }) {
