@@ -1270,6 +1270,27 @@ button {
   overflow: hidden;
 }
 
+.canvas-shell--hand .flow-canvas {
+  cursor: grab;
+}
+
+.canvas-shell--hand .flow-canvas:active {
+  cursor: grabbing;
+}
+
+.canvas-shell--select .flow-node {
+  cursor: pointer;
+}
+
+.canvas-shell--grid {
+  background:
+    linear-gradient(rgba(37, 99, 235, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.055) 1px, transparent 1px),
+    radial-gradient(circle, rgba(37, 99, 235, 0.36) 1px, transparent 1px),
+    #fbfcff;
+  background-size: 72px 72px, 72px 72px, 18px 18px;
+}
+
 .canvas-column {
   position: relative;
   min-width: 0;
@@ -1278,12 +1299,32 @@ button {
   grid-template-rows: minmax(260px, 1fr) 264px;
 }
 
-.canvas-column > .workbench-message {
-  position: absolute;
-  z-index: 20;
-  top: 58px;
-  left: 18px;
-  right: 18px;
+.workbench-message {
+  position: fixed;
+  z-index: 80;
+  top: 72px;
+  left: 50%;
+  max-width: min(520px, calc(100vw - 48px));
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  color: #155e31;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  background: rgba(240, 253, 244, 0.96);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.18);
+  font-size: 13px;
+  font-weight: 700;
+  backdrop-filter: blur(10px);
+}
+
+.workbench-message.is-error {
+  color: #991b1b;
+  border-color: #fecaca;
+  background: rgba(254, 242, 242, 0.96);
 }
 
 .canvas-toolbar {
@@ -1364,6 +1405,7 @@ button {
   position: absolute;
   inset: 0;
   overflow: hidden;
+  touch-action: none;
 }
 
 .flow-canvas__inner {
@@ -1701,6 +1743,7 @@ button {
 }
 
 .property-panel {
+  min-width: 0;
   border-left: 1px solid #d8e0ec;
   overflow-y: auto;
 }
@@ -1768,13 +1811,14 @@ button {
 
 .preview-card {
   display: grid;
-  grid-template-columns: 136px 1fr;
-  gap: 14px;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
 }
 
 .preview-card img {
-  width: 136px;
-  height: 188px;
+  width: 120px;
+  height: 168px;
   border-radius: 6px;
   border: 1px solid #dbe3ee;
   background: #eef2f7;
@@ -1785,8 +1829,10 @@ button {
 .task-info dl {
   margin: 0;
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: 52px minmax(0, 1fr);
+  min-width: 0;
   row-gap: 7px;
+  column-gap: 8px;
   color: #334155;
   font-size: 12px;
 }
@@ -1798,7 +1844,10 @@ button {
 
 .preview-card dd,
 .task-info dd {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .panel-empty {

@@ -1,6 +1,15 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent,
+  type ReactNode,
+  type WheelEvent,
+} from "react";
 import {
   Archive,
   Box,
@@ -1523,24 +1532,86 @@ function FlowWorkbench({
   onRun: () => void;
   onZoomChange: (zoom: number) => void;
 }) {
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragStartRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
   const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
   const modelReady = credentialStatus?.configured === true;
   const viewportWidth = typeof window === "undefined" ? 1600 : window.innerWidth;
   const fitScale = Math.min(1, Math.max(0.55, (viewportWidth - 690) / 1160));
-  const canvasScale = Math.min(zoom / 100, fitScale);
+  const canvasScale = fitScale * (zoom / 100);
+
+  function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    event.preventDefault();
+    onZoomChange(clampZoom(zoom + (event.deltaY > 0 ? -8 : 8)));
+  }
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (canvasTool !== "hand") {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStartRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      panX: pan.x,
+      panY: pan.y,
+    };
+  }
+
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const dragStart = dragStartRef.current;
+    if (!dragStart || dragStart.pointerId !== event.pointerId) {
+      return;
+    }
+    setPan({
+      x: dragStart.panX + event.clientX - dragStart.startX,
+      y: dragStart.panY + event.clientY - dragStart.startY,
+    });
+  }
+
+  function stopCanvasDrag(event: PointerEvent<HTMLDivElement>) {
+    if (dragStartRef.current?.pointerId === event.pointerId) {
+      dragStartRef.current = null;
+    }
+  }
+
+  function handleFitCanvas() {
+    setPan({ x: 0, y: 0 });
+    onZoomChange(100);
+  }
 
   return (
-    <section className="canvas-shell">
+    <section className={`canvas-shell canvas-shell--${canvasTool}`}>
       <CanvasToolbar
         canvasTool={canvasTool}
         zoom={zoom}
         onCanvasToolChange={onCanvasToolChange}
         onZoomChange={onZoomChange}
+        onFitCanvas={handleFitCanvas}
       />
-      <div className="flow-canvas">
+      <div
+        className="flow-canvas"
+        onPointerCancel={stopCanvasDrag}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={stopCanvasDrag}
+        onWheel={handleCanvasWheel}
+      >
         <div
           className="flow-canvas__inner"
-          style={{ transform: `translateY(-50%) scale(${canvasScale})` }}
+          style={{
+            transform: `translate(${pan.x}px, calc(-50% + ${pan.y}px)) scale(${canvasScale})`,
+          }}
         >
           <FlowNode
             accent="green"
@@ -1682,11 +1753,13 @@ function CanvasToolbar({
   canvasTool,
   zoom,
   onCanvasToolChange,
+  onFitCanvas,
   onZoomChange,
 }: {
   canvasTool: CanvasTool;
   zoom: number;
   onCanvasToolChange: (tool: CanvasTool) => void;
+  onFitCanvas: () => void;
   onZoomChange: (zoom: number) => void;
 }) {
   const tools: Array<{ id: CanvasTool; icon: ReactNode; label: string }> = [
@@ -1696,7 +1769,7 @@ function CanvasToolbar({
   ];
 
   function updateZoom(nextZoom: number) {
-    onZoomChange(Math.max(80, Math.min(120, nextZoom)));
+    onZoomChange(clampZoom(nextZoom));
   }
 
   return (
@@ -1726,7 +1799,7 @@ function CanvasToolbar({
       </div>
       <button
         className="canvas-icon"
-        onClick={() => onZoomChange(100)}
+        onClick={onFitCanvas}
         title="适配画布"
         type="button"
         aria-label="适配画布"
@@ -1813,6 +1886,10 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
 
 function FlowArrow({ left, width }: { left: number; width: number }) {
   return <span className="flow-arrow" style={{ left, width }} aria-hidden="true" />;
+}
+
+function clampZoom(zoom: number) {
+  return Math.max(50, Math.min(180, zoom));
 }
 
 function FlowMiniMap({ selectedFlowNode }: { selectedFlowNode: FlowNodeId }) {
