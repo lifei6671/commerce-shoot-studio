@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
   type ReactNode,
 } from "react";
@@ -104,6 +105,7 @@ type SelectableAsset = {
 type SidePanelMode = "details" | "edit" | "links" | "history";
 type FlowNodeId = "person" | "garments" | "prompt" | "model" | "execute" | "result";
 type CanvasTool = "hand" | "select" | "grid";
+type FlowNodePosition = { x: number; y: number };
 
 const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
@@ -114,6 +116,29 @@ const CANVAS_WHEEL_ZOOM_FRAME_FACTOR = 1.45;
 const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
 const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
+const FLOW_NODE_WIDTH = 124;
+const FLOW_NODE_HEIGHT = 210;
+const FLOW_ARROW_EDGE_GAP = 8;
+const FLOW_NODE_ORDER: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
+const INITIAL_FLOW_NODE_POSITIONS: Record<FlowNodeId, FlowNodePosition> = {
+  person: { x: 0, y: 40 },
+  garments: { x: 198, y: 40 },
+  prompt: { x: 396, y: 40 },
+  model: { x: 594, y: 40 },
+  execute: { x: 792, y: 40 },
+  result: { x: 990, y: 40 },
+};
+
+function cloneInitialFlowNodePositions(): Record<FlowNodeId, FlowNodePosition> {
+  return {
+    person: { ...INITIAL_FLOW_NODE_POSITIONS.person },
+    garments: { ...INITIAL_FLOW_NODE_POSITIONS.garments },
+    prompt: { ...INITIAL_FLOW_NODE_POSITIONS.prompt },
+    model: { ...INITIAL_FLOW_NODE_POSITIONS.model },
+    execute: { ...INITIAL_FLOW_NODE_POSITIONS.execute },
+    result: { ...INITIAL_FLOW_NODE_POSITIONS.result },
+  };
+}
 
 type NewCombinationForm = {
   name: string;
@@ -1545,6 +1570,9 @@ function FlowWorkbench({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [isWheelInteracting, setIsWheelInteracting] = useState(false);
+  const [nodePositions, setNodePositions] = useState<Record<FlowNodeId, FlowNodePosition>>(
+    cloneInitialFlowNodePositions,
+  );
   const dragStartRef = useRef<{
     pointerId: number;
     startX: number;
@@ -1552,6 +1580,16 @@ function FlowWorkbench({
     panX: number;
     panY: number;
   } | null>(null);
+  const nodeDragStartRef = useRef<{
+    pointerId: number;
+    nodeId: FlowNodeId;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressNextNodeClickRef = useRef(false);
   const canvasShellRef = useRef<HTMLElement | null>(null);
   const canvasInnerRef = useRef<HTMLDivElement | null>(null);
   const latestZoomRef = useRef(zoom);
@@ -1704,6 +1742,73 @@ function FlowWorkbench({
     }
   }
 
+  function handleNodePointerDown(event: PointerEvent<HTMLButtonElement>, nodeId: FlowNodeId) {
+    if (event.button !== 0) {
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (target.closest(".flow-node__play")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    onNodeSelect(nodeId);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const origin = nodePositions[nodeId];
+    nodeDragStartRef.current = {
+      pointerId: event.pointerId,
+      nodeId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: origin.x,
+      originY: origin.y,
+      moved: false,
+    };
+  }
+
+  function handleNodePointerMove(event: PointerEvent<HTMLButtonElement>) {
+    const dragStart = nodeDragStartRef.current;
+    if (!dragStart || dragStart.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const pointerDeltaX = event.clientX - dragStart.startX;
+    const pointerDeltaY = event.clientY - dragStart.startY;
+    if (Math.abs(pointerDeltaX) > 3 || Math.abs(pointerDeltaY) > 3) {
+      dragStart.moved = true;
+    }
+    setNodePositions((currentPositions) => ({
+      ...currentPositions,
+      [dragStart.nodeId]: {
+        x: dragStart.originX + pointerDeltaX / canvasScale,
+        y: dragStart.originY + pointerDeltaY / canvasScale,
+      },
+    }));
+  }
+
+  function stopNodeDrag(event: PointerEvent<HTMLButtonElement>) {
+    const dragStart = nodeDragStartRef.current;
+    if (!dragStart || dragStart.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (dragStart.moved) {
+      suppressNextNodeClickRef.current = true;
+    }
+    nodeDragStartRef.current = null;
+  }
+
+  function handleFlowNodeSelect(nodeId: FlowNodeId, event: ReactMouseEvent<HTMLButtonElement>) {
+    if (suppressNextNodeClickRef.current) {
+      event.preventDefault();
+      suppressNextNodeClickRef.current = false;
+      return;
+    }
+    onNodeSelect(nodeId);
+  }
+
   function handleFitCanvas() {
     setPan({ x: 0, y: 0 });
     onZoomChange(100);
@@ -1737,14 +1842,20 @@ function FlowWorkbench({
             transform: `translate(${pan.x}px, ${pan.y}px) translateY(-50%) scale(${canvasScale})`,
           }}
         >
+          <FlowArrows nodePositions={nodePositions} />
           <FlowNode
             accent="green"
             id="person"
+            position={nodePositions.person}
             selected={selectedFlowNode === "person"}
             status={selectedPerson ? "done" : "required"}
             subtitle={selectedPerson ? "必选" : "未选择"}
             title="人物图"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             {selectedPerson ? (
               <>
@@ -1760,15 +1871,19 @@ function FlowWorkbench({
               <NodeEmpty icon={<UserRound size={24} />} text="导入人物图" />
             )}
           </FlowNode>
-          <FlowArrow left={132} width={66} />
           <FlowNode
             accent="blue"
             id="garments"
+            position={nodePositions.garments}
             selected={selectedFlowNode === "garments"}
             status={selectedGarments.length ? "done" : "required"}
             subtitle="至少 1 张"
             title="服装图组"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             {selectedGarments.length ? (
               <>
@@ -1787,15 +1902,19 @@ function FlowWorkbench({
               <NodeEmpty icon={<BriefcaseBusiness size={24} />} text="导入服装图" />
             )}
           </FlowNode>
-          <FlowArrow left={330} width={66} />
           <FlowNode
             accent="purple"
             id="prompt"
+            position={nodePositions.prompt}
             selected={selectedFlowNode === "prompt"}
             status={promptText.trim() ? "done" : "required"}
             subtitle={promptText.trim() ? "已配置" : "未配置"}
             title="Prompt"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             <div className="flow-node__document">
               <FileText size={42} />
@@ -1803,15 +1922,19 @@ function FlowWorkbench({
             </div>
             <strong>{promptText.trim().length} 字符</strong>
           </FlowNode>
-          <FlowArrow left={528} width={66} />
           <FlowNode
             accent="orange"
             id="model"
+            position={nodePositions.model}
             selected={selectedFlowNode === "model"}
             status={modelReady ? "done" : "pending"}
             subtitle={modelReady ? "已选择" : "待配置"}
             title="模型"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             <div className="flow-node__model">
               <Box size={44} />
@@ -1819,15 +1942,19 @@ function FlowWorkbench({
             <strong>{DEFAULT_MODEL_ID}</strong>
             <small>{modelSize} / {outputCount} 张</small>
           </FlowNode>
-          <FlowArrow left={726} width={66} />
           <FlowNode
             accent="blue"
             id="execute"
+            position={nodePositions.execute}
             selected={selectedFlowNode === "execute"}
             status={validationResult?.executable ? "done" : "required"}
             subtitle={canRun ? "就绪" : "待补齐"}
             title="执行"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             <button
               className="flow-node__play"
@@ -1842,15 +1969,19 @@ function FlowWorkbench({
             </button>
             <small>{canRun ? "点击执行生成" : "输入未完整"}</small>
           </FlowNode>
-          <FlowArrow left={924} width={66} />
           <FlowNode
             accent="gray"
             id="result"
+            position={nodePositions.result}
             selected={selectedFlowNode === "result"}
             status={results.length ? "done" : "pending"}
             subtitle={taskStatus}
             title="结果"
-            onSelect={onNodeSelect}
+            onPointerCancel={stopNodeDrag}
+            onPointerDown={handleNodePointerDown}
+            onPointerMove={handleNodePointerMove}
+            onPointerUp={stopNodeDrag}
+            onSelect={handleFlowNodeSelect}
           >
             {results.length ? (
               <div className="flow-node__image-grid flow-node__image-grid--results">
@@ -1944,26 +2075,41 @@ function FlowNode({
   accent,
   children,
   id,
+  position,
   selected,
   status,
   subtitle,
   title,
+  onPointerCancel,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
   onSelect,
 }: {
   accent: "green" | "blue" | "purple" | "orange" | "gray";
   children: ReactNode;
   id: FlowNodeId;
+  position: FlowNodePosition;
   selected: boolean;
   status: "done" | "pending" | "required";
   subtitle: string;
   title: string;
-  onSelect: (nodeId: FlowNodeId) => void;
+  onPointerCancel: (event: PointerEvent<HTMLButtonElement>) => void;
+  onPointerDown: (event: PointerEvent<HTMLButtonElement>, nodeId: FlowNodeId) => void;
+  onPointerMove: (event: PointerEvent<HTMLButtonElement>) => void;
+  onPointerUp: (event: PointerEvent<HTMLButtonElement>) => void;
+  onSelect: (nodeId: FlowNodeId, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <button
       className={`flow-node flow-node--${accent} ${selected ? "is-selected" : ""}`}
       data-node-id={id}
-      onClick={() => onSelect(id)}
+      onClick={(event) => onSelect(id, event)}
+      onPointerCancel={onPointerCancel}
+      onPointerDown={(event) => onPointerDown(event, id)}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      style={{ left: position.x, top: position.y }}
       type="button"
     >
       <div className="flow-node__header">
@@ -2009,8 +2155,41 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
   );
 }
 
-function FlowArrow({ left, width }: { left: number; width: number }) {
-  return <span className="flow-arrow" style={{ left, width }} aria-hidden="true" />;
+function FlowArrows({ nodePositions }: { nodePositions: Record<FlowNodeId, FlowNodePosition> }) {
+  return (
+    <svg className="flow-arrows" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="flow-arrow-head"
+          markerHeight="8"
+          markerUnits="strokeWidth"
+          markerWidth="8"
+          orient="auto"
+          refX="7"
+          refY="4"
+        >
+          <path d="M 0 0 L 8 4 L 0 8 z" />
+        </marker>
+      </defs>
+      {FLOW_NODE_ORDER.slice(0, -1).map((nodeId, index) => {
+        const nextNodeId = FLOW_NODE_ORDER[index + 1];
+        const from = nodePositions[nodeId];
+        const to = nodePositions[nextNodeId];
+        const startX = from.x + FLOW_NODE_WIDTH + FLOW_ARROW_EDGE_GAP;
+        const startY = from.y + FLOW_NODE_HEIGHT / 2;
+        const endX = to.x - FLOW_ARROW_EDGE_GAP;
+        const endY = to.y + FLOW_NODE_HEIGHT / 2;
+        const midX = startX + (endX - startX) / 2;
+        return (
+          <path
+            className="flow-arrow"
+            d={`M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`}
+            key={`${nodeId}-${nextNodeId}`}
+          />
+        );
+      })}
+    </svg>
+  );
 }
 
 function clampZoom(zoom: number) {

@@ -1278,9 +1278,12 @@ button {
   cursor: grabbing;
 }
 
-.canvas-shell--hand .flow-node,
-.canvas-shell--hand .flow-arrow {
-  pointer-events: none;
+.canvas-shell--hand .flow-node {
+  cursor: grab;
+}
+
+.canvas-shell--hand .flow-node:active {
+  cursor: grabbing;
 }
 
 .canvas-shell--select .flow-node {
@@ -1431,7 +1434,7 @@ button {
 
 .flow-node {
   position: absolute;
-  top: 40px;
+  z-index: 1;
   width: 124px;
   height: 210px;
   display: grid;
@@ -1443,38 +1446,8 @@ button {
   border-radius: 8px;
   background: var(--node-bg);
   box-shadow: 0 16px 34px rgba(15, 23, 42, 0.08);
-}
-
-.flow-node[data-node-id="person"] {
-  left: 0;
-}
-
-.flow-node[data-node-id="garments"] {
-  left: 198px;
-}
-
-.flow-node[data-node-id="prompt"] {
-  left: 396px;
-}
-
-.flow-node[data-node-id="model"] {
-  left: 594px;
-}
-
-.flow-node[data-node-id="model"] .flow-node__body {
-  gap: 5px;
-}
-
-.flow-node[data-node-id="model"] .flow-node__model {
-  min-height: 94px;
-}
-
-.flow-node[data-node-id="execute"] {
-  left: 792px;
-}
-
-.flow-node[data-node-id="result"] {
-  left: 990px;
+  touch-action: none;
+  user-select: none;
 }
 
 .flow-node--green {
@@ -1676,23 +1649,33 @@ button {
   opacity: 0.48;
 }
 
-.flow-arrow {
-  position: absolute;
-  top: 143px;
-  height: 1.5px;
-  background: #111827;
+.flow-node[data-node-id="model"] .flow-node__body {
+  gap: 5px;
 }
 
-.flow-arrow::after {
+.flow-node[data-node-id="model"] .flow-node__model {
+  min-height: 94px;
+}
+
+.flow-arrows {
   position: absolute;
-  right: -2px;
-  top: -4px;
-  width: 8px;
-  height: 8px;
-  content: "";
-  border-top: 1.5px solid #111827;
-  border-right: 1.5px solid #111827;
-  transform: rotate(45deg);
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.flow-arrow {
+  fill: none;
+  stroke: #111827;
+  stroke-width: 1.5;
+  marker-end: url("#flow-arrow-head");
+}
+
+.flow-arrows marker path {
+  fill: #111827;
 }
 
 .flow-minimap {
