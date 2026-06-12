@@ -110,7 +110,11 @@ const CANVAS_BASE_SCALE = 1.8;
 const CANVAS_MIN_ZOOM = 33;
 const CANVAS_MAX_ZOOM = 300;
 const CANVAS_ZOOM_STEP = 10;
-const CANVAS_WHEEL_ZOOM_STEP = 8;
+const CANVAS_WHEEL_ZOOM_SENSITIVITY = 0.015;
+const CANVAS_WHEEL_ZOOM_FRAME_LIMIT = 2;
+const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
+const WHEEL_DELTA_LINE_PX = 16;
+const WHEEL_DELTA_PAGE_PX = 320;
 
 type NewCombinationForm = {
   name: string;
@@ -1541,6 +1545,7 @@ function FlowWorkbench({
 }) {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [isWheelInteracting, setIsWheelInteracting] = useState(false);
   const dragStartRef = useRef<{
     pointerId: number;
     startX: number;
@@ -1548,19 +1553,68 @@ function FlowWorkbench({
     panX: number;
     panY: number;
   } | null>(null);
+  const latestZoomRef = useRef(zoom);
+  const pendingWheelZoomDeltaRef = useRef(0);
+  const wheelZoomRafRef = useRef<number | null>(null);
+  const wheelIdleTimeoutRef = useRef<number | null>(null);
   const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
   const modelReady = credentialStatus?.configured === true;
   const viewportWidth = typeof window === "undefined" ? 1600 : window.innerWidth;
   const fitScale = Math.min(1, Math.max(0.55, (viewportWidth - 690) / 1160));
   const canvasScale = fitScale * CANVAS_BASE_SCALE * (zoom / 100);
 
+  useEffect(() => {
+    latestZoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(
+    () => () => {
+      if (wheelZoomRafRef.current !== null) {
+        window.cancelAnimationFrame(wheelZoomRafRef.current);
+      }
+      if (wheelIdleTimeoutRef.current !== null) {
+        window.clearTimeout(wheelIdleTimeoutRef.current);
+      }
+    },
+    [],
+  );
+
+  function markWheelInteracting() {
+    setIsWheelInteracting(true);
+    if (wheelIdleTimeoutRef.current !== null) {
+      window.clearTimeout(wheelIdleTimeoutRef.current);
+    }
+    wheelIdleTimeoutRef.current = window.setTimeout(() => {
+      setIsWheelInteracting(false);
+      wheelIdleTimeoutRef.current = null;
+    }, CANVAS_WHEEL_IDLE_DELAY_MS);
+  }
+
+  function scheduleWheelZoom(zoomDelta: number) {
+    pendingWheelZoomDeltaRef.current += zoomDelta;
+    if (wheelZoomRafRef.current !== null) {
+      return;
+    }
+    wheelZoomRafRef.current = window.requestAnimationFrame(() => {
+      wheelZoomRafRef.current = null;
+      const frameDelta = clampValue(
+        pendingWheelZoomDeltaRef.current,
+        -CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+        CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+      );
+      pendingWheelZoomDeltaRef.current = 0;
+      if (frameDelta !== 0) {
+        onZoomChange(clampZoom(latestZoomRef.current + frameDelta));
+      }
+    });
+  }
+
   function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
     event.preventDefault();
+    markWheelInteracting();
 
     if (event.ctrlKey || event.metaKey) {
-      onZoomChange(
-        clampZoom(zoom + (event.deltaY > 0 ? -CANVAS_WHEEL_ZOOM_STEP : CANVAS_WHEEL_ZOOM_STEP)),
-      );
+      scheduleWheelZoom(getWheelZoomDelta(event.deltaY, event.deltaMode));
       return;
     }
 
@@ -1568,9 +1622,10 @@ function FlowWorkbench({
       return;
     }
 
+    const panDelta = getWheelPanDelta(event.deltaX, event.deltaY, event.deltaMode);
     setPan((currentPan) => ({
-      x: currentPan.x - event.deltaX,
-      y: currentPan.y - event.deltaY,
+      x: currentPan.x - panDelta.x,
+      y: currentPan.y - panDelta.y,
     }));
   }
 
@@ -1615,7 +1670,11 @@ function FlowWorkbench({
   }
 
   return (
-    <section className={`canvas-shell canvas-shell--${canvasTool}${isPanning ? " is-panning" : ""}`}>
+    <section
+      className={`canvas-shell canvas-shell--${canvasTool}${isPanning ? " is-panning" : ""}${
+        isWheelInteracting ? " is-wheel-interacting" : ""
+      }`}
+    >
       <CanvasToolbar
         canvasTool={canvasTool}
         zoom={zoom}
@@ -1914,6 +1973,36 @@ function FlowArrow({ left, width }: { left: number; width: number }) {
 
 function clampZoom(zoom: number) {
   return Math.max(CANVAS_MIN_ZOOM, Math.min(CANVAS_MAX_ZOOM, zoom));
+}
+
+function clampValue(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeWheelDelta(delta: number, deltaMode: number) {
+  if (deltaMode === 1) {
+    return delta * WHEEL_DELTA_LINE_PX;
+  }
+  if (deltaMode === 2) {
+    return delta * WHEEL_DELTA_PAGE_PX;
+  }
+  return delta;
+}
+
+function getWheelZoomDelta(deltaY: number, deltaMode: number) {
+  const normalizedDeltaY = normalizeWheelDelta(deltaY, deltaMode);
+  return clampValue(
+    -normalizedDeltaY * CANVAS_WHEEL_ZOOM_SENSITIVITY,
+    -CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+    CANVAS_WHEEL_ZOOM_FRAME_LIMIT,
+  );
+}
+
+function getWheelPanDelta(deltaX: number, deltaY: number, deltaMode: number) {
+  return {
+    x: normalizeWheelDelta(deltaX, deltaMode),
+    y: normalizeWheelDelta(deltaY, deltaMode),
+  };
 }
 
 function FlowMiniMap({ selectedFlowNode }: { selectedFlowNode: FlowNodeId }) {

@@ -1410,6 +1410,7 @@ button {
   position: absolute;
   inset: 0;
   overflow: hidden;
+  overscroll-behavior: none;
   touch-action: none;
 }
 
@@ -1423,7 +1424,8 @@ button {
   transition: transform 160ms ease;
 }
 
-.canvas-shell.is-panning .flow-canvas__inner {
+.canvas-shell.is-panning .flow-canvas__inner,
+.canvas-shell.is-wheel-interacting .flow-canvas__inner {
   transition: none;
 }
 
