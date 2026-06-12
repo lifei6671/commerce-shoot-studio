@@ -119,7 +119,7 @@ const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
 const FLOW_NODE_WIDTH = 124;
 const FLOW_NODE_HEIGHT = 210;
-const FLOW_ARROW_EDGE_GAP = 8;
+const FLOW_ARROW_EDGE_GAP = 12;
 const FLOW_NODE_ORDER: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
 const INITIAL_FLOW_NODE_POSITIONS: Record<FlowNodeId, FlowNodePosition> = {
   person: { x: 0, y: 40 },
@@ -2170,6 +2170,80 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
   );
 }
 
+type FlowConnectorSide = "left" | "right" | "top" | "bottom";
+
+type FlowNodeRect = {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  centerX: number;
+  centerY: number;
+};
+
+type FlowConnectorPoint = {
+  side: FlowConnectorSide;
+  x: number;
+  y: number;
+};
+
+function getFlowNodeRect(position: FlowNodePosition): FlowNodeRect {
+  return {
+    left: position.x,
+    right: position.x + FLOW_NODE_WIDTH,
+    top: position.y,
+    bottom: position.y + FLOW_NODE_HEIGHT,
+    centerX: position.x + FLOW_NODE_WIDTH / 2,
+    centerY: position.y + FLOW_NODE_HEIGHT / 2,
+  };
+}
+
+function getFlowConnectorPoint(rect: FlowNodeRect, side: FlowConnectorSide): FlowConnectorPoint {
+  switch (side) {
+    case "left":
+      return { side, x: rect.left - FLOW_ARROW_EDGE_GAP, y: rect.centerY };
+    case "right":
+      return { side, x: rect.right + FLOW_ARROW_EDGE_GAP, y: rect.centerY };
+    case "top":
+      return { side, x: rect.centerX, y: rect.top - FLOW_ARROW_EDGE_GAP };
+    case "bottom":
+      return { side, x: rect.centerX, y: rect.bottom + FLOW_ARROW_EDGE_GAP };
+    default:
+      return { side: "right", x: rect.right + FLOW_ARROW_EDGE_GAP, y: rect.centerY };
+  }
+}
+
+function buildFlowConnectorPath(from: FlowNodePosition, to: FlowNodePosition) {
+  const fromRect = getFlowNodeRect(from);
+  const toRect = getFlowNodeRect(to);
+  let startSide: FlowConnectorSide = "right";
+  let endSide: FlowConnectorSide = "left";
+
+  if (toRect.left >= fromRect.right) {
+    startSide = "right";
+    endSide = "left";
+  } else if (toRect.right <= fromRect.left) {
+    startSide = "left";
+    endSide = "right";
+  } else if (toRect.centerY >= fromRect.centerY) {
+    startSide = "bottom";
+    endSide = "top";
+  } else {
+    startSide = "top";
+    endSide = "bottom";
+  }
+
+  const start = getFlowConnectorPoint(fromRect, startSide);
+  const end = getFlowConnectorPoint(toRect, endSide);
+  if (start.side === "left" || start.side === "right") {
+    const midX = start.x + (end.x - start.x) / 2;
+    return `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`;
+  }
+
+  const midY = start.y + (end.y - start.y) / 2;
+  return `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`;
+}
+
 function FlowArrows({ nodePositions }: { nodePositions: Record<FlowNodeId, FlowNodePosition> }) {
   return (
     <svg className="flow-arrows" aria-hidden="true" focusable="false">
@@ -2190,15 +2264,10 @@ function FlowArrows({ nodePositions }: { nodePositions: Record<FlowNodeId, FlowN
         const nextNodeId = FLOW_NODE_ORDER[index + 1];
         const from = nodePositions[nodeId];
         const to = nodePositions[nextNodeId];
-        const startX = from.x + FLOW_NODE_WIDTH + FLOW_ARROW_EDGE_GAP;
-        const startY = from.y + FLOW_NODE_HEIGHT / 2;
-        const endX = to.x - FLOW_ARROW_EDGE_GAP;
-        const endY = to.y + FLOW_NODE_HEIGHT / 2;
-        const midX = startX + (endX - startX) / 2;
         return (
           <path
             className="flow-arrow"
-            d={`M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`}
+            d={buildFlowConnectorPath(from, to)}
             key={`${nodeId}-${nextNodeId}`}
           />
         );
