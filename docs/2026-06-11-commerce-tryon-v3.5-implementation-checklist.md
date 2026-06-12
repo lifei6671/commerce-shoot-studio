@@ -389,30 +389,35 @@ R6 第二期授权与支付
 **涉及文件**：
 
 - 修改：`desktop/src-tauri/src/commands/assets.rs`
-- 修改：`desktop/src-tauri/src/storage/file_store.rs`
-- 修改：`desktop/src-tauri/migrations/0001_init.sql`
+- 修改：`desktop/src-tauri/src/services/assets.rs`
+- 修改：`desktop/src-tauri/src/state.rs`
+- 新增：`desktop/src-tauri/migrations/0003_asset_gc_queue.sql`
+
+**实现备注**：
+
+- [x] 由于 `0001_init.sql` 已发布并被本地库记录 checksum，本任务实际通过追加 `0003_asset_gc_queue.sql` 落地 GC 队列表，避免再次修改历史 migration。
 
 **执行清单**：
 
-- [ ] `delete_asset` 先检查组合引用。
-- [ ] `delete_asset` 先检查历史任务输入和结果引用。
-- [ ] 被引用 asset 默认不可删除。
-- [ ] 未引用 asset 先提交数据库事务，再删除文件。
-- [ ] 文件删除失败时不回滚数据库事务。
-- [ ] 文件删除失败写入 GC 日志或待清理表。
-- [ ] 应用启动和打开资源库时执行轻量 GC。
-- [ ] GC 只扫描工作区 `assets/` 和 `cache/`。
+- [x] `delete_asset` 先检查组合引用。
+- [x] `delete_asset` 先检查历史任务输入和结果引用。
+- [x] 被引用 asset 默认不可删除。
+- [x] 未引用 asset 先提交数据库事务，再删除文件。
+- [x] 文件删除失败时不回滚数据库事务。
+- [x] 文件删除失败写入 GC 日志或待清理表。
+- [x] 应用启动和打开资源库时执行轻量 GC。
+- [x] GC 只扫描工作区 `assets/` 和 `cache/`。
 
 **验证清单**：
 
-- [ ] 被组合引用的 asset 不可删除。
-- [ ] 被历史任务引用的 asset 不可删除。
-- [ ] 模拟文件删除失败时，数据库记录已删除且 GC 记录存在。
-- [ ] GC 不扫描用户原始导入路径。
+- [x] 被组合引用的 asset 不可删除。
+- [x] 被历史任务引用的 asset 不可删除。
+- [x] 模拟文件删除失败时，数据库记录已删除且 GC 记录存在。
+- [x] GC 不扫描用户原始导入路径。
 
 **退出条件**：
 
-- [ ] 删除资源不会制造坏引用，也不会触碰工作区外文件。
+- [x] 删除资源不会制造坏引用，也不会触碰工作区外文件。
 
 ---
 

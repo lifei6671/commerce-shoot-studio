@@ -14,6 +14,7 @@ use crate::domain::task::{
 };
 use crate::error::{AppError, AppResult};
 use crate::providers::openai_provider::OpenAiImageProvider;
+use crate::services::assets::run_asset_gc;
 use crate::services::credential_service::ProviderCredentialService;
 use crate::services::task_runner::{
     cancel_generation_task_by_id, create_generation_task_snapshot, get_generation_task_by_id,
@@ -78,6 +79,7 @@ impl AppState {
 
         let database = WorkspaceDatabase::connect(&workspace_paths.database_path()).await?;
         run_workspace_migrations(&workspace_paths, &database).await?;
+        run_asset_gc(&database, &workspace_paths).await?;
         recover_interrupted_tasks(&database).await?;
 
         Ok(Self {
@@ -253,6 +255,8 @@ fn emit_generation_task_events(app_handle: &tauri::AppHandle, task: &LocalGenera
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serde_json::json;
     use sqlx::Row;
 
@@ -318,6 +322,38 @@ mod tests {
             row.get::<Option<String>, _>("error_code"),
             Some(APP_UNEXPECTED_SHUTDOWN.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn initialize_runs_asset_gc() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = AppState::initialize_with_workspace(temp_dir.path().to_path_buf())
+            .await
+            .expect("initialize");
+        let orphan_relative_path = "assets/person/startup-orphan.png";
+        let orphan_path = state.workspace_paths().root().join(orphan_relative_path);
+        fs::create_dir_all(orphan_path.parent().expect("orphan parent")).expect("orphan parent");
+        fs::write(&orphan_path, b"orphan").expect("orphan file");
+        sqlx::query(
+            "INSERT INTO asset_gc_queue (id, relative_path, reason)
+             VALUES ('startup_gc', ?, 'delete_failed')",
+        )
+        .bind(orphan_relative_path)
+        .execute(state.database().pool())
+        .await
+        .expect("gc row");
+        drop(state);
+
+        let restarted = AppState::initialize_with_workspace(temp_dir.path().to_path_buf())
+            .await
+            .expect("restart");
+
+        assert!(!orphan_path.exists());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM asset_gc_queue")
+            .fetch_one(restarted.database().pool())
+            .await
+            .expect("gc count");
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]

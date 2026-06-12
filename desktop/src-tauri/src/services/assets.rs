@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use image::GenericImageView;
 use sha2::{Digest, Sha256};
@@ -126,6 +126,161 @@ pub async fn get_asset_by_id(database: &WorkspaceDatabase, id: &str) -> AppResul
     row.map(AssetRow::try_into_asset).transpose()
 }
 
+pub async fn delete_asset(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    asset_id: &str,
+) -> AppResult<()> {
+    let Some(asset) = get_asset_by_id(database, asset_id).await? else {
+        return Err(AppError::InvalidInput(format!(
+            "asset {asset_id} was not found"
+        )));
+    };
+    let combination_ref_count: i64 = sqlx::query_scalar(
+        "SELECT
+            (SELECT COUNT(*) FROM image_combinations WHERE person_asset_id = ?)
+            +
+            (SELECT COUNT(*) FROM image_combination_items WHERE asset_id = ?)",
+    )
+    .bind(asset_id)
+    .bind(asset_id)
+    .fetch_one(database.pool())
+    .await?;
+    if combination_ref_count > 0 {
+        return Err(AppError::InvalidInput(format!(
+            "asset {asset_id} is referenced by an image combination"
+        )));
+    }
+    let task_ref_count: i64 = sqlx::query_scalar(
+        "SELECT
+            (SELECT COUNT(*) FROM generation_task_input_assets WHERE asset_id = ?)
+            +
+            (SELECT COUNT(*) FROM generation_task_results WHERE asset_id = ?)",
+    )
+    .bind(asset_id)
+    .bind(asset_id)
+    .fetch_one(database.pool())
+    .await?;
+    if task_ref_count > 0 {
+        return Err(AppError::InvalidInput(format!(
+            "asset {asset_id} is referenced by a generation task"
+        )));
+    }
+
+    let mut writer = database.writer().await;
+    sqlx::query("DELETE FROM assets WHERE id = ?")
+        .bind(asset_id)
+        .execute(&mut *writer)
+        .await?;
+    drop(writer);
+
+    remove_workspace_file_or_record_gc(database, paths, &asset.relative_path).await?;
+    remove_workspace_file_or_record_gc(database, paths, &asset.thumb_relative_path).await?;
+
+    Ok(())
+}
+
+pub async fn run_asset_gc(database: &WorkspaceDatabase, paths: &WorkspacePaths) -> AppResult<u64> {
+    let rows = sqlx::query_as::<_, AssetGcRow>(
+        "SELECT id, relative_path
+         FROM asset_gc_queue
+         ORDER BY updated_at ASC, id ASC
+         LIMIT 100",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    let mut removed = 0_u64;
+
+    for row in rows {
+        if !is_gc_relative_path_allowed(&row.relative_path) {
+            continue;
+        }
+        match remove_workspace_file(paths, &row.relative_path) {
+            Ok(()) => {
+                let mut writer = database.writer().await;
+                sqlx::query("DELETE FROM asset_gc_queue WHERE id = ?")
+                    .bind(&row.id)
+                    .execute(&mut *writer)
+                    .await?;
+                removed += 1;
+            }
+            Err(err) => {
+                record_asset_gc(database, &row.relative_path, &err.to_string()).await?;
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+fn is_gc_relative_path_allowed(relative_path: &str) -> bool {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return false;
+    }
+    if !relative_path.starts_with("assets/") {
+        return false;
+    }
+    !path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+}
+
+async fn remove_workspace_file_or_record_gc(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    relative_path: &str,
+) -> AppResult<()> {
+    match remove_workspace_file(paths, relative_path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            record_asset_gc(database, relative_path, &err.to_string()).await?;
+            Ok(())
+        }
+    }
+}
+
+fn remove_workspace_file(paths: &WorkspacePaths, relative_path: &str) -> AppResult<()> {
+    let path = paths.root().join(relative_path);
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+async fn record_asset_gc(
+    database: &WorkspaceDatabase,
+    relative_path: &str,
+    last_error: &str,
+) -> AppResult<()> {
+    let id = format!("asset_gc_{}", Ulid::new());
+    let mut writer = database.writer().await;
+    sqlx::query(
+        "INSERT INTO asset_gc_queue (
+            id,
+            relative_path,
+            reason,
+            last_error
+         ) VALUES (?, ?, 'delete_failed', ?)
+         ON CONFLICT(relative_path) DO UPDATE SET
+            attempts = asset_gc_queue.attempts + 1,
+            last_error = excluded.last_error,
+            updated_at = datetime('now')",
+    )
+    .bind(id)
+    .bind(relative_path)
+    .bind(last_error)
+    .execute(&mut *writer)
+    .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct AssetGcRow {
+    id: String,
+    relative_path: String,
+}
+
 async fn find_asset_by_type_and_sha256(
     database: &WorkspaceDatabase,
     asset_type: &AssetType,
@@ -241,6 +396,8 @@ mod tests {
     use image::{ImageBuffer, Rgba};
 
     use super::*;
+    use crate::domain::combination::SaveImageCombinationRequest;
+    use crate::services::combinations::save_image_combination_request;
     use crate::storage::migrations::run_workspace_migrations;
 
     async fn test_workspace() -> (tempfile::TempDir, WorkspacePaths, WorkspaceDatabase) {
@@ -275,10 +432,19 @@ mod tests {
         assert_eq!(response.asset.asset_type.as_str(), "person");
         assert_eq!(response.asset.width, 16);
         assert_eq!(response.asset.height, 12);
-        assert!(!response.asset.relative_path.contains(source_path.to_str().unwrap()));
-        assert!(response.asset.relative_path.starts_with("assets/person/asset_"));
+        assert!(!response
+            .asset
+            .relative_path
+            .contains(source_path.to_str().unwrap()));
+        assert!(response
+            .asset
+            .relative_path
+            .starts_with("assets/person/asset_"));
         assert!(paths.root().join(&response.asset.relative_path).is_file());
-        assert!(paths.root().join(&response.asset.thumb_relative_path).is_file());
+        assert!(paths
+            .root()
+            .join(&response.asset.thumb_relative_path)
+            .is_file());
     }
 
     #[tokio::test]
@@ -290,9 +456,10 @@ mod tests {
         let first = import_image_file(&database, &paths, source_path.clone(), AssetType::Person)
             .await
             .expect("first import");
-        let duplicate = import_image_file(&database, &paths, source_path.clone(), AssetType::Person)
-            .await
-            .expect("duplicate import");
+        let duplicate =
+            import_image_file(&database, &paths, source_path.clone(), AssetType::Person)
+                .await
+                .expect("duplicate import");
         let other_type = import_image_file(&database, &paths, source_path, AssetType::Garment)
             .await
             .expect("other type import");
@@ -301,5 +468,258 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_ne!(first.asset.id, other_type.asset.id);
         assert!(!other_type.duplicate);
+    }
+
+    #[tokio::test]
+    async fn delete_asset_rejects_combination_references() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let person_path = paths.root().join("person.png");
+        let garment_path = paths.root().join("garment.png");
+        write_png(&person_path);
+        write_png(&garment_path);
+        let person = import_image_file(&database, &paths, person_path, AssetType::Person)
+            .await
+            .expect("person");
+        let garment = import_image_file(&database, &paths, garment_path, AssetType::Garment)
+            .await
+            .expect("garment");
+        save_image_combination_request(
+            &database,
+            SaveImageCombinationRequest {
+                id: None,
+                name: "protected look".to_string(),
+                person_asset_id: person.asset.id.clone(),
+                garment_asset_ids: vec![garment.asset.id],
+            },
+        )
+        .await
+        .expect("save combination");
+
+        let result = delete_asset(&database, &paths, &person.asset.id).await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(get_asset_by_id(&database, &person.asset.id)
+            .await
+            .expect("asset lookup")
+            .is_some());
+        assert!(paths.root().join(&person.asset.relative_path).is_file());
+    }
+
+    #[tokio::test]
+    async fn delete_asset_rejects_generation_task_input_references() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let source_path = paths.root().join("garment.png");
+        write_png(&source_path);
+        let garment = import_image_file(&database, &paths, source_path, AssetType::Garment)
+            .await
+            .expect("garment");
+        sqlx::query(
+            "INSERT INTO generation_tasks (
+                id,
+                status,
+                provider,
+                model_id,
+                combination_snapshot_json,
+                prompt_snapshot_json,
+                model_snapshot_json,
+                input_assets_snapshot_json,
+                input_snapshot_json,
+                final_prompt_snapshot_json,
+                model_config_snapshot_json,
+                asset_snapshot_json,
+                updated_at
+            ) VALUES (
+                'task-with-input',
+                'succeeded',
+                'openai',
+                'gpt-image-1',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                datetime('now')
+            )",
+        )
+        .execute(database.pool())
+        .await
+        .expect("task");
+        sqlx::query(
+            "INSERT INTO generation_task_input_assets (
+                task_id,
+                asset_id,
+                role,
+                sort_order,
+                is_primary
+            ) VALUES ('task-with-input', ?, 'garment', 0, 1)",
+        )
+        .bind(&garment.asset.id)
+        .execute(database.pool())
+        .await
+        .expect("task input");
+
+        let result = delete_asset(&database, &paths, &garment.asset.id).await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(get_asset_by_id(&database, &garment.asset.id)
+            .await
+            .expect("asset lookup")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_asset_rejects_generation_task_result_references() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let source_path = paths.root().join("result.png");
+        write_png(&source_path);
+        let result_asset = import_image_file(&database, &paths, source_path, AssetType::Result)
+            .await
+            .expect("result asset");
+        sqlx::query(
+            "INSERT INTO generation_tasks (
+                id,
+                status,
+                provider,
+                model_id,
+                combination_snapshot_json,
+                prompt_snapshot_json,
+                model_snapshot_json,
+                input_assets_snapshot_json,
+                input_snapshot_json,
+                final_prompt_snapshot_json,
+                model_config_snapshot_json,
+                asset_snapshot_json,
+                updated_at
+            ) VALUES (
+                'task-with-result',
+                'succeeded',
+                'openai',
+                'gpt-image-1',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                datetime('now')
+            )",
+        )
+        .execute(database.pool())
+        .await
+        .expect("task");
+        sqlx::query(
+            "INSERT INTO generation_task_results (
+                id,
+                task_id,
+                asset_id,
+                sort_order
+            ) VALUES ('task-result-1', 'task-with-result', ?, 0)",
+        )
+        .bind(&result_asset.asset.id)
+        .execute(database.pool())
+        .await
+        .expect("task result");
+
+        let result = delete_asset(&database, &paths, &result_asset.asset.id).await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(get_asset_by_id(&database, &result_asset.asset.id)
+            .await
+            .expect("asset lookup")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_asset_removes_unreferenced_asset_record_and_files() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let source_path = paths.root().join("person.png");
+        write_png(&source_path);
+        let person = import_image_file(&database, &paths, source_path, AssetType::Person)
+            .await
+            .expect("person");
+        let image_path = paths.root().join(&person.asset.relative_path);
+        let thumb_path = paths.root().join(&person.asset.thumb_relative_path);
+
+        delete_asset(&database, &paths, &person.asset.id)
+            .await
+            .expect("delete asset");
+
+        assert!(get_asset_by_id(&database, &person.asset.id)
+            .await
+            .expect("asset lookup")
+            .is_none());
+        assert!(!image_path.exists());
+        assert!(!thumb_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_asset_records_gc_when_file_removal_fails_after_database_delete() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let source_path = paths.root().join("person.png");
+        write_png(&source_path);
+        let person = import_image_file(&database, &paths, source_path, AssetType::Person)
+            .await
+            .expect("person");
+        let image_path = paths.root().join(&person.asset.relative_path);
+        fs::remove_file(&image_path).expect("remove imported file");
+        fs::create_dir(&image_path).expect("create directory at asset path");
+
+        delete_asset(&database, &paths, &person.asset.id)
+            .await
+            .expect("delete asset");
+
+        assert!(get_asset_by_id(&database, &person.asset.id)
+            .await
+            .expect("asset lookup")
+            .is_none());
+        let pending_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM asset_gc_queue
+             WHERE relative_path = ? AND reason = 'delete_failed'",
+        )
+        .bind(&person.asset.relative_path)
+        .fetch_one(database.pool())
+        .await
+        .expect("gc queue");
+        assert_eq!(pending_count, 1);
+        assert!(image_path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn run_asset_gc_removes_only_workspace_asset_paths() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let orphan_relative_path = "assets/person/orphan.png";
+        let orphan_path = paths.root().join(orphan_relative_path);
+        fs::create_dir_all(orphan_path.parent().expect("orphan parent")).expect("orphan parent");
+        fs::write(&orphan_path, b"orphan").expect("orphan file");
+        let outside_path = paths.root().join("../outside.png");
+        fs::write(&outside_path, b"outside").expect("outside file");
+        sqlx::query(
+            "INSERT INTO asset_gc_queue (id, relative_path, reason)
+             VALUES
+               ('gc_allowed', ?, 'delete_failed'),
+               ('gc_outside', '../outside.png', 'delete_failed')",
+        )
+        .bind(orphan_relative_path)
+        .execute(database.pool())
+        .await
+        .expect("gc rows");
+
+        let removed = run_asset_gc(&database, &paths).await.expect("run gc");
+
+        assert_eq!(removed, 1);
+        assert!(!orphan_path.exists());
+        assert!(outside_path.exists());
+        let remaining_paths: Vec<String> =
+            sqlx::query_scalar("SELECT relative_path FROM asset_gc_queue ORDER BY relative_path")
+                .fetch_all(database.pool())
+                .await
+                .expect("remaining gc rows");
+        assert_eq!(remaining_paths, vec!["../outside.png".to_string()]);
     }
 }

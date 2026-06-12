@@ -23,6 +23,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::assets::import_image,
+            commands::assets::delete_asset,
+            commands::assets::run_asset_garbage_collection,
             commands::combinations::save_image_combination,
             commands::combinations::get_image_combination,
             commands::combinations::list_image_combinations,

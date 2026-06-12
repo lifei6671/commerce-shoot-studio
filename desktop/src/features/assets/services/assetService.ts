@@ -11,3 +11,11 @@ export async function importImage(
     assetType,
   });
 }
+
+export async function deleteAsset(assetId: string): Promise<void> {
+  return invoke<void>("delete_asset", { assetId });
+}
+
+export async function runAssetGarbageCollection(): Promise<number> {
+  return invoke<number>("run_asset_garbage_collection");
+}
