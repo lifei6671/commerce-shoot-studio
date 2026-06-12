@@ -50,3 +50,9 @@ export type ModelConfig = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ProviderCredentialStatus = {
+  provider: string;
+  configured: boolean;
+  maskedKey?: string | null;
+};

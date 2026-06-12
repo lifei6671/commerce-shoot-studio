@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod domain;
 pub mod error;
+pub mod providers;
 pub mod services;
 pub mod state;
 pub mod storage;
@@ -26,6 +27,8 @@ pub fn run() {
             commands::combinations::get_image_combination,
             commands::combinations::list_image_combinations,
             commands::combinations::validate_combination,
+            commands::credentials::set_provider_api_key,
+            commands::credentials::get_provider_credential_status,
             commands::generation::start_generation,
             commands::generation::cancel_generation_task,
             commands::models::list_model_definitions,

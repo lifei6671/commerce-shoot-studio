@@ -960,27 +960,30 @@ R6 第二期授权与支付
 - 创建：`desktop/src-tauri/src/providers/openai_provider.rs`
 - 创建：`desktop/src-tauri/src/providers/mod.rs`
 - 修改：`desktop/src-tauri/src/services/credential_service.rs`
+- 创建：`desktop/src-tauri/src/commands/credentials.rs`
+- 修改：`desktop/src/features/model-config/model/modelTypes.ts`
+- 修改：`desktop/src/features/model-config/services/modelService.ts`
 
 **执行清单**：
 
-- [ ] 定义统一 Provider 输入。
-- [ ] 定义统一 Provider 输出。
-- [ ] 实现至少一个固定 Provider。
-- [ ] API Key 由 Rust 层从系统密钥库读取。
-- [ ] 前端只展示是否已配置和脱敏状态。
-- [ ] Provider 超时、取消和错误返回可映射到统一任务错误。
-- [ ] 不实现自定义 base URL Provider。
+- [x] 定义统一 Provider 输入。
+- [x] 定义统一 Provider 输出。
+- [x] 实现至少一个固定 Provider。
+- [x] API Key 由 Rust 层从系统密钥库读取。
+- [x] 前端只展示是否已配置和脱敏状态。
+- [x] Provider 超时、取消和错误返回可映射到统一任务错误。
+- [x] 不实现自定义 base URL Provider。
 
 **验证清单**：
 
-- [ ] API Key 不进入前端、SQLite、日志或任务摘要。
-- [ ] Provider 调用失败时返回结构化错误。
-- [ ] Provider 返回摘要脱敏。
-- [ ] source_url 不含签名参数、token 或临时访问凭证。
+- [x] API Key 不进入前端、SQLite、日志或任务摘要。
+- [x] Provider 调用失败时返回结构化错误。
+- [x] Provider 返回摘要脱敏。
+- [x] source_url 不含签名参数、token 或临时访问凭证。
 
 **退出条件**：
 
-- [ ] 可安全调用一个固定真实 Provider。
+- [x] 可安全调用一个固定真实 Provider。
 
 ---
 
