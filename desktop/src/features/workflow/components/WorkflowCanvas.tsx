@@ -114,6 +114,7 @@ const CANVAS_ZOOM_LEVELS = [33, 50, 75, 100, 125, 150, 200, 300] as const;
 const CANVAS_WHEEL_ZOOM_EXPONENT = 1 / 500;
 const CANVAS_WHEEL_ZOOM_FRAME_FACTOR = 1.45;
 const CANVAS_WHEEL_IDLE_DELAY_MS = 120;
+const ACTION_MESSAGE_AUTO_DISMISS_MS = 2400;
 const WHEEL_DELTA_LINE_PX = 16;
 const WHEEL_DELTA_PAGE_PX = 320;
 const FLOW_NODE_WIDTH = 124;
@@ -301,6 +302,20 @@ export function WorkflowCanvas() {
       setActionError(error instanceof Error ? error.message : "切换组合失败");
     }
   }
+
+  useEffect(() => {
+    if (!actionMessage) {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setActionMessage((currentMessage) =>
+        currentMessage === actionMessage ? null : currentMessage,
+      );
+    }, ACTION_MESSAGE_AUTO_DISMISS_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [actionMessage]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
