@@ -23,4 +23,5 @@ export type AssetFileView = {
   asset: ImportedAsset;
   filePath: string;
   thumbFilePath: string;
+  thumbDataUrl?: string | null;
 };

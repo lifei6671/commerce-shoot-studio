@@ -331,9 +331,10 @@ export function WorkflowCanvas() {
   async function handleImport(assetType: Extract<AssetType, "person" | "garment">) {
     const selected = await open({
       multiple: false,
+      title: getImageDialogTitle(assetType),
       filters: [
         {
-          name: "Images",
+          name: "图片文件",
           extensions: ["png", "jpg", "jpeg"],
         },
       ],
@@ -374,9 +375,10 @@ export function WorkflowCanvas() {
   ) {
     const selected = await open({
       multiple: false,
+      title: getImageDialogTitle(assetType),
       filters: [
         {
-          name: "Images",
+          name: "图片文件",
           extensions: ["png", "jpg", "jpeg"],
         },
       ],
@@ -800,7 +802,7 @@ function upsertAsset(items: AssetFileView[], asset: AssetFileView) {
 function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAsset {
   return {
     id: view.asset.id,
-    imageSrc: convertFileSrc(view.thumbFilePath),
+    imageSrc: assetThumbSrc(view),
     label: view.asset.originalName,
     selected,
     width: view.asset.width,
@@ -808,6 +810,14 @@ function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAs
     mimeType: view.asset.mimeType,
     createdAt: view.asset.createdAt,
   };
+}
+
+function assetThumbSrc(asset: AssetFileView) {
+  return asset.thumbDataUrl || convertFileSrc(asset.thumbFilePath);
+}
+
+function getImageDialogTitle(assetType: Extract<AssetType, "person" | "garment">) {
+  return assetType === "person" ? "选择人物图片" : "选择服装图片";
 }
 
 function WindowChrome() {
@@ -1187,7 +1197,7 @@ function ModalAssetPicker({
                 }}
                 type="button"
               >
-                <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+                <img alt={asset.asset.originalName} src={assetThumbSrc(asset)} />
                 {selectedIds.includes(asset.asset.id) ? (
                   <i>
                     <CircleCheck size={13} fill="currentColor" />
@@ -1236,7 +1246,7 @@ function ModalAssetPreview({
             <img
               alt={asset.asset.originalName}
               key={asset.asset.id}
-              src={convertFileSrc(asset.thumbFilePath)}
+              src={assetThumbSrc(asset)}
             />
           ))
         ) : (
@@ -1467,7 +1477,7 @@ function FlowWorkbench({
                 <img
                   className="flow-node__hero-image"
                   alt={selectedPerson.asset.originalName}
-                  src={convertFileSrc(selectedPerson.thumbFilePath)}
+                  src={assetThumbSrc(selectedPerson)}
                 />
                 <small>{selectedPerson.asset.originalName}</small>
                 <strong>{formatDimensions(selectedPerson.asset.width, selectedPerson.asset.height)}</strong>
@@ -1493,7 +1503,7 @@ function FlowWorkbench({
                     <img
                       alt={asset.asset.originalName}
                       key={asset.asset.id}
-                      src={convertFileSrc(asset.thumbFilePath)}
+                      src={assetThumbSrc(asset)}
                     />
                   ))}
                 </div>
@@ -1810,7 +1820,7 @@ function AssetInputCard({
       </div>
       {asset ? (
         <div className="selected-asset-preview">
-          <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+          <img alt={asset.asset.originalName} src={assetThumbSrc(asset)} />
           <dl>
             <dt>文件名</dt>
             <dd>{asset.asset.originalName}</dd>
@@ -1861,7 +1871,7 @@ function GarmentInputCard({
         <div className="selected-garment-grid">
           {garments.map((asset) => (
             <article key={asset.asset.id}>
-              <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+              <img alt={asset.asset.originalName} src={assetThumbSrc(asset)} />
               <button onClick={() => onRemove(asset.asset.id)} type="button" aria-label="移除服装">
                 <X size={13} />
               </button>
@@ -2463,7 +2473,7 @@ function AssetDetailBlock({
       <h3>{title}</h3>
       {asset ? (
         <div className="preview-card">
-          <img alt={asset.asset.originalName} src={convertFileSrc(asset.thumbFilePath)} />
+          <img alt={asset.asset.originalName} src={assetThumbSrc(asset)} />
           <dl>
             <dt>文件名</dt>
             <dd>{asset.asset.originalName}</dd>
@@ -2507,7 +2517,7 @@ function GarmentDetailBlock({
             <img
               alt={asset.asset.originalName}
               key={asset.asset.id}
-              src={convertFileSrc(asset.thumbFilePath)}
+              src={assetThumbSrc(asset)}
             />
           ))}
         </div>

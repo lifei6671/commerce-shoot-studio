@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use base64::{engine::general_purpose, Engine as _};
 use image::GenericImageView;
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
@@ -191,19 +192,24 @@ pub async fn list_asset_file_views(
 }
 
 fn asset_file_view(paths: &WorkspacePaths, asset: Asset) -> AssetFileView {
+    let file_path = paths.root().join(&asset.relative_path);
+    let thumb_file_path = paths.root().join(&asset.thumb_relative_path);
+    let thumb_data_url = file_data_url(&thumb_file_path, "image/jpeg").ok();
+
     AssetFileView {
-        file_path: paths
-            .root()
-            .join(&asset.relative_path)
-            .to_string_lossy()
-            .to_string(),
-        thumb_file_path: paths
-            .root()
-            .join(&asset.thumb_relative_path)
-            .to_string_lossy()
-            .to_string(),
+        file_path: file_path.to_string_lossy().to_string(),
+        thumb_file_path: thumb_file_path.to_string_lossy().to_string(),
+        thumb_data_url,
         asset,
     }
+}
+
+fn file_data_url(path: &Path, mime_type: &str) -> AppResult<String> {
+    let bytes = fs::read(path)?;
+    Ok(format!(
+        "data:{mime_type};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 pub async fn delete_asset(
@@ -573,6 +579,10 @@ mod tests {
         assert!(people[0]
             .thumb_file_path
             .ends_with(&person.asset.thumb_relative_path));
+        assert!(people[0]
+            .thumb_data_url
+            .as_deref()
+            .is_some_and(|value| value.starts_with("data:image/jpeg;base64,")));
         assert_ne!(people[0].asset.id, garment.asset.id);
     }
 

@@ -48,4 +48,5 @@ pub struct AssetFileView {
     pub asset: Asset,
     pub file_path: String,
     pub thumb_file_path: String,
+    pub thumb_data_url: Option<String>,
 }
