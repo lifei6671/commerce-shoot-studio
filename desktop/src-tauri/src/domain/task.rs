@@ -108,3 +108,28 @@ pub struct GenerationTaskResult {
     pub source_url: Option<String>,
     pub created_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskResultAsset {
+    pub id: String,
+    pub task_id: String,
+    pub asset_id: String,
+    pub sort_order: i64,
+    pub source_url: Option<String>,
+    pub relative_path: String,
+    pub thumb_relative_path: String,
+    pub file_path: String,
+    pub thumb_file_path: String,
+    pub mime_type: String,
+    pub width: i64,
+    pub height: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskDetail {
+    pub task: LocalGenerationTask,
+    pub results: Vec<GenerationTaskResultAsset>,
+}

@@ -13,7 +13,7 @@ import {
 } from "@xyflow/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Archive,
   Box,
@@ -58,6 +58,14 @@ import {
   getImageCombination,
   listImageCombinations,
 } from "../../assets/services/combinationService";
+import type {
+  GenerationTaskDetail,
+  GenerationTaskResultAsset,
+} from "../../generation-task/model/taskTypes";
+import {
+  getLatestGenerationTaskByCombination,
+  openGenerationResult,
+} from "../../generation-task/services/taskService";
 import { useWorkbenchStore } from "../store/workflowStore";
 import type { Asset, WorkflowNodeData } from "../model/workflowTypes";
 import "@xyflow/react/dist/style.css";
@@ -200,13 +208,14 @@ export function WorkflowNode({ data, selected }: NodeProps<Node<WorkflowNodeData
       </span>
       <span className="workflow-node__title">{data.title}</span>
       <span className="workflow-node__subtitle">{data.subtitle}</span>
-      <WorkflowNodeBody tone={data.tone} />
+      <WorkflowNodeBody data={data} />
       <Handle type="source" position={Position.Right} className="node-handle" />
     </button>
   );
 }
 
-function WorkflowNodeBody({ tone }: { tone: WorkflowNodeData["tone"] }) {
+function WorkflowNodeBody({ data }: { data: WorkflowNodeData }) {
+  const tone = data.tone;
   if (tone === "person") {
     return (
       <div className="workflow-node__image-card">
@@ -261,10 +270,27 @@ function WorkflowNodeBody({ tone }: { tone: WorkflowNodeData["tone"] }) {
     );
   }
 
+  if (data.results?.length) {
+    return (
+      <div className="workflow-node__result">
+        <div className="workflow-node__result-thumbs">
+          {data.results.slice(0, 3).map((result) => (
+            <img
+              alt="生成结果"
+              key={result.assetId}
+              src={convertFileSrc(result.thumbFilePath)}
+            />
+          ))}
+        </div>
+        <span>{data.results.length} 张结果</span>
+      </div>
+    );
+  }
+
   return (
     <div className="workflow-node__result">
       <ImageIcon size={54} />
-      <span>将生成 3 张图片</span>
+      <span>等待生成结果</span>
     </div>
   );
 }
@@ -274,6 +300,7 @@ const edgeTypes = { flow: FlowEdge };
 
 export function WorkflowCanvas() {
   const [currentCombination, setCurrentCombination] = useState<ImageCombination | null>(null);
+  const [latestTask, setLatestTask] = useState<GenerationTaskDetail | null>(null);
   const validationResult = useWorkbenchStore((state) => state.validationResult);
 
   useEffect(() => {
@@ -295,11 +322,19 @@ export function WorkflowCanvas() {
       if (!canceled) {
         setCurrentCombination(combination);
       }
+
+      if (combination) {
+        const task = await getLatestGenerationTaskByCombination(combination.id);
+        if (!canceled) {
+          setLatestTask(task);
+        }
+      }
     }
 
     loadLatestCombination().catch(() => {
       if (!canceled) {
         setCurrentCombination(null);
+        setLatestTask(null);
       }
     });
 
@@ -308,7 +343,7 @@ export function WorkflowCanvas() {
     };
   }, []);
 
-  const flowNodes = buildWorkflowNodes(currentCombination, validationResult);
+  const flowNodes = buildWorkflowNodes(currentCombination, validationResult, latestTask);
 
   return (
     <div className="desktop-frame">
@@ -345,7 +380,7 @@ export function WorkflowCanvas() {
               </ReactFlow>
               <MinimapMock />
             </main>
-            <BottomDashboard />
+            <BottomDashboard currentCombination={currentCombination} latestTask={latestTask} />
           </div>
           <PropertyPanel />
         </div>
@@ -358,8 +393,28 @@ export function WorkflowCanvas() {
 function buildWorkflowNodes(
   currentCombination: ImageCombination | null,
   validationResult: ValidateCombinationResponse | null,
+  latestTask: GenerationTaskDetail | null,
 ): Node<WorkflowNodeData>[] {
   return baseNodes.map((node) => {
+    if (node.id === "result") {
+      const results = latestTask?.results.map((result) => ({
+        assetId: result.assetId,
+        thumbFilePath: result.thumbFilePath,
+        width: result.width,
+        height: result.height,
+      }));
+      const hasResults = Boolean(results?.length);
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          subtitle: hasResults ? `${results?.length ?? 0} 张` : "待生成",
+          status: hasResults ? "done" : "pending",
+          results,
+        },
+      };
+    }
+
     if (node.id === "execute") {
       const executable = validationResult?.executable === true;
       return {
@@ -802,7 +857,23 @@ function MockVisual({ kind, label }: { kind: string; label: string }) {
   );
 }
 
-function BottomDashboard() {
+function BottomDashboard({
+  currentCombination,
+  latestTask,
+}: {
+  currentCombination: ImageCombination | null;
+  latestTask: GenerationTaskDetail | null;
+}) {
+  const task = latestTask?.task ?? null;
+  const results = latestTask?.results ?? [];
+  const progress = Math.max(0, Math.min(100, task?.progress ?? 0));
+  const ringStyle = {
+    "--progress-offset": 302 - (302 * progress) / 100,
+  } as CSSProperties;
+  const taskStatus = getGenerationTaskStatusLabel(task?.status);
+  const taskSteps = buildTaskProgressSteps(task?.status);
+  const hasTask = Boolean(task);
+
   return (
     <section className="bottom-dashboard">
       <div className="task-status">
@@ -813,66 +884,173 @@ function BottomDashboard() {
           <div className="progress-ring">
             <svg viewBox="0 0 120 120">
               <circle cx="60" cy="60" r="48" />
-              <circle cx="60" cy="60" r="48" className="progress-ring__value" />
+              <circle
+                cx="60"
+                cy="60"
+                r="48"
+                className="progress-ring__value"
+                style={ringStyle}
+              />
             </svg>
-            <strong>72%</strong>
-            <span>执行中</span>
+            <strong>{progress}%</strong>
+            <span>{taskStatus}</span>
           </div>
           <div className="progress-steps">
-            {["准备请求", "上传图片", "创建任务", "模型生成中", "下载结果"].map((step, index) => (
-              <div className={`progress-step ${index === 3 ? "is-active" : ""}`} key={step}>
+            {taskSteps.map((step) => (
+              <div
+                className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
+                key={step.label}
+              >
                 <span />
-                <strong>{index === 3 ? "当前阶段：" : ""}{step}</strong>
-                <time>{index < 3 ? `00:${index === 0 ? "05" : index === 1 ? "18" : "10"}` : index === 3 ? "01:28" : "--:--"}</time>
-                {index < 4 ? <CircleCheck size={14} fill="currentColor" /> : <Clock3 size={14} />}
+                <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
+                <time>{step.state === "done" ? "完成" : "--"}</time>
+                {step.state === "done" ? (
+                  <CircleCheck size={14} fill="currentColor" />
+                ) : (
+                  <Clock3 size={14} />
+                )}
               </div>
             ))}
           </div>
         </div>
         <div className="task-actions">
-          <button className="danger-button" type="button">
+          <button className="danger-button" disabled type="button">
             <CircleX size={15} />
             取消任务
           </button>
-          <button className="toolbar-button" type="button">
+          <button className="toolbar-button" disabled type="button">
             <Eye size={15} />
             最小化面板
           </button>
         </div>
       </div>
-      <div className="result-preview">
-        <h2>结果预览 <span>预计 3 张</span></h2>
-        <div className="preview-results">
-          {[1, 2, 3].map((item) => (
-            <div className="generating-card" key={item}>
-              <span className="loader-ring" />
-              <strong>生成中...</strong>
-              <small>72%</small>
-            </div>
-          ))}
-        </div>
-      </div>
+      <ResultPreview results={results} />
       <div className="task-info">
         <h2>任务信息</h2>
         <dl>
           <dt>组合名称</dt>
-          <dd>夏日连衣裙展示</dd>
+          <dd>{currentCombination?.name ?? "未选择组合"}</dd>
           <dt>模型</dt>
-          <dd>FLUX.1 dev</dd>
+          <dd>{task?.modelId ?? "--"}</dd>
           <dt>尺寸</dt>
-          <dd>1024 × 1365</dd>
+          <dd>{formatResultSize(results)}</dd>
           <dt>生成数量</dt>
-          <dd>3</dd>
+          <dd>{task?.outputCount ?? "--"}</dd>
           <dt>创建时间</dt>
-          <dd>2024-05-21 14:35:22</dd>
+          <dd>{formatTaskTime(task?.createdAt)}</dd>
           <dt>任务 ID</dt>
-          <dd>task_20240521_143522</dd>
+          <dd>{task?.id ?? (hasTask ? "--" : "暂无任务")}</dd>
         </dl>
-        <button className="ghost-wide" type="button">
+        <button className="ghost-wide" disabled type="button">
           查看详情日志
         </button>
       </div>
     </section>
+  );
+}
+
+type ProgressStepState = "done" | "active" | "pending";
+
+const taskProgressStages: Array<{ status: string; label: string }> = [
+  { status: "queued", label: "创建任务" },
+  { status: "preparing", label: "准备请求" },
+  { status: "calling_model", label: "调用模型" },
+  { status: "waiting_result", label: "等待结果" },
+  { status: "saving_result", label: "保存结果" },
+];
+
+function buildTaskProgressSteps(status: string | undefined) {
+  const activeIndex = taskProgressStages.findIndex((step) => step.status === status);
+  return taskProgressStages.map((step, index) => {
+    let state: ProgressStepState = "pending";
+    if (status === "succeeded") {
+      state = "done";
+    } else if (activeIndex >= 0 && index < activeIndex) {
+      state = "done";
+    } else if (activeIndex === index) {
+      state = "active";
+    }
+    return { ...step, state };
+  });
+}
+
+function getGenerationTaskStatusLabel(status: string | undefined) {
+  switch (status) {
+    case "queued":
+      return "排队中";
+    case "preparing":
+      return "准备中";
+    case "calling_model":
+      return "调用中";
+    case "waiting_result":
+      return "等待结果";
+    case "saving_result":
+      return "保存中";
+    case "succeeded":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return "暂无任务";
+  }
+}
+
+function formatResultSize(results: GenerationTaskResultAsset[]) {
+  const first = results[0];
+  return first ? `${first.width} × ${first.height}` : "--";
+}
+
+function formatTaskTime(value: string | undefined) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
+  if (!results.length) {
+    return (
+      <div className="result-preview">
+        <h2>结果预览 <span>等待生成</span></h2>
+        <div className="preview-results">
+          {[1, 2, 3].map((item) => (
+            <div className="generating-card" key={item}>
+              <span className="loader-ring" />
+              <strong>暂无结果</strong>
+              <small>--</small>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="result-preview">
+      <h2>结果预览 <span>{results.length} 张</span></h2>
+      <div className="preview-results">
+        {results.slice(0, 3).map((result) => (
+          <button
+            className="result-card"
+            key={result.id}
+            onClick={() => {
+              openGenerationResult(result.assetId).catch(() => undefined);
+            }}
+            type="button"
+          >
+            <img alt="生成结果" src={convertFileSrc(result.thumbFilePath)} />
+            <strong>{result.width} × {result.height}</strong>
+            <small>打开大图</small>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

@@ -19,4 +19,10 @@ export type WorkflowNodeData = {
   subtitle: string;
   tone: WorkflowNodeTone;
   status: "done" | "ready" | "pending";
+  results?: Array<{
+    assetId: string;
+    thumbFilePath: string;
+    width: number;
+    height: number;
+  }>;
 };

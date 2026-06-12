@@ -1005,6 +1005,9 @@ R6 第二期授权与支付
 - 修改：`desktop/src-tauri/src/storage/file_store.rs`
 - 创建：`desktop/src/features/generation-task/services/taskService.ts`
 - 修改：`desktop/src/features/generation-task/model/taskTypes.ts`
+- 修改：`desktop/src/features/workflow/components/WorkflowCanvas.tsx`
+- 修改：`desktop/src/features/workflow/model/workflowTypes.ts`
+- 修改：`desktop/src/shared/styles/global.css`
 - 修改：`desktop/src/features/workflow/components/nodes/ExecuteNode.tsx`
 - 修改：`desktop/src/features/workflow/components/nodes/ResultNode.tsx`
 
@@ -1016,7 +1019,7 @@ R6 第二期授权与支付
 - [x] 状态流转覆盖 queued、preparing、calling_model、waiting_result、saving_result、succeeded、failed。
 - [x] 保存结果图片到工作区。
 - [x] 写入 `generation_task_results`。
-- [ ] ResultNode 展示结果缩略图和打开大图入口。
+- [x] ResultNode 展示结果缩略图和打开大图入口。
 
 **验证清单**：
 

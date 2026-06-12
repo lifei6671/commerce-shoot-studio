@@ -832,6 +832,23 @@ button {
   color: #a8b1c3;
 }
 
+.workflow-node__result-thumbs {
+  width: 82px;
+  min-height: 104px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 5px;
+}
+
+.workflow-node__result-thumbs img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid #dbe4f1;
+  background: #ffffff;
+}
+
 .node-handle {
   width: 1px;
   height: 1px;
@@ -1161,7 +1178,7 @@ button {
   stroke: #2f6bff !important;
   stroke-linecap: round;
   stroke-dasharray: 302;
-  stroke-dashoffset: 85;
+  stroke-dashoffset: var(--progress-offset, 302);
 }
 
 .progress-ring strong {
@@ -1214,6 +1231,12 @@ button {
   background: #2563eb;
 }
 
+.progress-step.is-done span,
+.progress-step.is-done svg {
+  color: #18b86a;
+  background: #18b86a;
+}
+
 .task-actions {
   display: flex;
   gap: 10px;
@@ -1223,6 +1246,13 @@ button {
 .danger-button {
   color: #ef4444;
   border-color: #fecaca;
+}
+
+.danger-button:disabled,
+.toolbar-button:disabled,
+.ghost-wide:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .preview-results {
@@ -1258,6 +1288,38 @@ button {
 
 .generating-card small {
   color: #94a3b8;
+}
+
+.result-card {
+  height: 172px;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #dbe4f1;
+  border-radius: 6px;
+  background: #ffffff;
+  text-align: left;
+}
+
+.result-card img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #eef2f7;
+}
+
+.result-card strong {
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.result-card small {
+  color: #2563eb;
+  font-size: 11px;
 }
 
 .task-info {

@@ -74,3 +74,18 @@ export type GenerationTaskResult = {
   sourceUrl?: string | null;
   createdAt: string;
 };
+
+export type GenerationTaskResultAsset = GenerationTaskResult & {
+  relativePath: string;
+  thumbRelativePath: string;
+  filePath: string;
+  thumbFilePath: string;
+  mimeType: string;
+  width: number;
+  height: number;
+};
+
+export type GenerationTaskDetail = {
+  task: LocalGenerationTask;
+  results: GenerationTaskResultAsset[];
+};

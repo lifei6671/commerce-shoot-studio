@@ -1,4 +1,5 @@
 use std::fs;
+use std::process::Command;
 
 use image::GenericImageView;
 use serde_json::json;
@@ -11,8 +12,9 @@ use crate::domain::asset::{Asset, AssetType};
 use crate::domain::combination::{DraftImageCombination, ValidateCombinationRequest};
 use crate::domain::task::{
     CreateGenerationTaskResultRequest, CreateGenerationTaskSnapshotRequest, GenerationTaskResult,
-    GenerationTaskInputAsset, GenerationTaskInputRole, LocalGenerationTask, StartGenerationRequest,
-    APP_UNEXPECTED_SHUTDOWN, RUNNING_TASK_STATUSES,
+    GenerationTaskDetail, GenerationTaskInputAsset, GenerationTaskInputRole,
+    GenerationTaskResultAsset, LocalGenerationTask, StartGenerationRequest, APP_UNEXPECTED_SHUTDOWN,
+    RUNNING_TASK_STATUSES,
 };
 use crate::error::{AppError, AppResult};
 use crate::providers::provider_trait::{
@@ -293,6 +295,54 @@ pub async fn get_generation_task_result_by_id(
     .await?;
 
     Ok(row.map(row_to_generation_task_result))
+}
+
+pub async fn get_generation_task_detail_by_id(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    id: &str,
+) -> AppResult<Option<GenerationTaskDetail>> {
+    let Some(task) = get_generation_task_by_id(database, id).await? else {
+        return Ok(None);
+    };
+    let results = list_generation_task_result_assets(database, paths, id).await?;
+    Ok(Some(GenerationTaskDetail { task, results }))
+}
+
+pub async fn get_latest_generation_task_detail_by_combination(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    combination_id: &str,
+) -> AppResult<Option<GenerationTaskDetail>> {
+    let task_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM generation_tasks
+         WHERE combination_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(combination_id)
+    .fetch_optional(database.pool())
+    .await?;
+
+    match task_id {
+        Some(task_id) => get_generation_task_detail_by_id(database, paths, &task_id).await,
+        None => Ok(None),
+    }
+}
+
+pub async fn open_generation_result_asset(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    asset_id: &str,
+) -> AppResult<()> {
+    let asset = get_required_asset(database, asset_id, AssetType::Result).await?;
+    let file_path = paths.root().join(asset.relative_path);
+    if !file_path.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "result asset {asset_id} file was not found"
+        )));
+    }
+    open_file_with_system_viewer(&file_path)
 }
 
 async fn build_generation_plan(
@@ -771,6 +821,26 @@ fn app_error_code(err: &AppError) -> &'static str {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn open_file_with_system_viewer(path: &std::path::Path) -> AppResult<()> {
+    let status = Command::new("/usr/bin/open").arg(path).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::InvalidInput(format!(
+            "failed to open result file {}",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_file_with_system_viewer(_path: &std::path::Path) -> AppResult<()> {
+    Err(AppError::InvalidInput(
+        "opening result files is only supported on macOS".to_string(),
+    ))
+}
+
 fn validate_safe_summary(summary: Option<&Value>) -> AppResult<()> {
     if let Some(summary) = summary {
         validate_safe_json_value(summary, "$")?;
@@ -847,6 +917,64 @@ fn row_to_generation_task_result(row: sqlx::sqlite::SqliteRow) -> GenerationTask
         source_url: row.get("source_url"),
         created_at: row.get("created_at"),
     }
+}
+
+async fn list_generation_task_result_assets(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    task_id: &str,
+) -> AppResult<Vec<GenerationTaskResultAsset>> {
+    let rows = sqlx::query(
+        "SELECT
+            r.id,
+            r.task_id,
+            r.asset_id,
+            r.sort_order,
+            r.source_url,
+            r.created_at,
+            a.relative_path,
+            a.thumb_relative_path,
+            a.mime_type,
+            a.width,
+            a.height
+         FROM generation_task_results r
+         INNER JOIN assets a ON a.id = r.asset_id
+         WHERE r.task_id = ?
+         ORDER BY r.sort_order ASC",
+    )
+    .bind(task_id)
+    .fetch_all(database.pool())
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let relative_path: String = row.get("relative_path");
+            let thumb_relative_path: String = row.get("thumb_relative_path");
+            Ok(GenerationTaskResultAsset {
+                id: row.get("id"),
+                task_id: row.get("task_id"),
+                asset_id: row.get("asset_id"),
+                sort_order: row.get("sort_order"),
+                source_url: row.get("source_url"),
+                file_path: paths
+                    .root()
+                    .join(&relative_path)
+                    .to_string_lossy()
+                    .to_string(),
+                thumb_file_path: paths
+                    .root()
+                    .join(&thumb_relative_path)
+                    .to_string_lossy()
+                    .to_string(),
+                relative_path,
+                thumb_relative_path,
+                mime_type: row.get("mime_type"),
+                width: row.get("width"),
+                height: row.get("height"),
+                created_at: row.get("created_at"),
+            })
+        })
+        .collect()
 }
 
 fn parse_optional_json(value: Option<String>) -> AppResult<Option<Value>> {
@@ -1229,6 +1357,17 @@ mod tests {
                 .await
                 .expect("result asset type");
         assert_eq!(result_asset_type, "result");
+
+        let detail = get_generation_task_detail_by_id(&database, &paths, &task.id)
+            .await
+            .expect("task detail")
+            .expect("task detail");
+        assert_eq!(detail.task.id, task.id);
+        assert_eq!(detail.results.len(), 1);
+        assert_eq!(detail.results[0].asset_id, result_refs[0].0);
+        assert_eq!(detail.results[0].sort_order, 0);
+        assert!(std::path::Path::new(&detail.results[0].file_path).is_file());
+        assert!(std::path::Path::new(&detail.results[0].thumb_file_path).is_file());
 
         save_prompt_binding_request(
             &database,
