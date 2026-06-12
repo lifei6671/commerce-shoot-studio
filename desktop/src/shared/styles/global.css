@@ -141,10 +141,26 @@ button {
   font-size: 13px;
 }
 
-.combo-select strong {
+.combo-select select {
   flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  appearance: none;
+  background: transparent;
   color: #111827;
   font-size: 14px;
+  font-weight: 700;
+}
+
+.combo-select select:disabled {
+  color: #111827;
+  opacity: 1;
+}
+
+.combo-select svg {
+  flex: 0 0 auto;
+  pointer-events: none;
 }
 
 .toolbar-actions {

@@ -38,6 +38,7 @@ import {
 import type { AssetFileView, AssetType } from "../../assets/model/assetTypes";
 import type {
   ImageCombination,
+  ImageCombinationSummary,
   ValidateCombinationResponse,
 } from "../../assets/model/combinationTypes";
 import { getAsset, importImage, listAssets } from "../../assets/services/assetService";
@@ -115,6 +116,7 @@ export function WorkflowNode() {
 
 export function WorkflowCanvas() {
   const [currentCombination, setCurrentCombination] = useState<ImageCombination | null>(null);
+  const [combinationSummaries, setCombinationSummaries] = useState<ImageCombinationSummary[]>([]);
   const [people, setPeople] = useState<AssetFileView[]>([]);
   const [garments, setGarments] = useState<AssetFileView[]>([]);
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
@@ -210,6 +212,7 @@ export function WorkflowCanvas() {
     ]);
     setPeople(personAssets);
     setGarments(garmentAssets);
+    setCombinationSummaries(combinations);
 
     const latest = combinations[0];
     if (!latest) {
@@ -227,6 +230,31 @@ export function WorkflowCanvas() {
 
     if (combination) {
       setLatestTask(await getLatestGenerationTaskByCombination(combination.id));
+    }
+  }
+
+  async function handleSelectCombination(combinationId: string) {
+    if (!combinationId || combinationId === currentCombination?.id) {
+      return;
+    }
+
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      const combination = await getImageCombination(combinationId);
+      if (!combination) {
+        throw new Error("未找到选择的组合");
+      }
+      setCurrentCombination(combination);
+      setDraftCombinationName(null);
+      setSelectedPersonId(combination.personAssetId);
+      setSelectedGarmentIds(combination.garmentAssetIds);
+      setLatestTask(await getLatestGenerationTaskByCombination(combination.id));
+      setSelectedFlowNode("person");
+      setSidePanelMode("details");
+      setActionMessage("组合已切换");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "切换组合失败");
     }
   }
 
@@ -494,6 +522,7 @@ export function WorkflowCanvas() {
       garmentAssetIds: selectedGarmentIds,
     });
     setCurrentCombination(saved);
+    setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
     setDraftCombinationName(null);
     await savePromptBinding(buildPromptBinding(saved.id, promptText));
     await refreshTaskLists();
@@ -548,6 +577,7 @@ export function WorkflowCanvas() {
         garmentAssetIds: nextGarmentIds,
       });
       setCurrentCombination(saved);
+      setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
       setDraftCombinationName(null);
       await savePromptBinding(buildPromptBinding(saved.id, DEFAULT_PROMPT_TEXT));
       setLatestTask(null);
@@ -590,6 +620,8 @@ export function WorkflowCanvas() {
       <div className="workbench">
         <TopToolbar
           combinationName={combinationName}
+          combinationSummaries={combinationSummaries}
+          currentCombinationId={currentCombination?.id ?? ""}
           canRun={canRun}
           isSaving={isSaving}
           isStarting={isStarting}
@@ -604,6 +636,9 @@ export function WorkflowCanvas() {
           onNew={openNewCombinationModal}
           onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
           onRefresh={handleRefreshAll}
+          onSelectCombination={(combinationId) => {
+            void handleSelectCombination(combinationId);
+          }}
           onSave={() => {
             void handleSaveCombination();
           }}
@@ -810,6 +845,21 @@ function upsertAsset(items: AssetFileView[], asset: AssetFileView) {
   return [asset, ...items.filter((item) => item.asset.id !== asset.asset.id)];
 }
 
+function upsertCombinationSummary(
+  summaries: ImageCombinationSummary[],
+  combination: ImageCombination,
+) {
+  const summary: ImageCombinationSummary = {
+    id: combination.id,
+    name: combination.name,
+    personAssetId: combination.personAssetId,
+    garmentCount: combination.garmentAssetIds.length,
+    createdAt: combination.createdAt,
+    updatedAt: combination.updatedAt,
+  };
+  return [summary, ...summaries.filter((item) => item.id !== combination.id)];
+}
+
 function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAsset {
   return {
     id: view.asset.id,
@@ -853,6 +903,8 @@ function WindowChrome() {
 
 function TopToolbar({
   combinationName,
+  combinationSummaries,
+  currentCombinationId,
   canRun,
   isSaving,
   isStarting,
@@ -861,10 +913,13 @@ function TopToolbar({
   onNew,
   onPromptTemplate,
   onRefresh,
+  onSelectCombination,
   onSave,
   onRun,
 }: {
   combinationName: string;
+  combinationSummaries: ImageCombinationSummary[];
+  currentCombinationId: string;
   canRun: boolean;
   isSaving: boolean;
   isStarting: boolean;
@@ -873,16 +928,29 @@ function TopToolbar({
   onNew: () => void;
   onPromptTemplate: () => void;
   onRefresh: () => void;
+  onSelectCombination: (combinationId: string) => void;
   onSave: () => void;
   onRun: () => void;
 }) {
   return (
     <nav className="top-toolbar" aria-label="工作台工具栏">
-      <div className="combo-select">
+      <label className="combo-select">
         <span>当前组合：</span>
-        <strong>{combinationName}</strong>
+        <select
+          aria-label="切换组合"
+          disabled={combinationSummaries.length === 0}
+          value={currentCombinationId}
+          onChange={(event) => onSelectCombination(event.target.value)}
+        >
+          {currentCombinationId ? null : <option value="">{combinationName}</option>}
+          {combinationSummaries.map((combination) => (
+            <option key={combination.id} value={combination.id}>
+              {combination.name}
+            </option>
+          ))}
+        </select>
         <ChevronDown size={16} />
-      </div>
+      </label>
       <div className="toolbar-actions">
         <button className="primary-action" onClick={onNew} type="button">
           <Plus size={18} />
