@@ -437,25 +437,25 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 创建 `prompt_templates` 表。
-- [ ] 创建 `prompt_bindings` 表，并以 `combination_id UNIQUE` 作为唯一事实来源。
-- [ ] 支持 `default`、`append`、`override` 三种 Prompt 修改模式。
-- [ ] 校验模板占位符与 `variables_json` 声明一致。
-- [ ] required 变量缺失时返回明确错误。
-- [ ] 声明 required 但模板未使用时返回 warning。
-- [ ] 实现 `save_prompt_binding`。
-- [ ] 实现 `preview_resolved_prompt`。
-- [ ] 前端最终 Prompt 预览只调用 `preview_resolved_prompt`。
+- [x] 创建 `prompt_templates` 表。
+- [x] 创建 `prompt_bindings` 表，并以 `combination_id UNIQUE` 作为唯一事实来源。
+- [x] 支持 `default`、`append`、`override` 三种 Prompt 修改模式。
+- [x] 校验模板占位符与 `variables_json` 声明一致。
+- [x] required 变量缺失时返回明确错误。
+- [x] 声明 required 但模板未使用时返回 warning。
+- [x] 实现 `save_prompt_binding`。
+- [x] 实现 `preview_resolved_prompt`。
+- [x] 前端最终 Prompt 预览只调用 `preview_resolved_prompt`。
 
 **验证清单**：
 
-- [ ] 模板出现未声明变量时返回 `PROMPT_TEMPLATE_INVALID`。
+- [x] 模板出现未声明变量时返回 `PROMPT_TEMPLATE_INVALID`。
 - [ ] required 变量缺失时 `validate_combination` 阻止执行。
-- [ ] 同一 PromptBinding 的预览结果可被后续 `start_generation` 复用为快照。
+- [x] 同一 PromptBinding 的预览结果可被后续 `start_generation` 复用为快照。
 
 **退出条件**：
 
-- [ ] 前端没有第二套 Prompt 拼接逻辑。
+- [x] 前端没有第二套 Prompt 拼接逻辑。
 
 ---
 

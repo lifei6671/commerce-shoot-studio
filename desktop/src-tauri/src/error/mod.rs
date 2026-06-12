@@ -11,6 +11,10 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("workspace path is unavailable")]
     WorkspaceUnavailable,
+    #[error("prompt template invalid: {0}")]
+    PromptTemplateInvalid(String),
+    #[error("prompt required variable missing: {0}")]
+    PromptRequiredVariableMissing(String),
     #[error("{0}")]
     InvalidInput(String),
 }
@@ -32,6 +36,8 @@ impl serde::Serialize for AppError {
             AppError::Migration(_) => "MIGRATION_ERROR",
             AppError::Io(_) => "IO_ERROR",
             AppError::WorkspaceUnavailable => "WORKSPACE_UNAVAILABLE",
+            AppError::PromptTemplateInvalid(_) => "PROMPT_TEMPLATE_INVALID",
+            AppError::PromptRequiredVariableMissing(_) => "PROMPT_REQUIRED_VARIABLE_MISSING",
             AppError::InvalidInput(_) => "INVALID_INPUT",
         };
 

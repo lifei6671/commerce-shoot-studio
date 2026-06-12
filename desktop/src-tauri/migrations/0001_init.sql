@@ -43,11 +43,19 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
 CREATE TABLE IF NOT EXISTS prompt_bindings (
   id TEXT PRIMARY KEY,
   combination_id TEXT NOT NULL UNIQUE REFERENCES image_combinations(id) ON DELETE CASCADE,
-  template_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
-  mode TEXT NOT NULL CHECK (mode IN ('default', 'append', 'override')),
+  system_mode TEXT NOT NULL CHECK (system_mode IN ('default', 'append', 'override')),
+  system_base_template_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
+  system_append_text TEXT NOT NULL DEFAULT '',
+  system_override_text TEXT NOT NULL DEFAULT '',
+  user_mode TEXT NOT NULL CHECK (user_mode IN ('default', 'append', 'override')),
+  user_base_template_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
+  user_append_text TEXT NOT NULL DEFAULT '',
+  user_override_text TEXT NOT NULL DEFAULT '',
+  negative_mode TEXT CHECK (negative_mode IN ('default', 'append', 'override')),
+  negative_base_template_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
+  negative_append_text TEXT NOT NULL DEFAULT '',
+  negative_override_text TEXT NOT NULL DEFAULT '',
   variables_json TEXT NOT NULL DEFAULT '{}',
-  append_text TEXT NOT NULL DEFAULT '',
-  override_text TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

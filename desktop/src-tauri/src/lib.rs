@@ -24,7 +24,9 @@ pub fn run() {
             commands::assets::import_image,
             commands::combinations::save_image_combination,
             commands::combinations::get_image_combination,
-            commands::combinations::list_image_combinations
+            commands::combinations::list_image_combinations,
+            commands::prompts::save_prompt_binding,
+            commands::prompts::preview_resolved_prompt
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Commerce Shoot Studio");
