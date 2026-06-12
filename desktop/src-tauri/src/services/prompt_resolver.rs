@@ -91,6 +91,10 @@ pub async fn save_prompt_binding_request(
         "INSERT INTO prompt_bindings (
             id,
             combination_id,
+            template_id,
+            mode,
+            append_text,
+            override_text,
             system_mode,
             system_base_template_id,
             system_append_text,
@@ -104,8 +108,12 @@ pub async fn save_prompt_binding_request(
             negative_append_text,
             negative_override_text,
             variables_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(combination_id) DO UPDATE SET
+            template_id = excluded.template_id,
+            mode = excluded.mode,
+            append_text = excluded.append_text,
+            override_text = excluded.override_text,
             system_mode = excluded.system_mode,
             system_base_template_id = excluded.system_base_template_id,
             system_append_text = excluded.system_append_text,
@@ -123,6 +131,10 @@ pub async fn save_prompt_binding_request(
     )
     .bind(&id)
     .bind(&request.combination_id)
+    .bind(&request.user.base_template_id)
+    .bind(request.user.mode.as_str())
+    .bind(&request.user.append_text)
+    .bind(&request.user.override_text)
     .bind(request.system.mode.as_str())
     .bind(&request.system.base_template_id)
     .bind(&request.system.append_text)

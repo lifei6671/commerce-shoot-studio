@@ -273,11 +273,28 @@ mod tests {
                 status,
                 provider,
                 model_id,
+                combination_snapshot_json,
+                prompt_snapshot_json,
+                model_snapshot_json,
+                input_assets_snapshot_json,
                 input_snapshot_json,
                 final_prompt_snapshot_json,
                 model_config_snapshot_json,
                 asset_snapshot_json
-            ) VALUES ('task-running', 'queued', 'openai', 'gpt-image-1', '{}', '{}', '{}', '[]')",
+            ) VALUES (
+                'task-running',
+                'queued',
+                'openai',
+                'gpt-image-1',
+                '{}',
+                '{}',
+                '{}',
+                '[]',
+                '{}',
+                '{}',
+                '{}',
+                '[]'
+            )",
         )
         .execute(&mut *writer)
         .await

@@ -210,18 +210,27 @@ pub async fn create_generation_task_snapshot(
                 model_id,
                 status,
                 progress,
+                combination_snapshot_json,
+                prompt_snapshot_json,
+                model_snapshot_json,
+                input_assets_snapshot_json,
                 request_summary_json,
                 input_snapshot_json,
                 final_prompt_snapshot_json,
                 model_config_snapshot_json,
                 asset_snapshot_json,
-                output_count
-             ) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)",
+                output_count,
+                updated_at
+             ) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         )
         .bind(&id)
         .bind(&request.combination_id)
         .bind(&request.provider)
         .bind(&request.model_id)
+        .bind(request.input_snapshot_json.to_string())
+        .bind(request.final_prompt_snapshot_json.to_string())
+        .bind(request.model_config_snapshot_json.to_string())
+        .bind(request.asset_snapshot_json.to_string())
         .bind(request.request_summary_json.as_ref().map(Value::to_string))
         .bind(request.input_snapshot_json.to_string())
         .bind(request.final_prompt_snapshot_json.to_string())
