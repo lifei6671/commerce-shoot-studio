@@ -1,7 +1,8 @@
 :root {
   font-family:
-    "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "PingFang SC", "Microsoft YaHei", sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    sans-serif;
   color: #1f2937;
   background: #08111d;
   font-synthesis: none;
@@ -51,6 +52,10 @@ button {
     radial-gradient(circle at 0 0, rgba(39, 91, 217, 0.28), transparent 26%),
     linear-gradient(135deg, #07101b 0%, #0b1522 100%);
   color: #1f2937;
+}
+
+.desktop-frame--native-titlebar {
+  grid-template-rows: 1fr 44px;
 }
 
 .window-chrome {

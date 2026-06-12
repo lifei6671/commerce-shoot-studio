@@ -582,9 +582,11 @@ export function WorkflowCanvas() {
       );
   }
 
+  const showWindowChrome = isWindowsPlatform();
+
   return (
-    <div className="desktop-frame">
-      <WindowChrome />
+    <div className={`desktop-frame${showWindowChrome ? "" : " desktop-frame--native-titlebar"}`}>
+      {showWindowChrome ? <WindowChrome /> : null}
       <div className="workbench">
         <TopToolbar
           combinationName={combinationName}
@@ -722,6 +724,15 @@ export function WorkflowCanvas() {
 
 function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
+}
+
+function isWindowsPlatform() {
+  const userAgentNavigator = navigator as Navigator & {
+    userAgentData?: { platform?: string };
+  };
+  const userAgentPlatform = userAgentNavigator.userAgentData?.platform;
+  const platform = userAgentPlatform || navigator.platform || "";
+  return platform.toLowerCase().includes("win");
 }
 
 function buildCombinationName() {
