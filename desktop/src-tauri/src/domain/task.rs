@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::model::SaveModelConfigRequest;
+use crate::domain::prompt::SavePromptBindingRequest;
+
 pub const RUNNING_TASK_STATUSES: &[&str] = &[
     "queued",
     "preparing",
@@ -55,6 +58,15 @@ pub struct CreateGenerationTaskSnapshotRequest {
     pub asset_snapshot_json: Value,
     pub input_assets: Vec<GenerationTaskInputAsset>,
     pub output_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartGenerationRequest {
+    pub combination_id: String,
+    pub draft_prompt_binding: Option<SavePromptBindingRequest>,
+    pub draft_model_config: Option<SaveModelConfigRequest>,
+    pub revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

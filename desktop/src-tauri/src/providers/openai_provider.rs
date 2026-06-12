@@ -6,7 +6,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::providers::provider_trait::{
-    GenerateInput, GenerateResult, GeneratedImage, ProviderError, ProviderErrorCode,
+    GenerateInput, GenerateResult, GeneratedImage, ImageGenerationProvider, ProviderError,
+    ProviderErrorCode,
 };
 
 const OPENAI_IMAGES_EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
@@ -29,6 +30,14 @@ impl OpenAiImageProvider {
     }
 
     pub async fn generate(
+        &self,
+        input: GenerateInput,
+        api_key: &str,
+    ) -> Result<GenerateResult, ProviderError> {
+        self.generate_openai(input, api_key).await
+    }
+
+    async fn generate_openai(
         &self,
         input: GenerateInput,
         api_key: &str,
@@ -192,6 +201,26 @@ impl OpenAiImageProvider {
 impl Default for OpenAiImageProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ImageGenerationProvider for OpenAiImageProvider {
+    fn provider_name(&self) -> &'static str {
+        OpenAiImageProvider::provider_name(self)
+    }
+
+    fn generate<'a>(
+        &'a self,
+        input: GenerateInput,
+        api_key: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<GenerateResult, ProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { self.generate_openai(input, api_key).await })
     }
 }
 

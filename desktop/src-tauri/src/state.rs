@@ -7,9 +7,17 @@ use std::sync::{
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-use crate::domain::task::{CreateGenerationTaskSnapshotRequest, LocalGenerationTask};
+use ulid::Ulid;
+
+use crate::domain::task::{
+    CreateGenerationTaskSnapshotRequest, LocalGenerationTask, StartGenerationRequest,
+};
 use crate::error::{AppError, AppResult};
-use crate::services::task_runner::{create_generation_task_snapshot, recover_interrupted_tasks};
+use crate::providers::openai_provider::OpenAiImageProvider;
+use crate::services::credential_service::ProviderCredentialService;
+use crate::services::task_runner::{
+    create_generation_task_snapshot, recover_interrupted_tasks, run_generation_flow_with_task_id,
+};
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::migrations::run_workspace_migrations;
 use crate::storage::sqlite::WorkspaceDatabase;
@@ -105,6 +113,47 @@ impl AppState {
         let mut active_task = self.generation_task_runtime.running_task.lock().await;
         *active_task = Some(running_task);
         Ok(task)
+    }
+
+    pub async fn run_generation(
+        &self,
+        request: StartGenerationRequest,
+    ) -> AppResult<LocalGenerationTask> {
+        let _start_guard = self.generation_task_runtime.start_lock.lock().await;
+
+        if let Some(task_id) = self.running_generation_task_id().await {
+            return Err(AppError::TaskAlreadyRunning(task_id));
+        }
+
+        let task_id = format!("generation_task_{}", Ulid::new());
+        let provider = request
+            .draft_model_config
+            .as_ref()
+            .map(|model| model.provider.clone())
+            .unwrap_or_else(|| "openai".to_string());
+        let api_key = ProviderCredentialService::system()
+            .read_provider_api_key(&provider)
+            .await?;
+
+        {
+            let mut active_task = self.generation_task_runtime.running_task.lock().await;
+            *active_task = Some(RunningGenerationTask {
+                task_id: task_id.clone(),
+                cancellation_token: CancellationToken::new(),
+            });
+        }
+
+        let result = run_generation_flow_with_task_id(
+            &self.database,
+            &self.workspace_paths,
+            &OpenAiImageProvider::new(),
+            &api_key,
+            request,
+            Some(task_id.clone()),
+        )
+        .await;
+        self.clear_generation_task(&task_id).await;
+        result
     }
 
     pub async fn running_generation_task_id(&self) -> Option<String> {

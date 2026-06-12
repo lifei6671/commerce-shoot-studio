@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -111,4 +113,14 @@ impl ProviderError {
         self.retryable = status_code == 429 || status_code >= 500;
         self
     }
+}
+
+pub trait ImageGenerationProvider: Send + Sync {
+    fn provider_name(&self) -> &'static str;
+
+    fn generate<'a>(
+        &'a self,
+        input: GenerateInput,
+        api_key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a>>;
 }

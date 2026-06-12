@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
-  CreateGenerationTaskSnapshotRequest,
   LocalGenerationTask,
+  StartGenerationRequest,
 } from "../model/taskTypes";
 
 export async function startGeneration(
-  request: CreateGenerationTaskSnapshotRequest,
+  request: StartGenerationRequest,
 ): Promise<LocalGenerationTask> {
   return invoke<LocalGenerationTask>("start_generation", { request });
 }

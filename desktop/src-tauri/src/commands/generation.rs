@@ -1,15 +1,15 @@
 use tauri::State;
 
-use crate::domain::task::{CreateGenerationTaskSnapshotRequest, LocalGenerationTask};
+use crate::domain::task::{LocalGenerationTask, StartGenerationRequest};
 use crate::error::AppResult;
 use crate::state::AppState;
 
 #[tauri::command]
 pub async fn start_generation(
     state: State<'_, AppState>,
-    request: CreateGenerationTaskSnapshotRequest,
+    request: StartGenerationRequest,
 ) -> AppResult<LocalGenerationTask> {
-    state.start_generation_task(request).await
+    state.run_generation(request).await
 }
 
 #[tauri::command]

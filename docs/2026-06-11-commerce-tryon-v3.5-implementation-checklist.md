@@ -1004,23 +1004,24 @@ R6 第二期授权与支付
 - 修改：`desktop/src-tauri/src/services/prompt_resolver.rs`
 - 修改：`desktop/src-tauri/src/storage/file_store.rs`
 - 创建：`desktop/src/features/generation-task/services/taskService.ts`
+- 修改：`desktop/src/features/generation-task/model/taskTypes.ts`
 - 修改：`desktop/src/features/workflow/components/nodes/ExecuteNode.tsx`
 - 修改：`desktop/src/features/workflow/components/nodes/ResultNode.tsx`
 
 **执行清单**：
 
-- [ ] `start_generation` 基于当前草稿或已保存配置做权威校验。
-- [ ] 创建任务时保存不可变快照。
-- [ ] `final_prompt_snapshot_json` 来自 Rust PromptResolver。
-- [ ] 状态流转覆盖 queued、preparing、calling_model、waiting_result、saving_result、succeeded、failed。
-- [ ] 保存结果图片到工作区。
-- [ ] 写入 `generation_task_results`。
+- [x] `start_generation` 基于当前草稿或已保存配置做权威校验。
+- [x] 创建任务时保存不可变快照。
+- [x] `final_prompt_snapshot_json` 来自 Rust PromptResolver。
+- [x] 状态流转覆盖 queued、preparing、calling_model、waiting_result、saving_result、succeeded、failed。
+- [x] 保存结果图片到工作区。
+- [x] 写入 `generation_task_results`。
 - [ ] ResultNode 展示结果缩略图和打开大图入口。
 
 **验证清单**：
 
-- [ ] Prompt 预览结果与任务快照完全一致。
-- [ ] 用户执行后修改组合或 Prompt，历史任务仍显示执行时快照。
+- [x] Prompt 预览结果与任务快照完全一致。
+- [x] 用户执行后修改组合或 Prompt，历史任务仍显示执行时快照。
 - [ ] 成功任务能展示结果并打开大图。
 - [ ] 失败任务保存失败原因。
 

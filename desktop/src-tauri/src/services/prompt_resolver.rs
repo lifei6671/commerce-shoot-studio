@@ -177,6 +177,15 @@ pub async fn preview_resolved_prompt_for_combination(
     })
 }
 
+pub async fn get_prompt_binding_save_request_for_combination(
+    database: &WorkspaceDatabase,
+    combination_id: &str,
+) -> AppResult<Option<SavePromptBindingRequest>> {
+    Ok(get_prompt_binding_for_combination(database, combination_id)
+        .await?
+        .map(PromptBinding::into_save_request))
+}
+
 async fn get_prompt_binding_for_combination(
     database: &WorkspaceDatabase,
     combination_id: &str,

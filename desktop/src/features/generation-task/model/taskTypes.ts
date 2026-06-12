@@ -1,3 +1,6 @@
+import type { SaveModelConfigRequest } from "../../model-config/model/modelTypes";
+import type { SavePromptBindingRequest } from "../../prompt/model/promptTypes";
+
 export type GenerationTaskStatus =
   | "queued"
   | "preparing"
@@ -37,6 +40,13 @@ export type CreateGenerationTaskSnapshotRequest = {
   assetSnapshotJson: Record<string, unknown>;
   inputAssets: GenerationTaskInputAsset[];
   outputCount: number;
+};
+
+export type StartGenerationRequest = {
+  combinationId: string;
+  draftPromptBinding?: SavePromptBindingRequest | null;
+  draftModelConfig?: SaveModelConfigRequest | null;
+  revision?: number | null;
 };
 
 export type LocalGenerationTask = {
