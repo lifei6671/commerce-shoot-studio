@@ -1547,17 +1547,28 @@ function FlowWorkbench({
   const canvasScale = fitScale * (zoom / 100);
 
   function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
-    if (!event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+
+    if (event.ctrlKey || event.metaKey) {
+      onZoomChange(clampZoom(zoom + (event.deltaY > 0 ? -8 : 8)));
       return;
     }
-    event.preventDefault();
-    onZoomChange(clampZoom(zoom + (event.deltaY > 0 ? -8 : 8)));
+
+    if (canvasTool !== "hand") {
+      return;
+    }
+
+    setPan((currentPan) => ({
+      x: currentPan.x - event.deltaX,
+      y: currentPan.y - event.deltaY,
+    }));
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (canvasTool !== "hand") {
       return;
     }
+    event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragStartRef.current = {
       pointerId: event.pointerId,
@@ -1573,6 +1584,7 @@ function FlowWorkbench({
     if (!dragStart || dragStart.pointerId !== event.pointerId) {
       return;
     }
+    event.preventDefault();
     setPan({
       x: dragStart.panX + event.clientX - dragStart.startX,
       y: dragStart.panY + event.clientY - dragStart.startY,
