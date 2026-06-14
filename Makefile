@@ -5,7 +5,7 @@ TAURI_DIR := $(DESKTOP_DIR)/src-tauri
 NPM ?= npm
 CARGO ?= $(HOME)/.cargo/bin/cargo
 
-.PHONY: help install dev build tauri-build tauri-dmg desktop-build cargo-check check clean
+.PHONY: help install dev build tauri-build tauri-dmg desktop-build desktop-test cargo-check check clean
 
 help:
 	@echo "Commerce Shoot Studio"
@@ -17,8 +17,9 @@ help:
 	@echo "  make tauri-build    Build Tauri desktop app bundle"
 	@echo "  make tauri-dmg      Build Tauri desktop app and DMG"
 	@echo "  make desktop-build  Build React frontend only"
+	@echo "  make desktop-test   Run frontend Node unit tests"
 	@echo "  make cargo-check    Run Rust cargo check for Tauri app"
-	@echo "  make check          Run frontend build and Rust cargo check"
+	@echo "  make check          Run frontend tests/build and Rust cargo check"
 	@echo "  make clean          Remove generated desktop build outputs"
 
 install:
@@ -38,10 +39,13 @@ tauri-dmg:
 desktop-build:
 	$(NPM) --prefix $(DESKTOP_DIR) run build
 
+desktop-test:
+	$(NPM) --prefix $(DESKTOP_DIR) run test
+
 cargo-check:
 	cd $(TAURI_DIR) && $(CARGO) check
 
-check: desktop-build cargo-check
+check: desktop-test desktop-build cargo-check
 
 clean:
 	rm -rf $(DESKTOP_DIR)/dist $(TAURI_DIR)/target

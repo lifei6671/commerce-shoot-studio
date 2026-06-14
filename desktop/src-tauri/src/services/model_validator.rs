@@ -2,13 +2,13 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use ulid::Ulid;
 
-use crate::domain::model::{
-    ModelConfig, ModelDefinition, ModelInputLimits, ModelOutputSchema, ModelParamKind,
-    ModelParamSchema, SaveModelConfigRequest, ValidateModelConfigInput, ValidatedModelConfig,
-};
 use crate::domain::combination::{
     EffectiveModel, EffectiveValidationLimits, ValidateCombinationRequest,
     ValidateCombinationResponse, ValidationReason, ValidationReasonCode, ValidationWarning,
+};
+use crate::domain::model::{
+    ModelConfig, ModelDefinition, ModelInputLimits, ModelOutputSchema, ModelParamKind,
+    ModelParamSchema, SaveModelConfigRequest, ValidateModelConfigInput, ValidatedModelConfig,
 };
 use crate::domain::prompt::ResolvePromptInput;
 use crate::error::{AppError, AppResult};
@@ -23,18 +23,7 @@ pub fn list_model_definitions(advanced_models: bool) -> Vec<ModelDefinition> {
 }
 
 pub fn validate_model_config(input: ValidateModelConfigInput) -> AppResult<ValidatedModelConfig> {
-    let definition = fixed_model_definitions()
-        .into_iter()
-        .find(|definition| {
-            definition.provider == input.request.provider
-                && definition.model_id == input.request.model_id
-        })
-        .ok_or_else(|| {
-            AppError::ModelConfigInvalid(format!(
-                "model {}:{} is not supported",
-                input.request.provider, input.request.model_id
-            ))
-        })?;
+    let definition = resolve_model_definition(&input.request)?;
 
     if definition.advanced && !input.advanced_models {
         return Err(AppError::ModelConfigInvalid(format!(
@@ -54,6 +43,24 @@ pub fn validate_model_config(input: ValidateModelConfigInput) -> AppResult<Valid
     })
 }
 
+fn resolve_model_definition(request: &SaveModelConfigRequest) -> AppResult<ModelDefinition> {
+    if request.provider == "custom" {
+        return custom_model_definition(request);
+    }
+
+    fixed_model_definitions()
+        .into_iter()
+        .find(|definition| {
+            definition.provider == request.provider && definition.model_id == request.model_id
+        })
+        .ok_or_else(|| {
+            AppError::ModelConfigInvalid(format!(
+                "model {}:{} is not supported",
+                request.provider, request.model_id
+            ))
+        })
+}
+
 pub fn normalize_output_count(definition: &ModelDefinition, params_json: &Value) -> AppResult<u32> {
     let value = params_json
         .get(&definition.output.count_param_key)
@@ -62,14 +69,18 @@ pub fn normalize_output_count(definition: &ModelDefinition, params_json: &Value)
     let count = u32::try_from(value).map_err(|_| {
         AppError::ModelConfigInvalid(format!(
             "{} must be between {} and {}",
-            definition.output.count_param_key, definition.output.min_count, definition.output.max_count
+            definition.output.count_param_key,
+            definition.output.min_count,
+            definition.output.max_count
         ))
     })?;
 
     if count < definition.output.min_count || count > definition.output.max_count {
         return Err(AppError::ModelConfigInvalid(format!(
             "{} must be between {} and {}",
-            definition.output.count_param_key, definition.output.min_count, definition.output.max_count
+            definition.output.count_param_key,
+            definition.output.min_count,
+            definition.output.max_count
         )));
     }
     Ok(count)
@@ -221,7 +232,8 @@ pub async fn validate_combination_request(
     }
 
     if let Some(prompt_binding) = request.draft_prompt_binding.clone() {
-        let declarations_json = load_prompt_declarations_for_draft(database, &prompt_binding).await?;
+        let declarations_json =
+            load_prompt_declarations_for_draft(database, &prompt_binding).await?;
         let system_template =
             load_prompt_template_body(database, prompt_binding.system.base_template_id.as_deref())
                 .await?;
@@ -302,10 +314,12 @@ async fn load_prompt_template_body(
     let Some(template_id) = template_id else {
         return Ok(None);
     };
-    Ok(sqlx::query_scalar("SELECT body FROM prompt_templates WHERE id = ?")
-        .bind(template_id)
-        .fetch_optional(database.pool())
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT body FROM prompt_templates WHERE id = ?")
+            .bind(template_id)
+            .fetch_optional(database.pool())
+            .await?,
+    )
 }
 
 async fn load_prompt_declarations_for_draft(
@@ -362,8 +376,9 @@ fn row_to_model_config(row: sqlx::sqlite::SqliteRow) -> AppResult<ModelConfig> {
         id: Some(row.get("id")),
         provider: row.get("provider"),
         model_id: row.get("model_id"),
-        params_json: serde_json::from_str(row.get::<String, _>("params_json").as_str())
-            .map_err(|err| AppError::ModelConfigInvalid(format!("params_json is invalid: {err}")))?,
+        params_json: serde_json::from_str(row.get::<String, _>("params_json").as_str()).map_err(
+            |err| AppError::ModelConfigInvalid(format!("params_json is invalid: {err}")),
+        )?,
     };
     let validated = validate_model_config(ValidateModelConfigInput {
         request: request.clone(),
@@ -401,7 +416,10 @@ fn validate_param_value(schema: &ModelParamSchema, value: &Value) -> AppResult<(
     match schema.kind {
         ModelParamKind::Integer => {
             let number = value.as_i64().ok_or_else(|| {
-                AppError::ModelConfigInvalid(format!("model param {} must be an integer", schema.key))
+                AppError::ModelConfigInvalid(format!(
+                    "model param {} must be an integer",
+                    schema.key
+                ))
             })?;
             if let Some(min) = schema.min {
                 if number < min {
@@ -532,6 +550,123 @@ fn fixed_model_definitions() -> Vec<ModelDefinition> {
             },
             provider_base_url: None,
         },
+        ModelDefinition {
+            provider: "google".to_string(),
+            model_id: "nano-banana".to_string(),
+            display_name: "Nano Banana".to_string(),
+            advanced: false,
+            input_limits: ModelInputLimits {
+                min_garments: 1,
+                max_garments: 4,
+            },
+            params_schema: vec![
+                ModelParamSchema {
+                    key: "outputCount".to_string(),
+                    label: "Output count".to_string(),
+                    kind: ModelParamKind::Integer,
+                    required: true,
+                    default_value: json!(1),
+                    min: Some(1),
+                    max: Some(4),
+                    options: Vec::new(),
+                },
+                ModelParamSchema {
+                    key: "size".to_string(),
+                    label: "Size".to_string(),
+                    kind: ModelParamKind::Select,
+                    required: true,
+                    default_value: json!("1024x1024"),
+                    min: None,
+                    max: None,
+                    options: vec![json!("1024x1024"), json!("1024x1536"), json!("1536x1024")],
+                },
+            ],
+            output: ModelOutputSchema {
+                count_param_key: "outputCount".to_string(),
+                min_count: 1,
+                max_count: 4,
+            },
+            provider_base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_string()),
+        },
+        ModelDefinition {
+            provider: "custom".to_string(),
+            model_id: "custom-image-model".to_string(),
+            display_name: "Custom Image Model".to_string(),
+            advanced: false,
+            input_limits: ModelInputLimits {
+                min_garments: 1,
+                max_garments: 8,
+            },
+            params_schema: custom_model_params_schema(),
+            output: ModelOutputSchema {
+                count_param_key: "outputCount".to_string(),
+                min_count: 1,
+                max_count: 8,
+            },
+            provider_base_url: None,
+        },
+    ]
+}
+
+fn custom_model_definition(request: &SaveModelConfigRequest) -> AppResult<ModelDefinition> {
+    let model_id = request.model_id.trim();
+    if model_id.is_empty() {
+        return Err(AppError::ModelConfigInvalid(
+            "custom model id is required".to_string(),
+        ));
+    }
+
+    let provider_base_url = request
+        .params_json
+        .get("providerBaseUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::ModelConfigInvalid("custom provider base URL is required".to_string())
+        })?;
+
+    Ok(ModelDefinition {
+        provider: "custom".to_string(),
+        model_id: model_id.to_string(),
+        display_name: model_id.to_string(),
+        advanced: false,
+        input_limits: ModelInputLimits {
+            min_garments: 1,
+            max_garments: 8,
+        },
+        params_schema: custom_model_params_schema(),
+        output: ModelOutputSchema {
+            count_param_key: "outputCount".to_string(),
+            min_count: 1,
+            max_count: 8,
+        },
+        provider_base_url: Some(provider_base_url.to_string()),
+    })
+}
+
+fn custom_model_params_schema() -> Vec<ModelParamSchema> {
+    vec![
+        ModelParamSchema {
+            key: "outputCount".to_string(),
+            label: "Output count".to_string(),
+            kind: ModelParamKind::Integer,
+            required: true,
+            default_value: json!(1),
+            min: Some(1),
+            max: Some(8),
+            options: Vec::new(),
+        },
+        ModelParamSchema {
+            key: "providerBaseUrl".to_string(),
+            label: "Provider base URL".to_string(),
+            kind: ModelParamKind::Text,
+            required: true,
+            default_value: json!(""),
+            min: None,
+            max: None,
+            options: Vec::new(),
+        },
     ]
 }
 
@@ -540,10 +675,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::storage::file_store::WorkspacePaths;
-    use crate::storage::migrations::run_workspace_migrations;
     use crate::domain::combination::{DraftImageCombination, ValidationReasonCode};
     use crate::domain::prompt::{PromptBindingSection, PromptMode, SavePromptBindingRequest};
+    use crate::storage::file_store::WorkspacePaths;
+    use crate::storage::migrations::run_workspace_migrations;
 
     #[test]
     fn list_model_definitions_filters_advanced_models_when_disabled() {
@@ -552,9 +687,14 @@ mod tests {
 
         let all_defs = list_model_definitions(true);
         assert!(all_defs.iter().any(|definition| definition.advanced));
-        assert!(all_defs
+        assert!(public_defs
             .iter()
-            .all(|definition| definition.provider_base_url.is_none()));
+            .any(|definition| definition.provider == "google"
+                && definition.model_id == "nano-banana"));
+        assert!(public_defs
+            .iter()
+            .any(|definition| definition.provider == "custom"
+                && definition.model_id == "custom-image-model"));
     }
 
     #[test]
@@ -576,6 +716,67 @@ mod tests {
         assert_eq!(validated.input_limits.min_garments, 1);
         assert_eq!(validated.input_limits.max_garments, 4);
         assert_eq!(validated.normalized_output_count, 3);
+    }
+
+    #[test]
+    fn validate_model_config_accepts_google_nano_banana() {
+        let validated = validate_model_config(ValidateModelConfigInput {
+            request: SaveModelConfigRequest {
+                id: None,
+                provider: "google".to_string(),
+                model_id: "nano-banana".to_string(),
+                params_json: json!({
+                    "outputCount": 2,
+                    "size": "1024x1024"
+                }),
+            },
+            advanced_models: false,
+        })
+        .expect("validate model");
+
+        assert_eq!(validated.definition.provider, "google");
+        assert_eq!(validated.definition.model_id, "nano-banana");
+        assert_eq!(validated.normalized_output_count, 2);
+    }
+
+    #[test]
+    fn validate_model_config_accepts_custom_model_with_base_url() {
+        let validated = validate_model_config(ValidateModelConfigInput {
+            request: SaveModelConfigRequest {
+                id: None,
+                provider: "custom".to_string(),
+                model_id: "my-image-model".to_string(),
+                params_json: json!({
+                    "outputCount": 5,
+                    "providerBaseUrl": "https://example.test/v1"
+                }),
+            },
+            advanced_models: false,
+        })
+        .expect("validate model");
+
+        assert_eq!(validated.definition.provider, "custom");
+        assert_eq!(validated.definition.model_id, "my-image-model");
+        assert_eq!(validated.normalized_output_count, 5);
+        assert_eq!(
+            validated.definition.provider_base_url.as_deref(),
+            Some("https://example.test/v1")
+        );
+    }
+
+    #[test]
+    fn validate_model_config_rejects_custom_model_without_base_url() {
+        let result = validate_model_config(ValidateModelConfigInput {
+            request: SaveModelConfigRequest {
+                id: None,
+                provider: "custom".to_string(),
+                model_id: "my-image-model".to_string(),
+                params_json: json!({"outputCount": 1}),
+            },
+            advanced_models: false,
+        });
+
+        assert!(matches!(result, Err(AppError::ModelConfigInvalid(_))));
     }
 
     #[test]
@@ -857,8 +1058,14 @@ mod tests {
 
         assert!(response.executable);
         assert!(response.reasons.is_empty());
-        assert_eq!(response.resolved_prompt.expect("prompt").user, "wear linen dress");
-        assert_eq!(response.effective_model.expect("model").model_id, "gpt-image-1");
+        assert_eq!(
+            response.resolved_prompt.expect("prompt").user,
+            "wear linen dress"
+        );
+        assert_eq!(
+            response.effective_model.expect("model").model_id,
+            "gpt-image-1"
+        );
     }
 
     async fn test_database() -> (tempfile::TempDir, WorkspaceDatabase) {

@@ -18,7 +18,8 @@ const RESOLVER_VERSION: &str = "prompt-resolver-v1";
 impl PromptResolver {
     pub fn resolve(input: ResolvePromptInput) -> AppResult<ResolvedPrompt> {
         let declarations = parse_declarations(&input.declarations_json)?;
-        let system_body = compose_section_body(input.system_template.as_deref(), &input.binding.system);
+        let system_body =
+            compose_section_body(input.system_template.as_deref(), &input.binding.system);
         let user_body = compose_section_body(input.user_template.as_deref(), &input.binding.user);
         let negative_body = input
             .binding
@@ -45,15 +46,13 @@ impl PromptResolver {
             &declarations,
         )?;
         let negative = match negative_body {
-            Some(body) => {
-                resolve_optional_body(
-                    &body,
-                    input.negative_template.as_deref(),
-                    &input.binding.variables_json,
-                    &declarations,
-                )?
-                .filter(|value| !value.is_empty())
-            }
+            Some(body) => resolve_optional_body(
+                &body,
+                input.negative_template.as_deref(),
+                &input.binding.variables_json,
+                &declarations,
+            )?
+            .filter(|value| !value.is_empty()),
             None => None,
         };
 
@@ -84,7 +83,10 @@ pub async fn save_prompt_binding_request(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("prompt_binding_{}", Ulid::new()));
-    let negative = request.negative.clone().unwrap_or_else(empty_negative_section);
+    let negative = request
+        .negative
+        .clone()
+        .unwrap_or_else(empty_negative_section);
 
     let mut writer = database.writer().await;
     sqlx::query(
@@ -171,8 +173,10 @@ pub async fn preview_resolved_prompt_for_combination(
             .into_save_request(),
     };
 
-    let system_template = load_template_body(database, binding.system.base_template_id.as_deref()).await?;
-    let user_template = load_template_body(database, binding.user.base_template_id.as_deref()).await?;
+    let system_template =
+        load_template_body(database, binding.system.base_template_id.as_deref()).await?;
+    let user_template =
+        load_template_body(database, binding.user.base_template_id.as_deref()).await?;
     let negative_template = match &binding.negative {
         Some(section) => load_template_body(database, section.base_template_id.as_deref()).await?,
         None => None,
@@ -198,7 +202,7 @@ pub async fn get_prompt_binding_save_request_for_combination(
         .map(PromptBinding::into_save_request))
 }
 
-async fn get_prompt_binding_for_combination(
+pub async fn get_prompt_binding_for_combination(
     database: &WorkspaceDatabase,
     combination_id: &str,
 ) -> AppResult<Option<PromptBinding>> {
@@ -235,10 +239,11 @@ async fn ensure_combination_exists(
     database: &WorkspaceDatabase,
     combination_id: &str,
 ) -> AppResult<()> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM image_combinations WHERE id = ?")
-        .bind(combination_id)
-        .fetch_optional(database.pool())
-        .await?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM image_combinations WHERE id = ?")
+            .bind(combination_id)
+            .fetch_optional(database.pool())
+            .await?;
     if exists.is_none() {
         return Err(AppError::InvalidInput(format!(
             "combination {combination_id} was not found"
@@ -309,6 +314,9 @@ async fn load_declarations_for_binding(
             })?;
             if let Some(object) = value.as_object() {
                 for (name, declaration) in object {
+                    if name.starts_with("__") {
+                        continue;
+                    }
                     merged.insert(name.clone(), declaration.clone());
                 }
             }
@@ -323,10 +331,12 @@ fn resolve_required_body(
     variables_json: &Value,
     declarations: &BTreeMap<String, VariableDeclaration>,
 ) -> AppResult<String> {
-    let resolved = resolve_optional_body(body, template, variables_json, declarations)?
-        .unwrap_or_default();
+    let resolved =
+        resolve_optional_body(body, template, variables_json, declarations)?.unwrap_or_default();
     if resolved.is_empty() {
-        return Err(AppError::InvalidInput("resolved user prompt is empty".to_string()));
+        return Err(AppError::InvalidInput(
+            "resolved user prompt is empty".to_string(),
+        ));
     }
     Ok(resolved)
 }
@@ -366,30 +376,45 @@ fn render_template(
     variables_json: &Value,
     declarations: &BTreeMap<String, VariableDeclaration>,
 ) -> AppResult<String> {
-    let placeholders = extract_placeholders(template);
-    for placeholder in &placeholders {
-        if !declarations.contains_key(placeholder) {
-            return Err(AppError::PromptTemplateInvalid(format!(
-                "variable {placeholder} is used but not declared"
-            )));
-        }
-    }
+    let mut output = String::with_capacity(template.len());
+    let mut rest = template;
 
-    let mut output = template.to_string();
-    for placeholder in placeholders {
-        let declaration = declarations.get(&placeholder).ok_or_else(|| {
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            output.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+
+        let raw_placeholder = &after_start[..end];
+        let placeholder = raw_placeholder.trim();
+        if placeholder.is_empty() {
+            output.push_str("{{");
+            output.push_str(raw_placeholder);
+            output.push_str("}}");
+            rest = &after_start[end + 2..];
+            continue;
+        }
+
+        let declaration = declarations.get(placeholder).ok_or_else(|| {
             AppError::PromptTemplateInvalid(format!(
                 "variable {placeholder} is used but not declared"
             ))
         })?;
-        let value = variable_value(variables_json, &placeholder)
+        let value = variable_value(variables_json, placeholder)
             .or_else(|| declaration.default_value.clone())
             .unwrap_or_default();
         if declaration.required && value.trim().is_empty() {
-            return Err(AppError::PromptRequiredVariableMissing(placeholder));
+            return Err(AppError::PromptRequiredVariableMissing(
+                placeholder.to_string(),
+            ));
         }
-        output = output.replace(&format!("{{{{{placeholder}}}}}"), &value);
+        output.push_str(&value);
+        rest = &after_start[end + 2..];
     }
+    output.push_str(rest);
 
     Ok(output.trim().to_string())
 }
@@ -439,6 +464,9 @@ fn parse_declarations(value: &Value) -> AppResult<BTreeMap<String, VariableDecla
 
     let mut declarations = BTreeMap::new();
     for (name, declaration) in object {
+        if name.starts_with("__") {
+            continue;
+        }
         let required = declaration
             .get("required")
             .and_then(Value::as_bool)
@@ -611,6 +639,31 @@ mod tests {
         });
 
         assert!(matches!(result, Err(AppError::PromptTemplateInvalid(_))));
+    }
+
+    #[test]
+    fn resolver_replaces_placeholders_with_surrounding_spaces() {
+        let resolved = PromptResolver::resolve(ResolvePromptInput {
+            system_template: None,
+            user_template: Some("背景 {{ background }}，比例 {{aspectRatio}}".to_string()),
+            negative_template: None,
+            binding: SavePromptBindingRequest::minimal_for_test(
+                "combination_1",
+                PromptMode::Default,
+                json!({
+                    "background": "纯白背景",
+                    "aspectRatio": "3:4"
+                }),
+            ),
+            declarations_json: json!({
+                "background": {"required": true},
+                "aspectRatio": {"required": true}
+            }),
+            revision: None,
+        })
+        .expect("resolve prompt");
+
+        assert_eq!(resolved.user, "背景 纯白背景，比例 3:4");
     }
 
     #[test]

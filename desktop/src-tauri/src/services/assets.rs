@@ -226,8 +226,11 @@ pub async fn delete_asset(
         "SELECT
             (SELECT COUNT(*) FROM image_combinations WHERE person_asset_id = ?)
             +
+            (SELECT COUNT(*) FROM image_combination_people WHERE asset_id = ?)
+            +
             (SELECT COUNT(*) FROM image_combination_items WHERE asset_id = ?)",
     )
+    .bind(asset_id)
     .bind(asset_id)
     .bind(asset_id)
     .fetch_one(database.pool())
@@ -590,12 +593,18 @@ mod tests {
     async fn delete_asset_rejects_combination_references() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let person_path = paths.root().join("person.png");
+        let extra_person_path = paths.root().join("extra-person.png");
         let garment_path = paths.root().join("garment.png");
         write_png(&person_path);
+        write_png(&extra_person_path);
         write_png(&garment_path);
         let person = import_image_file(&database, &paths, person_path, AssetType::Person)
             .await
             .expect("person");
+        let extra_person =
+            import_image_file(&database, &paths, extra_person_path, AssetType::Person)
+                .await
+                .expect("extra person");
         let garment = import_image_file(&database, &paths, garment_path, AssetType::Garment)
             .await
             .expect("garment");
@@ -605,6 +614,7 @@ mod tests {
                 id: None,
                 name: "protected look".to_string(),
                 person_asset_id: person.asset.id.clone(),
+                person_asset_ids: vec![extra_person.asset.id.clone(), person.asset.id.clone()],
                 garment_asset_ids: vec![garment.asset.id],
             },
         )
@@ -619,6 +629,18 @@ mod tests {
             .expect("asset lookup")
             .is_some());
         assert!(paths.root().join(&person.asset.relative_path).is_file());
+
+        let extra_result = delete_asset(&database, &paths, &extra_person.asset.id).await;
+
+        assert!(matches!(extra_result, Err(AppError::InvalidInput(_))));
+        assert!(get_asset_by_id(&database, &extra_person.asset.id)
+            .await
+            .expect("extra asset lookup")
+            .is_some());
+        assert!(paths
+            .root()
+            .join(&extra_person.asset.relative_path)
+            .is_file());
     }
 
     #[tokio::test]

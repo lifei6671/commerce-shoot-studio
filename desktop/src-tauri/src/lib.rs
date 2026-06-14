@@ -46,7 +46,14 @@ pub fn run() {
             commands::models::save_model_config,
             commands::models::get_model_config,
             commands::prompts::save_prompt_binding,
-            commands::prompts::preview_resolved_prompt
+            commands::prompts::get_prompt_binding,
+            commands::prompts::preview_resolved_prompt,
+            commands::prompts::list_prompt_templates,
+            commands::prompts::list_prompt_presets,
+            commands::prompts::save_prompt_preset,
+            commands::prompts::save_prompt_template,
+            commands::prompts::delete_prompt_template,
+            commands::prompts::restore_default_prompt_templates
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Commerce Shoot Studio");

@@ -5,6 +5,7 @@ export type SaveImageCombinationRequest = {
   id?: string;
   name: string;
   personAssetId: string;
+  personAssetIds?: string[];
   garmentAssetIds: string[];
 };
 
@@ -12,6 +13,7 @@ export type ImageCombination = {
   id: string;
   name: string;
   personAssetId: string;
+  personAssetIds: string[];
   garmentAssetIds: string[];
   createdAt: string;
   updatedAt: string;

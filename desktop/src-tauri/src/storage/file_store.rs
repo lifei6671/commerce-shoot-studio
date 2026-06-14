@@ -44,9 +44,7 @@ impl WorkspacePaths {
         }
 
         let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-        let backup_path = self
-            .backups_dir()
-            .join(format!("workspace-{timestamp}.db"));
+        let backup_path = self.backups_dir().join(format!("workspace-{timestamp}.db"));
         fs::copy(database_path, &backup_path)?;
         Ok(Some(backup_path))
     }

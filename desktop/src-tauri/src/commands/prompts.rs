@@ -1,9 +1,20 @@
 use tauri::State;
 
-use crate::domain::prompt::{PromptBinding, ResolvedPrompt, SavePromptBindingRequest};
+use crate::domain::prompt::{
+    PromptBinding, PromptPreset, PromptTemplate, ResolvedPrompt, SavePromptBindingRequest,
+    SavePromptPresetRequest, SavePromptTemplateRequest,
+};
 use crate::error::AppResult;
+use crate::services::prompt_presets::{
+    list_prompt_presets as list_presets, save_prompt_preset_request,
+};
 use crate::services::prompt_resolver::{
-    preview_resolved_prompt_for_combination, save_prompt_binding_request,
+    get_prompt_binding_for_combination, preview_resolved_prompt_for_combination,
+    save_prompt_binding_request,
+};
+use crate::services::prompt_templates::{
+    delete_prompt_template_by_id, list_prompt_templates as list_templates,
+    restore_default_prompt_templates as restore_templates, save_prompt_template_request,
 };
 use crate::state::AppState;
 
@@ -13,6 +24,14 @@ pub async fn save_prompt_binding(
     binding: SavePromptBindingRequest,
 ) -> AppResult<PromptBinding> {
     save_prompt_binding_request(state.database(), binding).await
+}
+
+#[tauri::command]
+pub async fn get_prompt_binding(
+    state: State<'_, AppState>,
+    combination_id: String,
+) -> AppResult<Option<PromptBinding>> {
+    get_prompt_binding_for_combination(state.database(), &combination_id).await
 }
 
 #[tauri::command]
@@ -29,4 +48,42 @@ pub async fn preview_resolved_prompt(
         revision,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn list_prompt_templates(state: State<'_, AppState>) -> AppResult<Vec<PromptTemplate>> {
+    list_templates(state.database()).await
+}
+
+#[tauri::command]
+pub async fn list_prompt_presets(state: State<'_, AppState>) -> AppResult<Vec<PromptPreset>> {
+    list_presets(state.database()).await
+}
+
+#[tauri::command]
+pub async fn save_prompt_preset(
+    state: State<'_, AppState>,
+    preset: SavePromptPresetRequest,
+) -> AppResult<PromptPreset> {
+    save_prompt_preset_request(state.database(), preset).await
+}
+
+#[tauri::command]
+pub async fn save_prompt_template(
+    state: State<'_, AppState>,
+    template: SavePromptTemplateRequest,
+) -> AppResult<PromptTemplate> {
+    save_prompt_template_request(state.database(), template).await
+}
+
+#[tauri::command]
+pub async fn delete_prompt_template(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    delete_prompt_template_by_id(state.database(), &id).await
+}
+
+#[tauri::command]
+pub async fn restore_default_prompt_templates(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PromptTemplate>> {
+    restore_templates(state.database()).await
 }

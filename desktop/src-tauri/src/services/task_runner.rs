@@ -2196,7 +2196,10 @@ mod tests {
         .expect("retry generation");
 
         assert_eq!(retried.status, "succeeded");
-        assert_eq!(retried.final_prompt_snapshot_json["user"], "wear linen dress");
+        assert_eq!(
+            retried.final_prompt_snapshot_json["user"],
+            "wear linen dress"
+        );
         assert_eq!(
             retried.request_summary_json.expect("summary")["source"],
             "retry"
@@ -2325,7 +2328,10 @@ mod tests {
 
         assert_eq!(rerun.status, "succeeded");
         assert_eq!(rerun.final_prompt_snapshot_json["user"], "changed prompt");
-        assert_eq!(rerun.request_summary_json.expect("summary")["source"], "rerun");
+        assert_eq!(
+            rerun.request_summary_json.expect("summary")["source"],
+            "rerun"
+        );
     }
 
     #[test]
@@ -2397,6 +2403,7 @@ mod tests {
                 id: Some("combination_generation".to_string()),
                 name: "look".to_string(),
                 person_asset_id: person.asset.id,
+                person_asset_ids: vec![],
                 garment_asset_ids: vec![garment.asset.id],
             },
         )

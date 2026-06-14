@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::providers::provider_trait::{
-    GenerateInput, GenerateResult, GeneratedImage, ImageGenerationProvider, ProviderError,
-    ProviderErrorCode,
+    GenerateInput, GenerateResult, GeneratedImage, ImageGenerationProvider, PromptPayload,
+    ProviderError, ProviderErrorCode,
 };
 
 const OPENAI_IMAGES_EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
@@ -45,9 +45,10 @@ impl OpenAiImageProvider {
         self.validate_input(&input, api_key)?;
 
         let image_count = normalized_image_count(&input.params);
+        let prompt = compose_openai_prompt(&input.prompt);
         let mut form = multipart::Form::new()
             .text("model", input.model_id.clone())
-            .text("prompt", input.prompt.user.clone())
+            .text("prompt", prompt)
             .text("n", image_count.to_string());
 
         if let Some(size) = input.params.get("size").and_then(Value::as_str) {
@@ -118,10 +119,7 @@ impl OpenAiImageProvider {
             )
         })?;
 
-        let summary_source = parsed
-            .usage
-            .clone()
-            .map(|usage| json!({ "usage": usage }));
+        let summary_source = parsed.usage.clone().map(|usage| json!({ "usage": usage }));
         let images = decode_openai_images(&input.model_id, parsed)?;
         Ok(GenerateResult {
             provider: OPENAI_PROVIDER.to_string(),
@@ -167,7 +165,10 @@ impl OpenAiImageProvider {
                 OPENAI_PROVIDER,
                 Some(input.model_id.clone()),
                 ProviderErrorCode::UnsupportedModel,
-                format!("model {} is not supported by OpenAI adapter", input.model_id),
+                format!(
+                    "model {} is not supported by OpenAI adapter",
+                    input.model_id
+                ),
             ));
         }
         if api_key.trim().is_empty() {
@@ -214,11 +215,7 @@ impl ImageGenerationProvider for OpenAiImageProvider {
         input: GenerateInput,
         api_key: &'a str,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<GenerateResult, ProviderError>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<GenerateResult, ProviderError>> + Send + 'a>,
     > {
         Box::pin(async move { self.generate_openai(input, api_key).await })
     }
@@ -244,6 +241,28 @@ fn normalized_image_count(params: &Value) -> u32 {
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| (1..=4).contains(value))
         .unwrap_or(1)
+}
+
+fn compose_openai_prompt(prompt: &PromptPayload) -> String {
+    [
+        prompt
+            .system
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("系统规则:\n{value}")),
+        Some(format!("细节描述:\n{}", prompt.user.trim())),
+        prompt
+            .negative
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("避坑描述:\n{value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 fn decode_openai_images(
@@ -334,4 +353,23 @@ fn file_name_for_path(path: &Path) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or("input.png")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_prompt_includes_system_user_and_negative_sections() {
+        let prompt = compose_openai_prompt(&PromptPayload {
+            system: Some("keep ecommerce composition".to_string()),
+            user: "render linen dress".to_string(),
+            negative: Some("blur, watermark".to_string()),
+        });
+
+        assert_eq!(
+            prompt,
+            "系统规则:\nkeep ecommerce composition\n\n细节描述:\nrender linen dress\n\n避坑描述:\nblur, watermark"
+        );
+    }
 }

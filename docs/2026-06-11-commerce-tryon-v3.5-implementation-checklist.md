@@ -976,7 +976,7 @@ R6 第二期授权与支付
 - [x] 实现至少一个固定 Provider。
 - [x] API Key 由 Rust 层从系统密钥库读取。
 - [x] 前端只展示是否已配置和脱敏状态。
-- [x] Provider 超时、取消和错误返回可映射到统一任务错误。
+- [ ] Provider 超时、取消和错误返回可映射到统一任务错误。
 - [x] 不实现自定义 base URL Provider。
 
 **验证清单**：
@@ -988,7 +988,12 @@ R6 第二期授权与支付
 
 **退出条件**：
 
-- [x] 可安全调用一个固定真实 Provider。
+- [ ] 可安全调用一个固定真实 Provider。
+
+**未完成备注**：
+
+- 当前 OpenAI Provider 已实现输入/输出、错误映射和脱敏单测，但还没有真实 Provider 成功调用验收记录。
+- 当前代码能映射 `reqwest` timeout error，但 OpenAI HTTP client 尚未配置明确请求超时，因此不能标记“Provider 超时”完成。
 
 ---
 

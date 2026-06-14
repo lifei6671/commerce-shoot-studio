@@ -9,6 +9,8 @@ pub struct SaveImageCombinationRequest {
     pub id: Option<String>,
     pub name: String,
     pub person_asset_id: String,
+    #[serde(default)]
+    pub person_asset_ids: Vec<String>,
     pub garment_asset_ids: Vec<String>,
 }
 
@@ -18,6 +20,7 @@ pub struct ImageCombination {
     pub id: String,
     pub name: String,
     pub person_asset_id: String,
+    pub person_asset_ids: Vec<String>,
     pub garment_asset_ids: Vec<String>,
     pub created_at: String,
     pub updated_at: String,

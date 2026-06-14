@@ -1,13 +1,31 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS as DndCSS } from "@dnd-kit/utilities";
+import {
   Background,
   Handle,
   MarkerType,
   MiniMap,
+  NodeResizer,
   Position,
   ReactFlow,
   ReactFlowProvider,
+  applyNodeChanges,
   useUpdateNodeInternals,
   type Edge,
   type Node,
@@ -28,6 +46,12 @@ import {
   type ReactNode,
 } from "react";
 import {
+  Group,
+  Panel,
+  Separator,
+  type PanelImperativeHandle,
+} from "react-resizable-panels";
+import {
   Archive,
   Box,
   BriefcaseBusiness,
@@ -39,9 +63,10 @@ import {
   CircleCheck,
   CircleX,
   Clock3,
+  Code2,
   Copy,
-  Eye,
   FileText,
+  Filter,
   FolderOpen,
   Grid3X3,
   Hand,
@@ -50,17 +75,23 @@ import {
   KeyRound,
   Maximize2,
   Menu,
+  Minimize2,
   Minus,
+  MoreHorizontal,
   MousePointer2,
   Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   UserRound,
   X,
+  Wrench,
 } from "lucide-react";
 import type { AssetFileView, AssetType } from "../../assets/model/assetTypes";
 import type {
@@ -76,15 +107,39 @@ import {
   validateCombination,
 } from "../../assets/services/combinationService";
 import type {
+  ModelConfig,
+  ModelDefinition,
   ProviderCredentialStatus,
   SaveModelConfigRequest,
 } from "../../model-config/model/modelTypes";
 import {
+  getModelConfig,
   getProviderCredentialStatus,
+  listModelDefinitions,
+  saveModelConfig,
   setProviderApiKey,
 } from "../../model-config/services/modelService";
-import type { SavePromptBindingRequest } from "../../prompt/model/promptTypes";
-import { savePromptBinding } from "../../prompt/services/promptService";
+import type {
+  PromptBindingSection,
+  PromptMode,
+  PromptPreset,
+  PromptTemplate,
+  PromptTemplateType,
+  PromptTemplateVariable,
+  SavePromptBindingRequest,
+  SavePromptPresetRequest,
+  SavePromptTemplateRequest,
+} from "../../prompt/model/promptTypes";
+import {
+  deletePromptTemplate,
+  getPromptBinding,
+  listPromptPresets,
+  listPromptTemplates,
+  restoreDefaultPromptTemplates,
+  savePromptBinding,
+  savePromptPreset,
+  savePromptTemplate,
+} from "../../prompt/services/promptService";
 import type {
   GenerationTaskDetail,
   GenerationTaskResultAsset,
@@ -97,21 +152,88 @@ import {
   listRecentGenerationTasks,
   listRunningGenerationTasks,
   openGenerationResult,
-  retryGenerationTask,
   startGeneration,
 } from "../../generation-task/services/taskService";
 import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
+import { Badge } from "../../../shared/ui/badge";
+import { Button } from "../../../shared/ui/button";
+import { Card } from "../../../shared/ui/card";
+import { Checkbox } from "../../../shared/ui/checkbox";
+import { Input } from "../../../shared/ui/input";
+import { RadioGroup, RadioGroupItem } from "../../../shared/ui/radio-group";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../shared/ui/select";
+import { Switch } from "../../../shared/ui/switch";
+import { Textarea } from "../../../shared/ui/textarea";
+import {
+  WORKFLOW_NODE_MIN_SIZE,
+  applyWorkflowNodeSizeChanges,
+  applyWorkflowNodePositionChanges,
   buildWorkflowEdges,
   cloneInitialWorkflowNodePositions,
+  cloneInitialWorkflowNodeSizes,
   isFlowNodeId,
   WORKFLOW_NODE_ORDER,
   type FlowNodeId,
   type FlowNodePosition,
+  type FlowNodeSize,
 } from "./workflowFlowGraph";
-
-const DEFAULT_PROMPT_TEXT =
-  "Create a clean commercial fashion try-on image. Preserve the person's identity and pose, apply the selected garments naturally, keep realistic fabric texture, studio lighting, and ecommerce-ready composition.";
+import {
+  buildNewCombinationForm,
+  filterNewCombinationPickerAssets,
+  type NewCombinationForm,
+} from "./newCombinationForm";
+import {
+  buildCombinationPersonAssetIdsAfterImport,
+  buildCurrentCombinationAssetView,
+  normalizeCombinationPersonAssetIds,
+  pickCurrentPersonAssetIdAfterImport,
+} from "./currentCombinationAssets";
+import { buildFlowNodeRenderQualityStyle } from "./flowNodeRenderQuality";
+import {
+  getInspectorPanelModes,
+  normalizeInspectorPanelMode,
+  type SidePanelMode,
+} from "./inspectorPanelModes";
+import {
+  buildWorkbenchAutoSavePlan,
+  buildWorkbenchAutoSaveSignature,
+  type WorkbenchAutoSaveInput,
+} from "./workbenchAutoSave";
+import {
+  applyStoredAssetOrder,
+  assetIds,
+  moveAssetById,
+  readAssetLibraryOrder,
+  saveAssetLibraryOrder,
+  type SortableAssetType,
+} from "./assetLibraryOrder";
+import { buildAssetImageSources } from "./assetImageSource";
+import {
+  DEFAULT_PROMPT_WORKBENCH_STATE,
+  buildOutputPlanPreviewClipboardText,
+  buildPromptBindingFromWorkbench,
+  buildPromptBindingSaveRequest,
+  buildPromptPresetOptions,
+  buildPromptWorkbenchFromBinding,
+  findPromptPresetOption,
+  type AdvancedPromptSections,
+  type PromptPresetOption,
+  type PromptWorkbenchState,
+  type PromptWorkbenchVariables,
+} from "./promptPresetBinding";
+import { buildPromptPresetVariablesForSections } from "./promptPresetVariables";
+import {
+  buildPromptVariablePreviewValue,
+  extractPromptVariableNames,
+  normalizePromptTemplateVariable,
+  syncPromptTemplateVariablesFromBody,
+} from "./promptTemplateVariables";
 
 const DEFAULT_MODEL_ID = "gpt-image-1";
 const DEFAULT_PROVIDER = "openai";
@@ -128,37 +250,185 @@ type SelectableAsset = {
   createdAt?: string;
 };
 
-type SidePanelMode = "details" | "edit" | "links" | "history";
-type CanvasTool = "hand" | "select" | "grid";
+type CanvasTool = "hand" | "select";
+type CanvasPanelCollapseState = {
+  assetLibrary: boolean;
+  bottomDashboard: boolean;
+  inspector: boolean;
+};
+type PromptWorkbenchData = {
+  templates: PromptTemplate[];
+  presets: PromptPreset[];
+  presetOptions: PromptPresetOption[];
+};
 type WorkflowNodeData = Record<string, unknown> & {
   accent: "green" | "blue" | "purple" | "orange" | "gray";
   body: ReactNode;
+  canResize: boolean;
   nodeId: FlowNodeId;
   selected: boolean;
+  size: FlowNodeSize;
   status: "done" | "pending" | "required";
   subtitle: string;
   title: string;
 };
 type WorkflowReactFlowNode = Node<WorkflowNodeData, "workflowNode">;
-type WorkflowReactFlowEdge = Edge<Record<string, never>, "straight">;
+type WorkflowReactFlowEdge = Edge<Record<string, never>, "default">;
 
 const CANVAS_MIN_ZOOM = 33;
 const CANVAS_MAX_ZOOM = 300;
 const CANVAS_ZOOM_LEVELS = [33, 50, 75, 100, 125, 150, 200, 300] as const;
 const ACTION_MESSAGE_AUTO_DISMISS_MS = 2400;
 const REACT_FLOW_DEFAULT_VIEWPORT: Viewport = { x: 40, y: 158, zoom: 1 };
+const MODEL_CONFIG_STORAGE_KEY = "commerce-shoot-studio:selected-model-config-id";
+const GOOGLE_PROVIDER = "google";
+const CUSTOM_PROVIDER = "custom";
+const DEFAULT_CUSTOM_MODEL_ID = "custom-image-model";
+const DEFAULT_IMAGE_FORMAT = "PNG";
+const DEFAULT_TIMEOUT_SECONDS = 120;
+const DEFAULT_SEED = -1;
+const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_AUTO_SAVE_RESULT = true;
+const WORKBENCH_AUTO_SAVE_DELAY_MS = 800;
+const PROMPT_TEMPLATE_TYPES: PromptTemplateType[] = ["system", "user", "negative"];
+const PROMPT_TEMPLATE_LIMIT = 4000;
+const DEFAULT_PROMPT_TEMPLATE_VARIABLES: PromptTemplateVariable[] = [
+  {
+    name: "style",
+    displayName: "风格",
+    description: "服装风格",
+    exampleValue: "休闲、商务、复古",
+    required: true,
+    defaultValue: "法式优雅",
+    controlType: "combobox",
+    options: ["法式优雅", "休闲", "商务", "复古"],
+  },
+  {
+    name: "background",
+    displayName: "背景",
+    description: "背景场景",
+    exampleValue: "纯色背景、室内场景、自然光棚",
+    required: true,
+    defaultValue: "纯色背景",
+    controlType: "combobox",
+    options: ["纯色背景", "室内场景", "自然光棚"],
+  },
+  {
+    name: "aspectRatio",
+    displayName: "画面比例",
+    description: "画面比例",
+    exampleValue: "1:1、3:4、4:5、9:16、16:9",
+    required: true,
+    defaultValue: "3:4",
+    controlType: "combobox",
+    options: ["1:1", "3:4", "4:5", "9:16", "16:9"],
+  },
+  {
+    name: "garmentCategory",
+    displayName: "服装类别",
+    description: "服装品类",
+    exampleValue: "连衣裙、上衣、外套、裤子",
+    required: true,
+    defaultValue: "连衣裙",
+    controlType: "combobox",
+    options: ["连衣裙", "上衣", "外套", "裤子"],
+  },
+  {
+    name: "outputCount",
+    displayName: "生成数量",
+    description: "生成数量",
+    exampleValue: "1、2、3、4、6、8",
+    required: true,
+    defaultValue: "3",
+    controlType: "combobox",
+    options: ["1", "2", "3", "4", "6", "8"],
+  },
+];
+const PROVIDER_OPTIONS = [
+  { id: "openai", label: "OpenAI", icon: <OpenAIProviderIcon />, enabled: true },
+  { id: GOOGLE_PROVIDER, label: "Google", icon: <GoogleProviderIcon />, enabled: false },
+  { id: CUSTOM_PROVIDER, label: "Custom", icon: <Code2 size={18} strokeWidth={2.4} />, enabled: false },
+  { id: "replicate", label: "Replicate", icon: "▰", enabled: false },
+  { id: "fal", label: "Fal", icon: "△", enabled: false },
+  { id: "stability", label: "Stability", icon: "S", enabled: false },
+] as const;
+const DEFAULT_VISIBLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter((provider) => provider.enabled);
+type ProviderId = (typeof PROVIDER_OPTIONS)[number]["id"];
+type SettingsPage = "model" | "prompt";
+type PromptTemplateDraft = SavePromptTemplateRequest;
+type PromptPresetDraft = SavePromptPresetRequest;
+type PromptTemplatePreviewValues = Record<string, string>;
+type PromptPresetSourceMode = "blank" | "copy";
 
-type NewCombinationForm = {
-  name: string;
-  code: string;
-  description: string;
-  personAssetId: string | null;
-  garmentAssetIds: string[];
-  promptTemplate: string;
-  modelId: string;
-  size: (typeof MODEL_SIZES)[number];
-  outputCount: number;
-  openAfterCreate: boolean;
+function OpenAIProviderIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="provider-brand-icon provider-brand-icon--openai"
+      viewBox="0 0 24 24"
+    >
+      <g
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.55"
+      >
+        <path d="M11.98 3.2 16.48 5.8v5.2l-4.5 2.6-4.5-2.6V5.8l4.5-2.6Z" />
+        <path d="m16.48 5.8 3.02 1.74v5.2l-4.5 2.6-3.02-1.74" />
+        <path d="m19.5 12.74v3.48l-4.5 2.6-4.5-2.6v-3.48" />
+        <path d="m10.5 16.22-3.02 1.74-4.5-2.6v-5.2l4.5-2.6" />
+        <path d="M2.98 10.16V6.68l4.5-2.6 4.5 2.6" />
+        <path d="m7.48 4.08 3.02-1.74 4.5 2.6v3.48" />
+      </g>
+    </svg>
+  );
+}
+
+function GoogleProviderIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="provider-brand-icon provider-brand-icon--google"
+      viewBox="0 0 24 24"
+    >
+      <path
+        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09Z"
+        fill="#4285f4"
+      />
+      <path
+        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A11 11 0 0 0 12 23Z"
+        fill="#34a853"
+      />
+      <path
+        d="M5.84 14.1A6.6 6.6 0 0 1 5.5 12c0-.73.12-1.43.34-2.1V7.06H2.18A11 11 0 0 0 1 12c0 1.77.42 3.44 1.18 4.94l3.66-2.84Z"
+        fill="#fbbc05"
+      />
+      <path
+        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1A11 11 0 0 0 2.18 7.06L5.84 9.9C6.71 7.31 9.14 5.38 12 5.38Z"
+        fill="#ea4335"
+      />
+    </svg>
+  );
+}
+
+const ASSET_LIBRARY_PANEL_SIZE = {
+  collapsed: 40,
+  default: 308,
+  max: 420,
+  min: 260,
+};
+const INSPECTOR_PANEL_SIZE = {
+  collapsed: 40,
+  default: 318,
+  max: 430,
+  min: 280,
+};
+const BOTTOM_DASHBOARD_PANEL_SIZE = {
+  collapsed: 0,
+  default: 264,
+  max: 420,
+  min: 248,
 };
 
 // Backwards-compatible export for the node wrapper files.
@@ -172,11 +442,34 @@ export function WorkflowCanvas() {
   const [people, setPeople] = useState<AssetFileView[]>([]);
   const [garments, setGarments] = useState<AssetFileView[]>([]);
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
+  const [currentPersonAssetIds, setCurrentPersonAssetIds] = useState<string[]>([]);
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<string[]>([]);
-  const [promptText, setPromptText] = useState(DEFAULT_PROMPT_TEXT);
+  const [promptWorkbench, setPromptWorkbench] = useState<PromptWorkbenchState>(
+    DEFAULT_PROMPT_WORKBENCH_STATE,
+  );
+  const [workbenchPromptTemplates, setWorkbenchPromptTemplates] = useState<PromptTemplate[]>(() =>
+    buildFallbackPromptTemplates(),
+  );
+  const [workbenchPromptPresets, setWorkbenchPromptPresets] = useState<PromptPreset[]>(() =>
+    buildFallbackPromptPresets(),
+  );
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>(DEFAULT_PROVIDER);
+  const [selectedModelId, setSelectedModelId] = useState(DEFAULT_MODEL_ID);
+  const [customModelId, setCustomModelId] = useState(DEFAULT_CUSTOM_MODEL_ID);
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [isCustomEndpointEnabled, setIsCustomEndpointEnabled] = useState(false);
   const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("1024x1024");
   const [outputCount, setOutputCount] = useState(1);
+  const [imageFormat, setImageFormat] = useState(DEFAULT_IMAGE_FORMAT);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(DEFAULT_TIMEOUT_SECONDS);
+  const [seed, setSeed] = useState(DEFAULT_SEED);
+  const [concurrency, setConcurrency] = useState(DEFAULT_CONCURRENCY);
+  const [autoSaveResult, setAutoSaveResult] = useState(DEFAULT_AUTO_SAVE_RESULT);
+  const [storedModelConfigId, setStoredModelConfigId] = useState<string | null>(() =>
+    readStoredModelConfigId(),
+  );
   const [draftCombinationName, setDraftCombinationName] = useState<string | null>(null);
+  const [modelDefinitions, setModelDefinitions] = useState<ModelDefinition[]>([]);
   const [credentialStatus, setCredentialStatus] =
     useState<ProviderCredentialStatus | null>(null);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -188,36 +481,89 @@ export function WorkflowCanvas() {
   const [isSaving, setIsSaving] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  const [isSavingModelSettings, setIsSavingModelSettings] = useState(false);
+  const [isTestingProviderConnection, setIsTestingProviderConnection] = useState(false);
   const [validationResult, setValidationResult] =
     useState<ValidateCombinationResponse | null>(null);
+  const [isSettingsCenterOpen, setIsSettingsCenterOpen] = useState(false);
+  const [isPromptPresetCenterOpen, setIsPromptPresetCenterOpen] = useState(false);
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("details");
   const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
-  const [canvasTool, setCanvasTool] = useState<CanvasTool>("hand");
+  const [canvasTool, setCanvasTool] = useState<CanvasTool>("select");
   const [zoom, setZoom] = useState(100);
   const [canvasResetRevision, setCanvasResetRevision] = useState(0);
   const [isAssetLibraryCollapsed, setIsAssetLibraryCollapsed] = useState(false);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
   const [isBottomDashboardCollapsed, setIsBottomDashboardCollapsed] = useState(false);
+  const [isCanvasMaximized, setIsCanvasMaximized] = useState(false);
+  const assetLibraryPanelRef = useRef<PanelImperativeHandle>(null);
+  const inspectorPanelRef = useRef<PanelImperativeHandle>(null);
+  const bottomDashboardPanelRef = useRef<PanelImperativeHandle>(null);
+  const canvasPanelRestoreStateRef = useRef<CanvasPanelCollapseState | null>(null);
+  const workbenchAutoSaveSignatureRef = useRef<string | null>(null);
   const [newCombinationForm, setNewCombinationForm] =
     useState<NewCombinationForm>(() => buildNewCombinationForm());
   const [isNewCombinationModalOpen, setIsNewCombinationModalOpen] = useState(false);
   const [newCombinationError, setNewCombinationError] = useState<string | null>(null);
+  const [isPromptPresetModalOpen, setIsPromptPresetModalOpen] = useState(false);
+  const [newPromptPresetDraft, setNewPromptPresetDraft] = useState<PromptPresetDraft>(() =>
+    buildEmptyPromptPresetDraft(),
+  );
+  const [newPromptPresetSourceMode, setNewPromptPresetSourceMode] =
+    useState<PromptPresetSourceMode>("blank");
+  const [newPromptPresetCopyId, setNewPromptPresetCopyId] = useState(
+    DEFAULT_PROMPT_WORKBENCH_STATE.presetId,
+  );
+  const [shouldApplyNewPromptPreset, setShouldApplyNewPromptPreset] = useState(true);
+  const [newPromptPresetError, setNewPromptPresetError] = useState<string | null>(null);
+  const [selectedPromptPresetCenterId, setSelectedPromptPresetCenterId] = useState(
+    DEFAULT_PROMPT_WORKBENCH_STATE.presetId,
+  );
+  const [promptPresetCenterDraft, setPromptPresetCenterDraft] = useState<PromptPresetDraft>(() =>
+    buildEmptyPromptPresetDraft(),
+  );
+  const [promptPresetCenterError, setPromptPresetCenterError] = useState<string | null>(null);
+  const [isSavingPromptPreset, setIsSavingPromptPreset] = useState(false);
   const latestTask = useGenerationTaskStore((state) => state.latestTask);
-  const recentTasks = useGenerationTaskStore((state) => state.recentTasks);
   const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
   const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
   const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
 
   const modelConfig = useMemo<SaveModelConfigRequest>(
-    () => ({
-      provider: DEFAULT_PROVIDER,
-      modelId: DEFAULT_MODEL_ID,
-      paramsJson: {
-        outputCount,
-        size: modelSize,
-      },
-    }),
-    [modelSize, outputCount],
+    () => {
+      const isCustomProvider = selectedProvider === CUSTOM_PROVIDER;
+      const useCustomEndpoint = isCustomProvider || isCustomEndpointEnabled;
+      return {
+        provider: selectedProvider,
+        modelId: isCustomProvider
+          ? customModelId.trim() || DEFAULT_CUSTOM_MODEL_ID
+          : selectedModelId,
+        paramsJson: {
+          autoSaveResult,
+          concurrency,
+          format: imageFormat,
+          outputCount,
+          providerBaseUrl: useCustomEndpoint ? customBaseUrl.trim() : undefined,
+          seed,
+          size: modelSize,
+          timeoutSeconds,
+        },
+      };
+    },
+    [
+      autoSaveResult,
+      concurrency,
+      customBaseUrl,
+      customModelId,
+      imageFormat,
+      isCustomEndpointEnabled,
+      modelSize,
+      outputCount,
+      seed,
+      selectedProvider,
+      selectedModelId,
+      timeoutSeconds,
+    ],
   );
 
   const selectedPerson = useMemo(
@@ -231,9 +577,90 @@ export function WorkflowCanvas() {
         .filter((asset): asset is AssetFileView => Boolean(asset)),
     [garments, selectedGarmentIds],
   );
-  const resultAssets = latestTask?.results ?? [];
+  const resultAssets =
+    currentCombination?.id && latestTask?.task.combinationId === currentCombination.id
+      ? latestTask.results
+      : [];
+  const currentCombinationAssetView = useMemo(
+    () =>
+      buildCurrentCombinationAssetView({
+        people,
+        garments,
+        results: resultAssets,
+        personAssetId: selectedPersonId,
+        personAssetIds: currentPersonAssetIds,
+        garmentAssetIds: selectedGarmentIds,
+      }),
+    [currentPersonAssetIds, garments, people, resultAssets, selectedGarmentIds, selectedPersonId],
+  );
   const canRun = validationResult?.executable === true && !isStarting && !isSaving;
   const combinationName = currentCombination?.name ?? draftCombinationName ?? "未保存组合";
+  const effectiveModelId =
+    selectedProvider === CUSTOM_PROVIDER
+      ? customModelId.trim() || DEFAULT_CUSTOM_MODEL_ID
+      : selectedModelId;
+  const promptPresetOptions = useMemo(
+    () => buildPromptPresetOptions(workbenchPromptPresets),
+    [workbenchPromptPresets],
+  );
+  const selectedPromptPreset = useMemo(
+    () => findPromptPresetOption(promptPresetOptions, promptWorkbench.presetId),
+    [promptPresetOptions, promptWorkbench.presetId],
+  );
+  const promptBindingDraft = useMemo(
+    () =>
+      buildPromptBindingFromWorkbench({
+        combinationId: currentCombination?.id ?? "draft",
+        preset: selectedPromptPreset,
+        variables: promptWorkbench.variables,
+        additionalInstructions: promptWorkbench.additionalInstructions,
+        advanced: promptWorkbench.advanced,
+      }),
+    [
+      currentCombination?.id,
+      promptWorkbench.additionalInstructions,
+      promptWorkbench.advanced,
+      promptWorkbench.variables,
+      selectedPromptPreset,
+    ],
+  );
+  const promptSummaryText =
+    selectedPromptPreset?.name ?? promptWorkbench.additionalInstructions.trim() ?? "";
+  const workbenchAutoSaveInput = useMemo<WorkbenchAutoSaveInput>(
+    () => ({
+      combinationId: currentCombination?.id ?? null,
+      combinationName: currentCombination?.name ?? draftCombinationName ?? buildCombinationName(),
+      personAssetId: selectedPersonId,
+      personAssetIds: normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: selectedPersonId,
+        currentPersonAssetIds: currentPersonAssetIds,
+      }),
+      garmentAssetIds: selectedGarmentIds,
+      promptBinding:
+        currentCombination?.id && selectedPromptPreset
+          ? {
+              ...promptBindingDraft,
+              combinationId: currentCombination.id,
+            }
+          : null,
+      modelConfig: {
+        ...modelConfig,
+        id: storedModelConfigId,
+      },
+    }),
+    [
+      currentCombination?.id,
+      currentCombination?.name,
+      draftCombinationName,
+      modelConfig,
+      promptBindingDraft,
+      currentPersonAssetIds,
+      selectedGarmentIds,
+      selectedPersonId,
+      selectedPromptPreset,
+      storedModelConfigId,
+    ],
+  );
 
   async function refreshTaskLists() {
     const [runningTasks, recentTasks] = await Promise.all([
@@ -244,36 +671,158 @@ export function WorkflowCanvas() {
     setRecentTasks(recentTasks);
   }
 
+  function markWorkbenchAutoSaveSnapshot(input: WorkbenchAutoSaveInput) {
+    workbenchAutoSaveSignatureRef.current = buildWorkbenchAutoSaveSignature(input);
+  }
+
+  function buildAutoSaveInputForCombination(
+    combination: ImageCombination,
+    promptBinding?: SavePromptBindingRequest | null,
+  ): WorkbenchAutoSaveInput {
+    return {
+      combinationId: combination.id,
+      combinationName: combination.name,
+      personAssetId: combination.personAssetId,
+      personAssetIds: combination.personAssetIds,
+      garmentAssetIds: combination.garmentAssetIds,
+      promptBinding:
+        promptBinding !== undefined
+          ? promptBinding
+          : selectedPromptPreset
+            ? buildPromptBindingFromWorkbench({
+                combinationId: combination.id,
+                preset: selectedPromptPreset,
+                variables: promptWorkbench.variables,
+                additionalInstructions: promptWorkbench.additionalInstructions,
+                advanced: promptWorkbench.advanced,
+              })
+            : null,
+      modelConfig: {
+        ...modelConfig,
+        id: storedModelConfigId,
+      },
+    };
+  }
+
+  function buildPromptBindingForWorkbenchState(
+    combinationId: string,
+    workbench: PromptWorkbenchState,
+    presetOptions: PromptPresetOption[],
+  ): SavePromptBindingRequest | null {
+    const preset = findPromptPresetOption(presetOptions, workbench.presetId);
+    if (!preset) {
+      return null;
+    }
+    return buildPromptBindingFromWorkbench({
+      combinationId,
+      preset,
+      variables: workbench.variables,
+      additionalInstructions: workbench.additionalInstructions,
+      advanced: workbench.advanced,
+    });
+  }
+
+  async function refreshPromptTemplatesForWorkbench(): Promise<PromptWorkbenchData> {
+    if (!isTauriRuntime()) {
+      const templates = buildFallbackPromptTemplates();
+      const presets = buildFallbackPromptPresets();
+      setWorkbenchPromptTemplates(templates);
+      setWorkbenchPromptPresets(presets);
+      return {
+        templates,
+        presets,
+        presetOptions: buildPromptPresetOptions(presets),
+      };
+    }
+    const [templates, presets] = await Promise.all([listPromptTemplates(), listPromptPresets()]);
+    setWorkbenchPromptTemplates(templates);
+    setWorkbenchPromptPresets(presets);
+    return {
+      templates,
+      presets,
+      presetOptions: buildPromptPresetOptions(presets),
+    };
+  }
+
   async function refreshAssets() {
     const [personAssets, garmentAssets] = await Promise.all([
       listAssets("person"),
       listAssets("garment"),
     ]);
-    setPeople(personAssets);
-    setGarments(garmentAssets);
+    setPeople(applySavedAssetOrder("person", personAssets));
+    setGarments(applySavedAssetOrder("garment", garmentAssets));
   }
 
-  async function refreshCredentialStatus() {
-    const status = await getProviderCredentialStatus(DEFAULT_PROVIDER);
+  async function refreshCredentialStatus(provider = selectedProvider) {
+    const status = await getProviderCredentialStatus(provider);
     setCredentialStatus(status);
   }
 
+  async function refreshModelSettings() {
+    const definitions = await listModelDefinitions(false);
+    setModelDefinitions(definitions);
+
+    const savedConfigId = readStoredModelConfigId();
+    if (!savedConfigId) {
+      await refreshCredentialStatus(selectedProvider);
+      return;
+    }
+
+    const savedConfig = await getModelConfig(savedConfigId);
+    if (savedConfig) {
+      applyModelConfigState(savedConfig);
+      await refreshCredentialStatus(normalizeProviderId(savedConfig.provider));
+      return;
+    }
+
+    await refreshCredentialStatus(selectedProvider);
+  }
+
+  function applyModelConfigState(config: ModelConfig) {
+    const provider = normalizeProviderId(config.provider);
+    setSelectedProvider(provider);
+    if (provider === CUSTOM_PROVIDER) {
+      setCustomModelId(config.modelId || DEFAULT_CUSTOM_MODEL_ID);
+    } else {
+      setSelectedModelId(config.modelId);
+    }
+    setCustomBaseUrl(normalizeStringParam(config.paramsJson.providerBaseUrl, ""));
+    setIsCustomEndpointEnabled(
+      provider === CUSTOM_PROVIDER || Boolean(normalizeStringParam(config.paramsJson.providerBaseUrl, "")),
+    );
+    setModelSize(normalizeModelSize(config.paramsJson.size));
+    setOutputCount(normalizeIntegerParam(config.paramsJson.outputCount, 1, 4, 1));
+    setImageFormat(normalizeStringParam(config.paramsJson.format, DEFAULT_IMAGE_FORMAT));
+    setTimeoutSeconds(
+      normalizeIntegerParam(config.paramsJson.timeoutSeconds, 30, 600, DEFAULT_TIMEOUT_SECONDS),
+    );
+    setSeed(normalizeIntegerParam(config.paramsJson.seed, -1, 999999, DEFAULT_SEED));
+    setConcurrency(normalizeIntegerParam(config.paramsJson.concurrency, 1, 5, DEFAULT_CONCURRENCY));
+    setAutoSaveResult(
+      typeof config.paramsJson.autoSaveResult === "boolean"
+        ? config.paramsJson.autoSaveResult
+        : DEFAULT_AUTO_SAVE_RESULT,
+    );
+  }
+
   async function refreshWorkbenchData() {
-    const [personAssets, garmentAssets, combinations] = await Promise.all([
+    const [personAssets, garmentAssets, combinations, , , promptData] = await Promise.all([
       listAssets("person"),
       listAssets("garment"),
       listImageCombinations(),
       refreshTaskLists(),
-      refreshCredentialStatus(),
+      refreshModelSettings(),
+      refreshPromptTemplatesForWorkbench(),
     ]);
-    setPeople(personAssets);
-    setGarments(garmentAssets);
+    setPeople(applySavedAssetOrder("person", personAssets));
+    setGarments(applySavedAssetOrder("garment", garmentAssets));
     setCombinationSummaries(combinations);
 
     const latest = combinations[0];
     if (!latest) {
       setCurrentCombination(null);
       setSelectedPersonId(null);
+      setCurrentPersonAssetIds([]);
       setSelectedGarmentIds([]);
       setLatestTask(null);
       return;
@@ -282,9 +831,32 @@ export function WorkflowCanvas() {
     const combination = await getImageCombination(latest.id);
     setCurrentCombination(combination);
     setSelectedPersonId(combination?.personAssetId ?? null);
+    setCurrentPersonAssetIds(
+      normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: combination?.personAssetId ?? null,
+        currentPersonAssetIds: combination?.personAssetIds ?? [],
+      }),
+    );
     setSelectedGarmentIds(combination?.garmentAssetIds ?? []);
 
     if (combination) {
+      const promptBinding = await getPromptBinding(combination.id);
+      const nextPromptWorkbench = buildPromptWorkbenchFromBinding(
+        promptBinding,
+        promptData.presetOptions,
+      );
+      const nextPromptBinding =
+        promptBinding
+          ? buildPromptBindingSaveRequest(promptBinding)
+          : buildPromptBindingForWorkbenchState(
+              combination.id,
+              nextPromptWorkbench,
+              promptData.presetOptions,
+            );
+      setPromptWorkbench(nextPromptWorkbench);
+      markWorkbenchAutoSaveSnapshot(
+        buildAutoSaveInputForCombination(combination, nextPromptBinding),
+      );
       setLatestTask(await getLatestGenerationTaskByCombination(combination.id));
     }
   }
@@ -297,14 +869,41 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     try {
-      const combination = await getImageCombination(combinationId);
+      const [combination, personAssets, garmentAssets, promptBinding] = await Promise.all([
+        getImageCombination(combinationId),
+        listAssets("person"),
+        listAssets("garment"),
+        getPromptBinding(combinationId),
+      ]);
       if (!combination) {
         throw new Error("未找到选择的组合");
       }
+      const nextPromptWorkbench = buildPromptWorkbenchFromBinding(promptBinding, promptPresetOptions);
+      const nextPromptBinding =
+        promptBinding
+          ? buildPromptBindingSaveRequest(promptBinding)
+          : buildPromptBindingForWorkbenchState(
+              combination.id,
+              nextPromptWorkbench,
+              promptPresetOptions,
+            );
+      setPeople(applySavedAssetOrder("person", personAssets));
+      setGarments(applySavedAssetOrder("garment", garmentAssets));
       setCurrentCombination(combination);
       setDraftCombinationName(null);
       setSelectedPersonId(combination.personAssetId);
+      setCurrentPersonAssetIds(
+        normalizeCombinationPersonAssetIds({
+          currentPersonAssetId: combination.personAssetId,
+          currentPersonAssetIds: combination.personAssetIds,
+        }),
+      );
       setSelectedGarmentIds(combination.garmentAssetIds);
+      setPromptWorkbench(nextPromptWorkbench);
+      markWorkbenchAutoSaveSnapshot(
+        buildAutoSaveInputForCombination(combination, nextPromptBinding),
+      );
+      setLatestTask(null);
       setLatestTask(await getLatestGenerationTaskByCombination(combination.id));
       setSelectedFlowNode("person");
       setSidePanelMode("details");
@@ -327,6 +926,38 @@ export function WorkflowCanvas() {
       window.clearTimeout(timeoutId);
     };
   }, [actionMessage]);
+
+  useEffect(() => {
+    if (!actionError) {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setActionError((currentError) =>
+        currentError === actionError ? null : currentError,
+      );
+    }, ACTION_MESSAGE_AUTO_DISMISS_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [actionError]);
+
+  useEffect(() => {
+    const selectedDefinition = modelDefinitions.find(
+      (definition) =>
+        definition.provider === selectedProvider && definition.modelId === selectedModelId,
+    );
+    if (!selectedDefinition) {
+      return;
+    }
+    setOutputCount((currentOutputCount) =>
+      normalizeIntegerParam(
+        currentOutputCount,
+        selectedDefinition.output.minCount,
+        selectedDefinition.output.maxCount,
+        selectedDefinition.output.minCount,
+      ),
+    );
+  }, [modelDefinitions, selectedModelId, selectedProvider]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -362,7 +993,7 @@ export function WorkflowCanvas() {
         personAssetId: selectedPersonId,
         garmentAssetIds: selectedGarmentIds,
       },
-      draftPromptBinding: buildPromptBinding(currentCombination?.id ?? "draft", promptText),
+      draftPromptBinding: promptBindingDraft,
       draftModelConfig: modelConfig,
     })
       .then((result) => {
@@ -373,7 +1004,7 @@ export function WorkflowCanvas() {
       .catch((error) => {
         if (!canceled) {
           setValidationResult(null);
-          setActionError(error instanceof Error ? error.message : "校验组合失败");
+          console.warn("validate combination failed", error);
         }
       });
 
@@ -385,10 +1016,99 @@ export function WorkflowCanvas() {
     currentCombination?.name,
     draftCombinationName,
     modelConfig,
-    promptText,
+    promptBindingDraft,
     selectedGarmentIds,
     selectedPersonId,
   ]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return undefined;
+    }
+
+    const plan = buildWorkbenchAutoSavePlan(workbenchAutoSaveInput);
+    if (!plan) {
+      return undefined;
+    }
+
+    const signature = buildWorkbenchAutoSaveSignature(workbenchAutoSaveInput);
+    if (signature === workbenchAutoSaveSignatureRef.current) {
+      return undefined;
+    }
+
+    let canceled = false;
+    const timeoutId = window.setTimeout(() => {
+      Promise.all([
+        saveImageCombination(plan.combination),
+        savePromptBinding(plan.promptBinding),
+        saveModelConfig(plan.modelConfig),
+      ])
+        .then(([savedCombination, _savedPromptBinding, savedModelConfig]) => {
+          if (canceled) {
+            return;
+          }
+          setCurrentCombination(savedCombination);
+          setCurrentPersonAssetIds(savedCombination.personAssetIds);
+          setCombinationSummaries((summaries) =>
+            upsertCombinationSummary(summaries, savedCombination),
+          );
+          setDraftCombinationName(null);
+          storeModelConfigId(savedModelConfig.id);
+          setStoredModelConfigId(savedModelConfig.id);
+          markWorkbenchAutoSaveSnapshot({
+            ...workbenchAutoSaveInput,
+            combinationId: savedCombination.id,
+            combinationName: savedCombination.name,
+            modelConfig: {
+              ...plan.modelConfig,
+              id: savedModelConfig.id,
+            },
+          });
+        })
+        .catch((error) => {
+          if (!canceled) {
+            setActionError(error instanceof Error ? error.message : "自动保存工作台失败");
+          }
+        });
+    }, WORKBENCH_AUTO_SAVE_DELAY_MS);
+
+    return () => {
+      canceled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [workbenchAutoSaveInput]);
+
+  useEffect(() => {
+    if (!promptPresetOptions.length) {
+      return;
+    }
+    if (promptPresetOptions.some((option) => option.id === promptWorkbench.presetId)) {
+      return;
+    }
+    const fallbackPreset = promptPresetOptions[0];
+    setPromptWorkbench((current) => ({
+      ...current,
+      presetId: fallbackPreset.id,
+      variables: fallbackPreset.variables,
+      advanced: null,
+    }));
+  }, [promptPresetOptions, promptWorkbench.presetId]);
+
+  useEffect(() => {
+    setPromptWorkbench((current) => {
+      const nextOutputCount = String(outputCount);
+      if (current.variables.outputCount === nextOutputCount) {
+        return current;
+      }
+      return {
+        ...current,
+        variables: {
+          ...current.variables,
+          outputCount: nextOutputCount,
+        },
+      };
+    });
+  }, [outputCount]);
 
   useEffect(() => {
     if (!isTauriRuntime() || !currentCombination) {
@@ -449,11 +1169,23 @@ export function WorkflowCanvas() {
     try {
       const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
       if (assetType === "person") {
-        setPeople((items) => upsertAssets(items, views));
-        setSelectedPersonId(views[0].asset.id);
+        setPeople((items) => saveOrderedAssets("person", upsertAssets(items, views)));
+        setCurrentPersonAssetIds((personAssetIds) => {
+          return buildCombinationPersonAssetIdsAfterImport({
+            currentPersonAssetId: selectedPersonId,
+            currentPersonAssetIds: personAssetIds,
+            importedPeople: views,
+          });
+        });
+        setSelectedPersonId((personAssetId) =>
+          pickCurrentPersonAssetIdAfterImport({
+            currentPersonAssetId: personAssetId,
+            importedPeople: views,
+          }),
+        );
       } else {
         const importedIds = views.map((view) => view.asset.id);
-        setGarments((items) => upsertAssets(items, views));
+        setGarments((items) => saveOrderedAssets("garment", upsertAssets(items, views)));
         setSelectedGarmentIds((ids) =>
           [...importedIds, ...ids.filter((id) => !importedIds.includes(id))].slice(0, 4),
         );
@@ -491,14 +1223,14 @@ export function WorkflowCanvas() {
       const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
 
       if (assetType === "person") {
-        setPeople((items) => upsertAssets(items, views));
+        setPeople((items) => saveOrderedAssets("person", upsertAssets(items, views)));
         setNewCombinationForm((form) => ({
           ...form,
           personAssetId: views[0].asset.id,
         }));
       } else {
         const importedIds = views.map((view) => view.asset.id);
-        setGarments((items) => upsertAssets(items, views));
+        setGarments((items) => saveOrderedAssets("garment", upsertAssets(items, views)));
         setNewCombinationForm((form) => ({
           ...form,
           garmentAssetIds: [
@@ -536,7 +1268,13 @@ export function WorkflowCanvas() {
     setActionMessage(null);
     try {
       const saved = await persistCurrentCombination();
-      const promptBinding = buildPromptBinding(saved.id, promptText);
+      const promptBinding = buildPromptBindingFromWorkbench({
+        combinationId: saved.id,
+        preset: selectedPromptPreset,
+        variables: promptWorkbench.variables,
+        additionalInstructions: promptWorkbench.additionalInstructions,
+        advanced: promptWorkbench.advanced,
+      });
       await savePromptBinding(promptBinding);
       const task = await startGeneration({
         combinationId: saved.id,
@@ -559,7 +1297,7 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     try {
-      await setProviderApiKey(DEFAULT_PROVIDER, apiKeyDraft);
+      await setProviderApiKey(selectedProvider, apiKeyDraft);
       await refreshCredentialStatus();
       setApiKeyDraft("");
       setActionMessage("API Key 已保存到系统密钥库");
@@ -570,6 +1308,110 @@ export function WorkflowCanvas() {
     }
   }
 
+  async function handleSaveModelSettings() {
+    setIsSavingModelSettings(true);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      if (apiKeyDraft.trim()) {
+        await setProviderApiKey(selectedProvider, apiKeyDraft);
+        setApiKeyDraft("");
+      }
+      const savedConfig = await saveModelConfig({
+        ...modelConfig,
+        id: readStoredModelConfigId(),
+      });
+      storeModelConfigId(savedConfig.id);
+      setStoredModelConfigId(savedConfig.id);
+      applyModelConfigState(savedConfig);
+      await refreshCredentialStatus();
+      setActionMessage(getProviderStatusLabel(normalizeProviderId(savedConfig.provider)));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "保存模型设置失败");
+    } finally {
+      setIsSavingModelSettings(false);
+    }
+  }
+
+  async function handleTestProviderConnection() {
+    setIsTestingProviderConnection(true);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      if (apiKeyDraft.trim()) {
+        await setProviderApiKey(selectedProvider, apiKeyDraft);
+        setApiKeyDraft("");
+      }
+      const status = await getProviderCredentialStatus(selectedProvider);
+      setCredentialStatus(status);
+      if (!status.configured) {
+        throw new Error(`请先保存 ${getProviderLabel(selectedProvider)} API Key`);
+      }
+      setActionMessage("连接检查通过");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "测试连接失败");
+    } finally {
+      setIsTestingProviderConnection(false);
+    }
+  }
+
+  function handleResetModelSettings() {
+    setSelectedProvider(DEFAULT_PROVIDER);
+    setSelectedModelId(DEFAULT_MODEL_ID);
+    setCustomModelId(DEFAULT_CUSTOM_MODEL_ID);
+    setCustomBaseUrl("");
+    setIsCustomEndpointEnabled(false);
+    setModelSize("1024x1024");
+    setOutputCount(1);
+    setImageFormat(DEFAULT_IMAGE_FORMAT);
+    setTimeoutSeconds(DEFAULT_TIMEOUT_SECONDS);
+    setSeed(DEFAULT_SEED);
+    setConcurrency(DEFAULT_CONCURRENCY);
+    setAutoSaveResult(DEFAULT_AUTO_SAVE_RESULT);
+    setApiKeyDraft("");
+    setActionMessage("已恢复默认模型参数，保存后生效");
+  }
+
+  function handleSelectProvider(provider: ProviderId) {
+    const option = PROVIDER_OPTIONS.find((item) => item.id === provider);
+    if (!option?.enabled) {
+      return;
+    }
+    setSelectedProvider(provider);
+    setApiKeyDraft("");
+    setIsCustomEndpointEnabled(provider === CUSTOM_PROVIDER);
+    setActionError(null);
+    setActionMessage(null);
+
+    const firstModel = modelDefinitions.find((definition) => definition.provider === provider);
+    if (provider === CUSTOM_PROVIDER) {
+      setSelectedModelId(DEFAULT_CUSTOM_MODEL_ID);
+      setOutputCount((currentOutputCount) =>
+        normalizeIntegerParam(currentOutputCount, 1, 8, 1),
+      );
+    } else if (firstModel) {
+      setSelectedModelId(firstModel.modelId);
+      setOutputCount((currentOutputCount) =>
+        normalizeIntegerParam(
+          currentOutputCount,
+          firstModel.output.minCount,
+          firstModel.output.maxCount,
+          firstModel.output.minCount,
+        ),
+      );
+    }
+
+    if (isTauriRuntime()) {
+      getProviderCredentialStatus(provider)
+        .then(setCredentialStatus)
+        .catch((error) =>
+          setActionError(error instanceof Error ? error.message : "读取 API Key 状态失败"),
+        );
+    } else {
+      setCredentialStatus({ provider, configured: false, maskedKey: null });
+    }
+  }
+
   async function persistCurrentCombination() {
     if (!selectedPersonId) {
       throw new Error("请先选择人物图片");
@@ -577,20 +1419,50 @@ export function WorkflowCanvas() {
     if (!selectedGarmentIds.length) {
       throw new Error("请至少选择一张服装图片");
     }
-    if (!promptText.trim()) {
-      throw new Error("请填写 Prompt");
+    if (!selectedPromptPreset) {
+      throw new Error("请选择输出方案");
     }
 
     const saved = await saveImageCombination({
       id: currentCombination?.id,
       name: currentCombination?.name ?? draftCombinationName ?? buildCombinationName(),
       personAssetId: selectedPersonId,
+      personAssetIds: normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: selectedPersonId,
+        currentPersonAssetIds,
+      }),
       garmentAssetIds: selectedGarmentIds,
     });
     setCurrentCombination(saved);
+    setCurrentPersonAssetIds(saved.personAssetIds);
     setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
     setDraftCombinationName(null);
-    await savePromptBinding(buildPromptBinding(saved.id, promptText));
+    const promptBinding = buildPromptBindingFromWorkbench({
+      combinationId: saved.id,
+      preset: selectedPromptPreset,
+      variables: promptWorkbench.variables,
+      additionalInstructions: promptWorkbench.additionalInstructions,
+      advanced: promptWorkbench.advanced,
+    });
+    const savedModelConfig = await saveModelConfig({
+      ...modelConfig,
+      id: storedModelConfigId,
+    });
+    storeModelConfigId(savedModelConfig.id);
+    setStoredModelConfigId(savedModelConfig.id);
+    await savePromptBinding(promptBinding);
+    markWorkbenchAutoSaveSnapshot({
+      combinationId: saved.id,
+      combinationName: saved.name,
+      personAssetId: saved.personAssetId,
+      personAssetIds: saved.personAssetIds,
+      garmentAssetIds: saved.garmentAssetIds,
+      promptBinding,
+      modelConfig: {
+        ...modelConfig,
+        id: savedModelConfig.id,
+      },
+    });
     await refreshTaskLists();
     return saved;
   }
@@ -599,6 +1471,154 @@ export function WorkflowCanvas() {
     setNewCombinationForm(buildNewCombinationForm());
     setNewCombinationError(null);
     setIsNewCombinationModalOpen(true);
+  }
+
+  function openPromptPresetModal() {
+    const fallbackPreset = selectedPromptPreset ?? promptPresetOptions[0] ?? null;
+    const draft = buildEmptyPromptPresetDraft(fallbackPreset);
+    setNewPromptPresetDraft(draft);
+    setNewPromptPresetSourceMode("blank");
+    setNewPromptPresetCopyId(fallbackPreset?.id ?? "");
+    setShouldApplyNewPromptPreset(true);
+    setNewPromptPresetError(null);
+    setIsPromptPresetModalOpen(true);
+  }
+
+  function openPromptPresetCenter() {
+    const preset = selectedPromptPreset ?? promptPresetOptions[0] ?? null;
+    if (preset) {
+      setSelectedPromptPresetCenterId(preset.id);
+      setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(preset));
+    }
+    setPromptPresetCenterError(null);
+    setIsSettingsCenterOpen(false);
+    setIsPromptPresetCenterOpen(true);
+  }
+
+  function handleSelectPromptPresetForCenter(presetId: string) {
+    const preset = findPromptPresetOption(promptPresetOptions, presetId);
+    if (!preset) {
+      return;
+    }
+    setSelectedPromptPresetCenterId(preset.id);
+    setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(preset));
+    setPromptPresetCenterError(null);
+  }
+
+  function applyPromptPresetToWorkbench(presetId = selectedPromptPresetCenterId) {
+    const preset = findPromptPresetOption(promptPresetOptions, presetId);
+    if (!preset) {
+      setPromptPresetCenterError("请选择一个组合方案");
+      return;
+    }
+    setPromptWorkbench({
+      presetId: preset.id,
+      variables: preset.variables,
+      additionalInstructions: "",
+      advanced: null,
+    });
+    setPromptPresetCenterError(null);
+    setActionMessage("已应用到当前组合");
+  }
+
+  async function handleCreatePromptPreset() {
+    if (!newPromptPresetDraft.name.trim()) {
+      setNewPromptPresetError("请填写方案名称");
+      return;
+    }
+    if (!newPromptPresetDraft.scenario.trim()) {
+      setNewPromptPresetError("请选择或填写适用场景");
+      return;
+    }
+    if (!newPromptPresetDraft.user.baseTemplateId) {
+      setNewPromptPresetError("请选择细节描述模板");
+      return;
+    }
+
+    setIsSavingPromptPreset(true);
+    setNewPromptPresetError(null);
+    try {
+      const draftToSave = syncPromptPresetDraftVariables(
+        { ...newPromptPresetDraft, id: null },
+        workbenchPromptTemplates,
+      );
+      const saved = isTauriRuntime()
+        ? await savePromptPreset(draftToSave)
+        : buildLocalPromptPreset(draftToSave);
+      setWorkbenchPromptPresets((presets) => upsertPromptPreset(presets, saved));
+      setSelectedPromptPresetCenterId(saved.id);
+      const nextOption = buildPromptPresetOptions([saved])[0];
+      if (nextOption) {
+        setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(nextOption));
+      }
+      if (shouldApplyNewPromptPreset) {
+        setPromptWorkbench({
+          presetId: saved.id,
+          variables: nextOption?.variables ?? DEFAULT_PROMPT_WORKBENCH_STATE.variables,
+          additionalInstructions: "",
+          advanced: null,
+        });
+      }
+      setIsPromptPresetModalOpen(false);
+      setActionMessage("组合方案已创建");
+    } catch (error) {
+      setNewPromptPresetError(error instanceof Error ? error.message : "创建组合方案失败");
+    } finally {
+      setIsSavingPromptPreset(false);
+    }
+  }
+
+  async function handleSavePromptPresetCenterDraft() {
+    const selectedPreset = findPromptPresetOption(promptPresetOptions, selectedPromptPresetCenterId);
+    if (
+      !selectedPreset ||
+      arePromptPresetDraftsEqual(
+        promptPresetCenterDraft,
+        buildPromptPresetDraftFromOption(selectedPreset),
+        workbenchPromptTemplates,
+      )
+    ) {
+      return;
+    }
+    if (promptPresetCenterDraft.locked || promptPresetCenterDraft.id?.startsWith("builtin_")) {
+      setPromptPresetCenterError("内置方案不能修改，请复制或新建自定义方案");
+      return;
+    }
+    if (!promptPresetCenterDraft.name.trim()) {
+      setPromptPresetCenterError("请填写方案名称");
+      return;
+    }
+    if (!promptPresetCenterDraft.scenario.trim()) {
+      setPromptPresetCenterError("请选择或填写适用场景");
+      return;
+    }
+    if (!promptPresetCenterDraft.user.baseTemplateId) {
+      setPromptPresetCenterError("请选择细节描述模板");
+      return;
+    }
+
+    setIsSavingPromptPreset(true);
+    setPromptPresetCenterError(null);
+    try {
+      const draftToSave = syncPromptPresetDraftVariables(
+        promptPresetCenterDraft,
+        workbenchPromptTemplates,
+      );
+      const saved = isTauriRuntime()
+        ? await savePromptPreset(draftToSave)
+        : buildLocalPromptPreset(draftToSave);
+      setWorkbenchPromptPresets((presets) => upsertPromptPreset(presets, saved));
+      setSelectedPromptPresetCenterId(saved.id);
+      const nextOption = buildPromptPresetOptions([saved])[0];
+      if (nextOption) {
+        setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(nextOption));
+      }
+      setActionMessage("组合方案已保存");
+    } catch (error) {
+      setPromptPresetCenterError(error instanceof Error ? error.message : "保存组合方案失败");
+    } finally {
+      setIsSavingPromptPreset(false);
+    }
   }
 
   async function handleCreateCombination() {
@@ -621,10 +1641,24 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     setNewCombinationError(null);
-    setPromptText(DEFAULT_PROMPT_TEXT);
-    setModelSize(newCombinationForm.size);
-    setOutputCount(newCombinationForm.outputCount);
+    const defaultPromptPreset = findPromptPresetOption(
+      promptPresetOptions,
+      DEFAULT_PROMPT_WORKBENCH_STATE.presetId,
+    );
+    const nextPromptWorkbench: PromptWorkbenchState = {
+      presetId: defaultPromptPreset?.id ?? DEFAULT_PROMPT_WORKBENCH_STATE.presetId,
+      variables: defaultPromptPreset?.variables ?? DEFAULT_PROMPT_WORKBENCH_STATE.variables,
+      additionalInstructions: "",
+      advanced: null,
+    };
+    setPromptWorkbench(nextPromptWorkbench);
     setSelectedPersonId(newCombinationForm.personAssetId);
+    setCurrentPersonAssetIds(
+      normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: newCombinationForm.personAssetId,
+        currentPersonAssetIds: [],
+      }),
+    );
     setSelectedGarmentIds(nextGarmentIds);
 
     setIsSaving(true);
@@ -632,16 +1666,26 @@ export function WorkflowCanvas() {
       const saved = await saveImageCombination({
         name,
         personAssetId: newCombinationForm.personAssetId,
+        personAssetIds: [newCombinationForm.personAssetId],
         garmentAssetIds: nextGarmentIds,
       });
       setCurrentCombination(saved);
+      setCurrentPersonAssetIds(saved.personAssetIds);
       setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
       setDraftCombinationName(null);
-      await savePromptBinding(buildPromptBinding(saved.id, DEFAULT_PROMPT_TEXT));
+      await savePromptBinding(
+        buildPromptBindingFromWorkbench({
+          combinationId: saved.id,
+          preset: defaultPromptPreset,
+          variables: nextPromptWorkbench.variables,
+          additionalInstructions: nextPromptWorkbench.additionalInstructions,
+          advanced: nextPromptWorkbench.advanced,
+        }),
+      );
       setLatestTask(null);
       await refreshTaskLists();
       setIsNewCombinationModalOpen(false);
-      setSelectedFlowNode(newCombinationForm.openAfterCreate ? "person" : selectedFlowNode);
+      setSelectedFlowNode("person");
       setSidePanelMode("details");
       setActionMessage("组合已创建");
     } catch (error) {
@@ -660,6 +1704,32 @@ export function WorkflowCanvas() {
     });
   }
 
+  function selectPersonForCurrentCombination(assetId: string) {
+    setSelectedPersonId(assetId);
+    setCurrentPersonAssetIds((personAssetIds) => {
+      return normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: assetId,
+        currentPersonAssetIds: personAssetIds,
+      });
+    });
+  }
+
+  function reorderAssetLibraryItems(
+    assetType: SortableAssetType,
+    activeId: string,
+    overId: string,
+  ) {
+    const updateAssets = assetType === "person" ? setPeople : setGarments;
+    updateAssets((items) => {
+      const nextItems = moveAssetById(items, activeId, overId);
+      if (nextItems === items) {
+        return items;
+      }
+      saveAssetLibraryOrder(getAssetOrderStorage(), assetType, assetIds(nextItems));
+      return nextItems;
+    });
+  }
+
   function handleRefreshAll() {
     setActionError(null);
     setActionMessage(null);
@@ -670,11 +1740,78 @@ export function WorkflowCanvas() {
       );
   }
 
-  function handleRefreshWorkspace() {
-    setZoom(100);
-    setCanvasResetRevision((revision) => revision + 1);
-    handleRefreshAll();
+  function handleToggleCanvasMaximize() {
+    if (!isCanvasMaximized) {
+      canvasPanelRestoreStateRef.current = {
+        assetLibrary: isAssetLibraryCollapsed,
+        bottomDashboard: isBottomDashboardCollapsed,
+        inspector: isInspectorCollapsed,
+      };
+      setIsAssetLibraryCollapsed(true);
+      setIsInspectorCollapsed(true);
+      setIsBottomDashboardCollapsed(true);
+      setIsCanvasMaximized(true);
+      return;
+    }
+
+    const restoreState = canvasPanelRestoreStateRef.current ?? {
+      assetLibrary: false,
+      bottomDashboard: false,
+      inspector: false,
+    };
+    setIsAssetLibraryCollapsed(restoreState.assetLibrary);
+    setIsInspectorCollapsed(restoreState.inspector);
+    setIsBottomDashboardCollapsed(restoreState.bottomDashboard);
+    setIsCanvasMaximized(false);
+    canvasPanelRestoreStateRef.current = null;
   }
+
+  function updatePanelCollapsedState(
+    sizeInPixels: number,
+    collapsedSize: number,
+    updateState: (collapsed: boolean) => void,
+  ) {
+    updateState(sizeInPixels <= collapsedSize + 2);
+  }
+
+  useEffect(() => {
+    if (isAssetLibraryCollapsed) {
+      assetLibraryPanelRef.current?.collapse();
+    } else {
+      assetLibraryPanelRef.current?.expand();
+    }
+  }, [isAssetLibraryCollapsed]);
+
+  useEffect(() => {
+    if (isInspectorCollapsed) {
+      inspectorPanelRef.current?.collapse();
+    } else {
+      inspectorPanelRef.current?.expand();
+    }
+  }, [isInspectorCollapsed]);
+
+  useEffect(() => {
+    if (isBottomDashboardCollapsed) {
+      bottomDashboardPanelRef.current?.collapse();
+    } else {
+      bottomDashboardPanelRef.current?.expand();
+    }
+  }, [isBottomDashboardCollapsed]);
+
+  useEffect(() => {
+    if (
+      isCanvasMaximized &&
+      (!isAssetLibraryCollapsed || !isInspectorCollapsed || !isBottomDashboardCollapsed)
+    ) {
+      setIsCanvasMaximized(false);
+      canvasPanelRestoreStateRef.current = null;
+    }
+  }, [
+    isAssetLibraryCollapsed,
+    isBottomDashboardCollapsed,
+    isCanvasMaximized,
+    isInspectorCollapsed,
+  ]);
 
   const showWindowChrome = isWindowsPlatform();
   const workbenchBodyClassName = [
@@ -690,46 +1827,137 @@ export function WorkflowCanvas() {
     <div className={`desktop-frame${showWindowChrome ? "" : " desktop-frame--native-titlebar"}`}>
       {showWindowChrome ? <WindowChrome /> : null}
       <div className="workbench">
-        <TopToolbar
-          combinationName={combinationName}
-          combinationSummaries={combinationSummaries}
-          currentCombinationId={currentCombination?.id ?? ""}
-          canRun={canRun}
-          isSaving={isSaving}
-          isStarting={isStarting}
-          onHistory={() => {
-            setSelectedFlowNode("result");
-            setSidePanelMode("history");
-          }}
-          onModelSettings={() => {
-            setSelectedFlowNode("model");
-            setSidePanelMode("edit");
-          }}
-          onNew={openNewCombinationModal}
-          onPromptTemplate={() => setPromptText(DEFAULT_PROMPT_TEXT)}
-          onRefresh={handleRefreshWorkspace}
-          onSelectCombination={(combinationId) => {
-            void handleSelectCombination(combinationId);
-          }}
-          onSave={() => {
-            void handleSaveCombination();
-          }}
-          onRun={() => {
-            void handleStartGeneration();
-          }}
-        />
-        <div className={workbenchBodyClassName}>
-          {isAssetLibraryCollapsed ? (
-            <PanelRestoreButton
-              label="展开资源库"
-              side="left"
-              onClick={() => setIsAssetLibraryCollapsed(false)}
+        {isSettingsCenterOpen ? (
+          <ModelSettingsCenter
+            actionError={actionError}
+            apiKeyDraft={apiKeyDraft}
+            autoSaveResult={autoSaveResult}
+            concurrency={concurrency}
+            credentialStatus={credentialStatus}
+            customBaseUrl={customBaseUrl}
+            customModelId={customModelId}
+            imageFormat={imageFormat}
+            isCustomEndpointEnabled={isCustomEndpointEnabled}
+            isSaving={isSavingModelSettings}
+            isTesting={isTestingProviderConnection}
+            modelDefinitions={modelDefinitions}
+            modelSize={modelSize}
+            outputCount={outputCount}
+            seed={seed}
+            selectedModelId={selectedModelId}
+            selectedProvider={selectedProvider}
+            timeoutSeconds={timeoutSeconds}
+            onApiKeyDraftChange={setApiKeyDraft}
+            onAutoSaveResultChange={setAutoSaveResult}
+            onBack={() => setIsSettingsCenterOpen(false)}
+            onConcurrencyChange={setConcurrency}
+            onCustomBaseUrlChange={setCustomBaseUrl}
+            onCustomModelIdChange={setCustomModelId}
+            onImageFormatChange={setImageFormat}
+            onCustomEndpointEnabledChange={setIsCustomEndpointEnabled}
+            onModelSizeChange={setModelSize}
+            onOutputCountChange={setOutputCount}
+            onPromptTemplatesChange={setWorkbenchPromptTemplates}
+            onProviderChange={handleSelectProvider}
+            onNotifyError={(message) => {
+              setActionMessage(null);
+              setActionError(message);
+            }}
+            onNotifyMessage={(message) => {
+              setActionError(null);
+              setActionMessage(message);
+            }}
+            onReset={handleResetModelSettings}
+            onSave={() => {
+              void handleSaveModelSettings();
+            }}
+            onSeedChange={setSeed}
+            onSelectedModelIdChange={setSelectedModelId}
+            onTest={() => {
+              void handleTestProviderConnection();
+            }}
+            onTimeoutSecondsChange={setTimeoutSeconds}
+          />
+        ) : isPromptPresetCenterOpen ? (
+          <PromptPresetCenterPage
+            draft={promptPresetCenterDraft}
+            error={promptPresetCenterError}
+            isSaving={isSavingPromptPreset}
+            presets={promptPresetOptions}
+            selectedPresetId={selectedPromptPresetCenterId}
+            templates={workbenchPromptTemplates}
+            onApply={() => applyPromptPresetToWorkbench()}
+            onBack={() => setIsPromptPresetCenterOpen(false)}
+            onDraftChange={setPromptPresetCenterDraft}
+            onNew={openPromptPresetModal}
+            onReset={() => {
+              const preset = findPromptPresetOption(promptPresetOptions, selectedPromptPresetCenterId);
+              if (preset) {
+                setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(preset));
+                setPromptPresetCenterError(null);
+              }
+            }}
+            onSave={() => {
+              void handleSavePromptPresetCenterDraft();
+            }}
+            onSelectPreset={handleSelectPromptPresetForCenter}
+            onCopyPreviewError={(message) => {
+              setActionMessage(null);
+              setActionError(message);
+            }}
+            onCopyPreviewSuccess={() => {
+              setActionError(null);
+              setActionMessage("已复制最终输出");
+            }}
+          />
+        ) : (
+          <>
+            <TopToolbar
+              combinationName={combinationName}
+              combinationSummaries={combinationSummaries}
+              currentCombinationId={currentCombination?.id ?? ""}
+              canRun={canRun}
+              isSaving={isSaving}
+              isStarting={isStarting}
+              onHistory={() => {
+                setSelectedFlowNode("result");
+                setSidePanelMode("details");
+              }}
+              onPromptPresetCenter={openPromptPresetCenter}
+              onModelSettings={() => setIsSettingsCenterOpen(true)}
+              onNew={openNewCombinationModal}
+              onSelectCombination={(combinationId) => {
+                void handleSelectCombination(combinationId);
+              }}
+              onSave={() => {
+                void handleSaveCombination();
+              }}
+              onRun={() => {
+                void handleStartGeneration();
+              }}
             />
-          ) : (
+        <Group className={workbenchBodyClassName} orientation="horizontal">
+          <Panel
+            className={`side-panel-slot side-panel-slot--left${isAssetLibraryCollapsed ? " is-collapsed" : ""}`}
+            collapsible
+            collapsedSize={ASSET_LIBRARY_PANEL_SIZE.collapsed}
+            defaultSize={ASSET_LIBRARY_PANEL_SIZE.default}
+            groupResizeBehavior="preserve-pixel-size"
+            maxSize={ASSET_LIBRARY_PANEL_SIZE.max}
+            minSize={ASSET_LIBRARY_PANEL_SIZE.min}
+            onResize={(size) =>
+              updatePanelCollapsedState(
+                size.inPixels,
+                ASSET_LIBRARY_PANEL_SIZE.collapsed,
+                setIsAssetLibraryCollapsed,
+              )
+            }
+            panelRef={assetLibraryPanelRef}
+          >
             <AssetLibrary
-              people={people}
-              garments={garments}
-              results={resultAssets}
+              people={currentCombinationAssetView.people}
+              garments={currentCombinationAssetView.garments}
+              results={currentCombinationAssetView.results}
               selectedPersonId={selectedPersonId}
               selectedGarmentIds={selectedGarmentIds}
               importingType={importingType}
@@ -738,77 +1966,120 @@ export function WorkflowCanvas() {
                 void handleImport(assetType);
               }}
               onRefresh={handleRefreshAll}
-              onSelectPerson={setSelectedPersonId}
+              onSelectPerson={selectPersonForCurrentCombination}
               onToggleGarment={toggleGarment}
+              onReorder={reorderAssetLibraryItems}
             />
-          )}
-          <main className={`canvas-column${isBottomDashboardCollapsed ? " canvas-column--bottom-collapsed" : ""}`}>
-            <WorkbenchMessages
-              loadingError={loadingError}
-              actionError={actionError}
-              actionMessage={actionMessage}
-            />
-            <FlowWorkbench
-              canRun={canRun}
-              canvasTool={canvasTool}
-              credentialStatus={credentialStatus}
-              currentCombination={currentCombination}
-              latestTask={latestTask}
-              modelSize={modelSize}
-              outputCount={outputCount}
-              promptText={promptText}
-              results={resultAssets}
-              selectedFlowNode={selectedFlowNode}
-              selectedGarments={selectedGarments}
-              selectedPerson={selectedPerson}
-              validationResult={validationResult}
-              resetRevision={canvasResetRevision}
-              zoom={zoom}
-              onCanvasToolChange={setCanvasTool}
-              onNodeSelect={(nodeId) => {
-                setSelectedFlowNode(nodeId);
-                setSidePanelMode("details");
-              }}
-              onRun={() => {
-                void handleStartGeneration();
-              }}
-              onZoomChange={setZoom}
-            />
-            {isBottomDashboardCollapsed ? (
-              <button
-                className="bottom-panel-restore"
-                onClick={() => setIsBottomDashboardCollapsed(false)}
-                type="button"
-                aria-label="展开任务面板"
-              >
-                <ChevronUp size={15} />
-                <span>任务面板</span>
-              </button>
-            ) : (
-              <BottomDashboard
-                currentCombination={currentCombination}
-                latestTask={latestTask}
-                onCollapse={() => setIsBottomDashboardCollapsed(true)}
-              />
-            )}
-          </main>
-          {isInspectorCollapsed ? (
             <PanelRestoreButton
-              label="展开属性面板"
-              side="right"
-              onClick={() => setIsInspectorCollapsed(false)}
+              label="展开资源库"
+              side="left"
+              onClick={() => setIsAssetLibraryCollapsed(false)}
             />
-          ) : (
+          </Panel>
+          <Separator className="layout-resize-handle layout-resize-handle--vertical" />
+          <Panel className="workbench-center-panel" minSize={640}>
+            <main className={`canvas-column${isBottomDashboardCollapsed ? " canvas-column--bottom-collapsed" : ""}`}>
+            <Group className="canvas-panel-group" orientation="vertical">
+              <Panel className="canvas-flow-panel" minSize={260}>
+                <FlowWorkbench
+                  canRun={canRun}
+                  canvasTool={canvasTool}
+                  credentialStatus={credentialStatus}
+                  currentCombination={currentCombination}
+                  isCanvasMaximized={isCanvasMaximized}
+                  latestTask={latestTask}
+                  modelId={effectiveModelId}
+                  modelSize={modelSize}
+                  outputCount={outputCount}
+                  promptSummaryText={promptSummaryText}
+                  results={resultAssets}
+                  selectedFlowNode={selectedFlowNode}
+                  selectedGarments={selectedGarments}
+                  selectedPerson={selectedPerson}
+                  validationResult={validationResult}
+                  resetRevision={canvasResetRevision}
+                  zoom={zoom}
+                  onCanvasToolChange={setCanvasTool}
+                  onCanvasMaximizeToggle={handleToggleCanvasMaximize}
+                  onNodeSelect={(nodeId) => {
+                    setSelectedFlowNode(nodeId);
+                    setSidePanelMode("details");
+                  }}
+                  onRun={() => {
+                    void handleStartGeneration();
+                  }}
+                  onZoomChange={setZoom}
+                />
+              </Panel>
+              <Separator className="layout-resize-handle layout-resize-handle--horizontal">
+                <Button
+                  aria-label={isBottomDashboardCollapsed ? "展开任务面板" : "折叠任务面板"}
+                  className="bottom-panel-resize-toggle"
+                  onClick={() => setIsBottomDashboardCollapsed((collapsed) => !collapsed)}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title={isBottomDashboardCollapsed ? "展开任务面板" : "折叠任务面板"}
+                  type="button"
+                >
+                  {isBottomDashboardCollapsed ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                </Button>
+              </Separator>
+              <Panel
+                className={`bottom-panel-slot${isBottomDashboardCollapsed ? " is-collapsed" : ""}`}
+                collapsible
+                collapsedSize={BOTTOM_DASHBOARD_PANEL_SIZE.collapsed}
+                defaultSize={BOTTOM_DASHBOARD_PANEL_SIZE.default}
+                groupResizeBehavior="preserve-pixel-size"
+                maxSize={BOTTOM_DASHBOARD_PANEL_SIZE.max}
+                minSize={BOTTOM_DASHBOARD_PANEL_SIZE.min}
+                onResize={(size) =>
+                  updatePanelCollapsedState(
+                    size.inPixels,
+                    BOTTOM_DASHBOARD_PANEL_SIZE.collapsed,
+                    setIsBottomDashboardCollapsed,
+                  )
+                }
+                panelRef={bottomDashboardPanelRef}
+              >
+                <BottomDashboard
+                  currentCombination={currentCombination}
+                  latestTask={latestTask}
+                />
+              </Panel>
+            </Group>
+          </main>
+          </Panel>
+          <Separator className="layout-resize-handle layout-resize-handle--vertical" />
+          <Panel
+            className={`side-panel-slot side-panel-slot--right${isInspectorCollapsed ? " is-collapsed" : ""}`}
+            collapsible
+            collapsedSize={INSPECTOR_PANEL_SIZE.collapsed}
+            defaultSize={INSPECTOR_PANEL_SIZE.default}
+            groupResizeBehavior="preserve-pixel-size"
+            maxSize={INSPECTOR_PANEL_SIZE.max}
+            minSize={INSPECTOR_PANEL_SIZE.min}
+            onResize={(size) =>
+              updatePanelCollapsedState(
+                size.inPixels,
+                INSPECTOR_PANEL_SIZE.collapsed,
+                setIsInspectorCollapsed,
+              )
+            }
+            panelRef={inspectorPanelRef}
+          >
             <InspectorPanel
               apiKeyDraft={apiKeyDraft}
               credentialStatus={credentialStatus}
               currentCombination={currentCombination}
               latestTask={latestTask}
               mode={sidePanelMode}
+              modelId={effectiveModelId}
+              modelProvider={selectedProvider}
               modelSize={modelSize}
               outputCount={outputCount}
-              promptText={promptText}
-              recentTasks={recentTasks}
+              promptPresetOptions={promptPresetOptions}
+              promptSummaryText={promptSummaryText}
+              promptTemplates={workbenchPromptTemplates}
+              promptWorkbench={promptWorkbench}
               results={resultAssets}
               selectedFlowNode={selectedFlowNode}
               selectedGarments={selectedGarments}
@@ -822,19 +2093,32 @@ export function WorkflowCanvas() {
               onModelSizeChange={setModelSize}
               onModeChange={setSidePanelMode}
               onOutputCountChange={setOutputCount}
-              onPromptChange={setPromptText}
+              onPromptWorkbenchChange={(nextPromptWorkbench) => {
+                setPromptWorkbench(nextPromptWorkbench);
+                const nextOutputCount = Number(nextPromptWorkbench.variables.outputCount);
+                if (Number.isFinite(nextOutputCount)) {
+                  setOutputCount(normalizeIntegerParam(nextOutputCount, 1, 8, outputCount));
+                }
+              }}
               onSaveApiKey={() => {
                 void handleSaveApiKey();
               }}
-              onSelectNode={setSelectedFlowNode}
-              onTaskChanged={(detail) => {
-                setLatestTask(detail);
-                void refreshTaskLists();
-              }}
             />
-          )}
-        </div>
+            <PanelRestoreButton
+              label="展开属性面板"
+              side="right"
+              onClick={() => setIsInspectorCollapsed(false)}
+            />
+          </Panel>
+        </Group>
+          </>
+        )}
       </div>
+      <WorkbenchMessages
+        loadingError={loadingError}
+        actionError={actionError}
+        actionMessage={actionMessage}
+      />
       {isNewCombinationModalOpen ? (
         <NewCombinationModal
           error={newCombinationError}
@@ -853,6 +2137,41 @@ export function WorkflowCanvas() {
           onFormChange={setNewCombinationForm}
           onImport={(assetType) => {
             void handleImportForNewCombination(assetType);
+          }}
+        />
+      ) : null}
+      {isPromptPresetModalOpen ? (
+        <PromptPresetModal
+          copyPresetId={newPromptPresetCopyId}
+          draft={newPromptPresetDraft}
+          error={newPromptPresetError}
+          isSaving={isSavingPromptPreset}
+          presets={promptPresetOptions}
+          shouldApplyAfterCreate={shouldApplyNewPromptPreset}
+          sourceMode={newPromptPresetSourceMode}
+          templates={workbenchPromptTemplates}
+          onApplyAfterCreateChange={setShouldApplyNewPromptPreset}
+          onCancel={() => {
+            setIsPromptPresetModalOpen(false);
+            setNewPromptPresetError(null);
+          }}
+          onCopyPresetIdChange={(presetId) => {
+            setNewPromptPresetCopyId(presetId);
+            setNewPromptPresetDraft(
+              buildEmptyPromptPresetDraft(findPromptPresetOption(promptPresetOptions, presetId)),
+            );
+          }}
+          onCreate={() => {
+            void handleCreatePromptPreset();
+          }}
+          onDraftChange={setNewPromptPresetDraft}
+          onSourceModeChange={(mode) => {
+            setNewPromptPresetSourceMode(mode);
+            const preset =
+              mode === "copy"
+                ? findPromptPresetOption(promptPresetOptions, newPromptPresetCopyId)
+                : selectedPromptPreset;
+            setNewPromptPresetDraft(buildEmptyPromptPresetDraft(preset));
           }}
         />
       ) : null}
@@ -882,24 +2201,6 @@ function buildCombinationName() {
     minute: "2-digit",
     hour12: false,
   })}`;
-}
-
-function buildNewCombinationForm(
-  override: Partial<NewCombinationForm> = {},
-): NewCombinationForm {
-  return {
-    name: "",
-    code: "",
-    description: "",
-    personAssetId: null,
-    garmentAssetIds: [],
-    promptTemplate: "默认模板（通用）",
-    modelId: "FLUX.1 dev",
-    size: "1024x1536",
-    outputCount: 3,
-    openAfterCreate: true,
-    ...override,
-  };
 }
 
 function normalizeSelectedImagePaths(selected: string | string[] | null): string[] {
@@ -939,41 +2240,57 @@ function buildImportSuccessMessage(totalCount: number, duplicateCount: number) {
   return totalCount > 1 ? `已导入 ${totalCount} 张图片` : "图片导入成功";
 }
 
-function buildPromptBinding(
-  combinationId: string,
-  promptText: string,
-): SavePromptBindingRequest {
-  return {
-    id: null,
-    combinationId,
-    system: {
-      mode: "default",
-      baseTemplateId: null,
-      appendText: "",
-      overrideText: "",
-    },
-    user: {
-      mode: "override",
-      baseTemplateId: null,
-      appendText: "",
-      overrideText: promptText,
-    },
-    negative: {
-      mode: "override",
-      baseTemplateId: null,
-      appendText: "",
-      overrideText: "low quality, distorted body, warped garment, extra limbs, unreadable text",
-    },
-    variablesJson: {},
-  };
-}
-
 function upsertAsset(items: AssetFileView[], asset: AssetFileView) {
   return [asset, ...items.filter((item) => item.asset.id !== asset.asset.id)];
 }
 
 function upsertAssets(items: AssetFileView[], assets: AssetFileView[]) {
   return assets.reduceRight((nextItems, asset) => upsertAsset(nextItems, asset), items);
+}
+
+function getAssetOrderStorage() {
+  return typeof window === "undefined" ? null : window.localStorage;
+}
+
+function readStoredModelConfigId() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const value = window.localStorage.getItem(MODEL_CONFIG_STORAGE_KEY);
+  return value?.trim() || null;
+}
+
+function storeModelConfigId(id: string) {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(MODEL_CONFIG_STORAGE_KEY, id);
+  }
+}
+
+function normalizeModelSize(value: unknown): (typeof MODEL_SIZES)[number] {
+  return MODEL_SIZES.includes(value as (typeof MODEL_SIZES)[number])
+    ? (value as (typeof MODEL_SIZES)[number])
+    : "1024x1024";
+}
+
+function normalizeIntegerParam(value: unknown, min: number, max: number, fallback: number) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(numericValue)));
+}
+
+function normalizeStringParam(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function applySavedAssetOrder(assetType: SortableAssetType, items: AssetFileView[]) {
+  return applyStoredAssetOrder(items, readAssetLibraryOrder(getAssetOrderStorage(), assetType));
+}
+
+function saveOrderedAssets(assetType: SortableAssetType, items: AssetFileView[]) {
+  saveAssetLibraryOrder(getAssetOrderStorage(), assetType, assetIds(items));
+  return items;
 }
 
 function upsertCombinationSummary(
@@ -1005,7 +2322,44 @@ function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAs
 }
 
 function assetThumbSrc(asset: AssetFileView) {
-  return asset.thumbDataUrl || convertFileSrc(asset.thumbFilePath);
+  return buildAssetImageSources(asset, convertFileSrc).thumbSrc;
+}
+
+function assetCanvasSources(asset: AssetFileView) {
+  return buildAssetImageSources(asset, convertFileSrc);
+}
+
+function AssetCanvasImage({
+  alt,
+  asset,
+  className,
+}: {
+  alt: string;
+  asset: AssetFileView;
+  className?: string;
+}) {
+  const sources = useMemo(
+    () => assetCanvasSources(asset),
+    [asset.filePath, asset.thumbDataUrl, asset.thumbFilePath],
+  );
+  const [src, setSrc] = useState(sources.canvasPrimarySrc);
+
+  useEffect(() => {
+    setSrc(sources.canvasPrimarySrc);
+  }, [sources.canvasPrimarySrc]);
+
+  return (
+    <img
+      alt={alt}
+      className={className}
+      src={src}
+      onError={() => {
+        if (sources.canvasFallbackSrc && src !== sources.canvasFallbackSrc) {
+          setSrc(sources.canvasFallbackSrc);
+        }
+      }}
+    />
+  );
 }
 
 function getImageDialogTitle(assetType: Extract<AssetType, "person" | "garment">) {
@@ -1042,8 +2396,7 @@ function TopToolbar({
   onHistory,
   onModelSettings,
   onNew,
-  onPromptTemplate,
-  onRefresh,
+  onPromptPresetCenter,
   onSelectCombination,
   onSave,
   onRun,
@@ -1057,8 +2410,7 @@ function TopToolbar({
   onHistory: () => void;
   onModelSettings: () => void;
   onNew: () => void;
-  onPromptTemplate: () => void;
-  onRefresh: () => void;
+  onPromptPresetCenter: () => void;
   onSelectCombination: (combinationId: string) => void;
   onSave: () => void;
   onRun: () => void;
@@ -1067,26 +2419,28 @@ function TopToolbar({
     <nav className="top-toolbar" aria-label="工作台工具栏">
       <label className="combo-select">
         <span>当前组合：</span>
-        <select
-          aria-label="切换组合"
+        <Select
           disabled={combinationSummaries.length === 0}
           value={currentCombinationId}
-          onChange={(event) => onSelectCombination(event.target.value)}
+          onValueChange={onSelectCombination}
         >
-          {currentCombinationId ? null : <option value="">{combinationName}</option>}
-          {combinationSummaries.map((combination) => (
-            <option key={combination.id} value={combination.id}>
-              {combination.name}
-            </option>
-          ))}
-        </select>
-        <ChevronDown size={16} />
+          <SelectTrigger aria-label="切换组合" className="combo-select__trigger">
+            <SelectValue placeholder={combinationName} />
+          </SelectTrigger>
+          <SelectContent>
+            {combinationSummaries.map((combination) => (
+              <SelectItem key={combination.id} value={combination.id}>
+                {combination.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </label>
       <div className="toolbar-actions">
-        <button className="primary-action" onClick={onNew} type="button">
+        <Button className="primary-action" onClick={onNew} type="button">
           <Plus size={18} />
           新建组合
-        </button>
+        </Button>
         <ToolbarButton
           icon={<Save size={16} />}
           label={isSaving ? "保存中" : "保存"}
@@ -1094,24 +2448,29 @@ function TopToolbar({
           disabled={isSaving}
         />
         <ToolbarButton icon={<FolderOpen size={16} />} label="打开历史" onClick={onHistory} />
-        <ToolbarButton icon={<Settings size={16} />} label="模型设置" onClick={onModelSettings} />
-        <ToolbarButton icon={<Copy size={16} />} label="应用默认 Prompt" onClick={onPromptTemplate} />
-        <ToolbarButton icon={<SlidersHorizontal size={16} />} label="刷新工作区" onClick={onRefresh} />
       </div>
       <div className="toolbar-spacer" />
-      <button className="icon-button is-muted" disabled type="button" aria-label="撤销">
-        <RotateCcw size={18} />
-      </button>
-      <button className="icon-button" onClick={onRefresh} type="button" aria-label="刷新">
-        <RefreshCw size={18} />
-      </button>
-      <button className="run-button" disabled={!canRun} onClick={onRun} type="button">
+      <Button
+        className="toolbar-button toolbar-button--compact"
+        onClick={onPromptPresetCenter}
+        type="button"
+      >
+        <SlidersHorizontal size={16} />
+        方案中心
+      </Button>
+      <Button className="run-button" disabled={!canRun} onClick={onRun} type="button">
         <Play size={17} fill="currentColor" />
         {isStarting ? "提交中" : "执行生成"}
-      </button>
-      <span className="avatar" aria-label="当前用户">
-        <UserRound size={18} />
-      </span>
+      </Button>
+      <Button
+        className="settings-entry-button"
+        onClick={onModelSettings}
+        title="设置"
+        type="button"
+        aria-label="设置"
+      >
+        <Settings size={18} />
+      </Button>
     </nav>
   );
 }
@@ -1128,10 +2487,2711 @@ function ToolbarButton({
   onClick?: () => void;
 }) {
   return (
-    <button className="toolbar-button" disabled={disabled} onClick={onClick} type="button">
+    <Button className="toolbar-button" disabled={disabled} onClick={onClick} variant="default">
       {icon}
       {label}
-    </button>
+    </Button>
+  );
+}
+
+function ModelSettingsCenter({
+  actionError,
+  apiKeyDraft,
+  autoSaveResult,
+  concurrency,
+  credentialStatus,
+  customBaseUrl,
+  customModelId,
+  imageFormat,
+  isCustomEndpointEnabled,
+  isSaving,
+  isTesting,
+  modelDefinitions,
+  modelSize,
+  outputCount,
+  seed,
+  selectedModelId,
+  selectedProvider,
+  timeoutSeconds,
+  onApiKeyDraftChange,
+  onAutoSaveResultChange,
+  onBack,
+  onConcurrencyChange,
+  onCustomBaseUrlChange,
+  onCustomEndpointEnabledChange,
+  onCustomModelIdChange,
+  onImageFormatChange,
+  onModelSizeChange,
+  onNotifyError,
+  onNotifyMessage,
+  onOutputCountChange,
+  onPromptTemplatesChange,
+  onProviderChange,
+  onReset,
+  onSave,
+  onSeedChange,
+  onSelectedModelIdChange,
+  onTest,
+  onTimeoutSecondsChange,
+}: {
+  actionError: string | null;
+  apiKeyDraft: string;
+  autoSaveResult: boolean;
+  concurrency: number;
+  credentialStatus: ProviderCredentialStatus | null;
+  customBaseUrl: string;
+  customModelId: string;
+  imageFormat: string;
+  isCustomEndpointEnabled: boolean;
+  isSaving: boolean;
+  isTesting: boolean;
+  modelDefinitions: ModelDefinition[];
+  modelSize: (typeof MODEL_SIZES)[number];
+  outputCount: number;
+  seed: number;
+  selectedModelId: string;
+  selectedProvider: ProviderId;
+  timeoutSeconds: number;
+  onApiKeyDraftChange: (value: string) => void;
+  onAutoSaveResultChange: (value: boolean) => void;
+  onBack: () => void;
+  onConcurrencyChange: (value: number) => void;
+  onCustomBaseUrlChange: (value: string) => void;
+  onCustomEndpointEnabledChange: (value: boolean) => void;
+  onCustomModelIdChange: (value: string) => void;
+  onImageFormatChange: (value: string) => void;
+  onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
+  onNotifyError: (message: string) => void;
+  onNotifyMessage: (message: string) => void;
+  onOutputCountChange: (value: number) => void;
+  onPromptTemplatesChange: (templates: PromptTemplate[]) => void;
+  onProviderChange: (provider: ProviderId) => void;
+  onReset: () => void;
+  onSave: () => void;
+  onSeedChange: (value: number) => void;
+  onSelectedModelIdChange: (value: string) => void;
+  onTest: () => void;
+  onTimeoutSecondsChange: (value: number) => void;
+}) {
+  const selectedProviderOption =
+    PROVIDER_OPTIONS.find((provider) => provider.id === selectedProvider) ?? PROVIDER_OPTIONS[0];
+  const providerDefinitions = modelDefinitions.filter(
+    (definition) => definition.provider === selectedProvider,
+  );
+  const modelRows =
+    selectedProvider === CUSTOM_PROVIDER
+      ? [buildCustomModelDefinition(customModelId, customBaseUrl)]
+      : providerDefinitions.length
+        ? providerDefinitions
+        : [buildFallbackModelDefinition(selectedProvider)];
+  const selectedDefinition =
+    modelRows.find((definition) =>
+      selectedProvider === CUSTOM_PROVIDER
+        ? definition.modelId === (customModelId.trim() || DEFAULT_CUSTOM_MODEL_ID)
+        : definition.modelId === selectedModelId,
+    ) ?? modelRows[0];
+  const effectiveModelId =
+    selectedProvider === CUSTOM_PROVIDER
+      ? customModelId.trim() || DEFAULT_CUSTOM_MODEL_ID
+      : selectedModelId;
+  const endpointInputEnabled = selectedProvider === CUSTOM_PROVIDER || isCustomEndpointEnabled;
+  const endpointLabel =
+    endpointInputEnabled
+      ? customBaseUrl.trim() || "待填写自定义接入点"
+      : selectedDefinition.providerBaseUrl ?? getDefaultProviderBaseUrl(selectedProvider);
+  const outputMin = selectedDefinition.output.minCount;
+  const outputMax = selectedDefinition.output.maxCount;
+  const configured = credentialStatus?.configured === true;
+  const lastTestSuccess = !actionError && credentialStatus?.configured === true;
+  const [activeSettingsPage, setActiveSettingsPage] = useState<SettingsPage>("model");
+  const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [promptTemplateType, setPromptTemplateType] = useState<PromptTemplateType>("system");
+  const [promptSearch, setPromptSearch] = useState("");
+  const [selectedPromptTemplateId, setSelectedPromptTemplateId] = useState<string | null>(null);
+  const [promptDraft, setPromptDraft] = useState<PromptTemplateDraft>(() =>
+    buildEmptyPromptTemplateDraft("system"),
+  );
+  const [newPromptDraft, setNewPromptDraft] = useState<PromptTemplateDraft>(() =>
+    buildEmptyPromptTemplateDraft("system"),
+  );
+  const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [isPromptLoading, setIsPromptLoading] = useState(false);
+  const [promptTemplateError, setPromptTemplateError] = useState<string | null>(null);
+  const selectedPromptTemplate =
+    promptTemplates.find((template) => template.id === selectedPromptTemplateId) ?? null;
+  const isPromptTemplateReadOnly =
+    selectedPromptTemplate?.source === "built_in" || selectedPromptTemplate?.locked === true;
+  const filteredPromptTemplates = useMemo(
+    () =>
+      promptTemplates.filter((template) => {
+        const matchesType = template.templateType === promptTemplateType;
+        const query = promptSearch.trim().toLowerCase();
+        const matchesSearch =
+          !query ||
+          getPromptTemplateDisplayName(template).toLowerCase().includes(query) ||
+          template.description.toLowerCase().includes(query);
+        return matchesType && matchesSearch;
+      }),
+    [promptSearch, promptTemplateType, promptTemplates],
+  );
+  const promptPreview = useMemo(
+    () =>
+      renderPromptTemplatePreview(
+        promptDraft.body,
+        buildPreviewValues(syncPromptTemplateDraftVariables(promptDraft).variables),
+      ),
+    [promptDraft],
+  );
+  const promptValidation = useMemo(
+    () => validatePromptTemplateDraft(syncPromptTemplateDraftVariables(promptDraft)),
+    [promptDraft],
+  );
+  const isPromptTemplateDirty = useMemo(() => {
+    if (!selectedPromptTemplate) {
+      return false;
+    }
+    return !arePromptTemplateDraftsEqual(
+      promptDraft,
+      buildPromptTemplateDraft(selectedPromptTemplate),
+    );
+  }, [promptDraft, selectedPromptTemplate]);
+  const canSavePromptTemplate =
+    !isPromptLoading &&
+    !isPromptTemplateReadOnly &&
+    Boolean(selectedPromptTemplate) &&
+    isPromptTemplateDirty;
+
+  useEffect(() => {
+    if (activeSettingsPage !== "prompt" || promptTemplates.length > 0) {
+      return;
+    }
+    void loadPromptTemplates();
+  }, [activeSettingsPage, promptTemplates.length]);
+
+  function applyPromptTemplates(nextTemplates: PromptTemplate[], preferredId?: string | null) {
+    const normalizedTemplates = (nextTemplates.length ? nextTemplates : buildFallbackPromptTemplates()).map(
+      syncPromptTemplateVariablesForTemplate,
+    );
+    setPromptTemplates(normalizedTemplates);
+    onPromptTemplatesChange(normalizedTemplates);
+    const preferred = preferredId
+      ? normalizedTemplates.find((template) => template.id === preferredId)
+      : null;
+    const nextSelected =
+      preferred ??
+      normalizedTemplates.find((template) => template.templateType === promptTemplateType) ??
+      normalizedTemplates[0];
+    if (nextSelected) {
+      selectPromptTemplate(nextSelected, false);
+    }
+  }
+
+  async function loadPromptTemplates() {
+    setIsPromptLoading(true);
+    setPromptTemplateError(null);
+    try {
+      const templates = isTauriRuntime()
+        ? await listPromptTemplates()
+        : buildFallbackPromptTemplates();
+      applyPromptTemplates(templates, selectedPromptTemplateId);
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "加载 Prompt 模板失败");
+      applyPromptTemplates(buildFallbackPromptTemplates(), selectedPromptTemplateId);
+    } finally {
+      setIsPromptLoading(false);
+    }
+  }
+
+  function selectPromptTemplate(template: PromptTemplate, syncType = true) {
+    setSelectedPromptTemplateId(template.id);
+    setPromptTemplateError(null);
+    if (syncType) {
+      setPromptTemplateType(template.templateType);
+    }
+    const draft = buildPromptTemplateDraft(template);
+    setPromptDraft(draft);
+  }
+
+  function changePromptTemplateType(type: PromptTemplateType) {
+    setPromptTemplateType(type);
+    const nextSelected = promptTemplates.find((template) => template.templateType === type);
+    if (nextSelected) {
+      selectPromptTemplate(nextSelected, false);
+    } else {
+      setPromptDraft(buildEmptyPromptTemplateDraft(type));
+      setSelectedPromptTemplateId(null);
+    }
+  }
+
+  async function handleSavePromptTemplate() {
+    if (!canSavePromptTemplate) {
+      return;
+    }
+    if (selectedPromptTemplate?.source === "built_in" || selectedPromptTemplate?.locked) {
+      setPromptTemplateError("内置或锁定模板不能编辑，请新建自定义模板");
+      return;
+    }
+    const nextDraft = syncPromptTemplateDraftVariables(promptDraft);
+    const error = validatePromptTemplateDraft(nextDraft);
+    if (error) {
+      setPromptTemplateError(error);
+      return;
+    }
+    setIsPromptLoading(true);
+    setPromptTemplateError(null);
+    try {
+      const saved = isTauriRuntime()
+        ? await savePromptTemplate(nextDraft)
+        : buildLocalPromptTemplate(nextDraft);
+      const nextTemplates = upsertPromptTemplate(promptTemplates, saved);
+      setPromptTemplates(nextTemplates);
+      onPromptTemplatesChange(nextTemplates);
+      selectPromptTemplate(saved);
+      onNotifyMessage("Prompt 模板已保存");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "保存 Prompt 模板失败");
+    } finally {
+      setIsPromptLoading(false);
+    }
+  }
+
+  async function handleCreatePromptTemplate() {
+    const nextDraft = syncPromptTemplateDraftVariables(newPromptDraft);
+    const error = validatePromptTemplateCreateDraft(nextDraft);
+    if (error) {
+      setPromptTemplateError(error);
+      return;
+    }
+    setIsPromptLoading(true);
+    setPromptTemplateError(null);
+    try {
+      const saved = isTauriRuntime()
+        ? await savePromptTemplate({ ...nextDraft, id: null })
+        : buildLocalPromptTemplate({ ...nextDraft, id: null });
+      const nextTemplates = upsertPromptTemplate(promptTemplates, saved);
+      setPromptTemplates(nextTemplates);
+      onPromptTemplatesChange(nextTemplates);
+      setIsNewPromptModalOpen(false);
+      selectPromptTemplate(saved);
+      onNotifyMessage("Prompt 模板已新建");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "新建 Prompt 模板失败");
+    } finally {
+      setIsPromptLoading(false);
+    }
+  }
+
+  async function handleRestorePromptTemplates() {
+    setIsPromptLoading(true);
+    setPromptTemplateError(null);
+    try {
+      const templates = isTauriRuntime()
+        ? await restoreDefaultPromptTemplates()
+        : buildFallbackPromptTemplates();
+      applyPromptTemplates(templates, selectedPromptTemplateId);
+      onNotifyMessage("默认 Prompt 模板已恢复");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "恢复默认模板失败");
+    } finally {
+      setIsPromptLoading(false);
+    }
+  }
+
+  async function handleDeletePromptTemplate(template: PromptTemplate) {
+    if (template.source === "built_in" || template.locked) {
+      setPromptTemplateError("内置或锁定模板不能删除");
+      return;
+    }
+    setIsPromptLoading(true);
+    setPromptTemplateError(null);
+    try {
+      if (isTauriRuntime()) {
+        await deletePromptTemplate(template.id);
+      }
+      const nextTemplates = promptTemplates.filter((item) => item.id !== template.id);
+      applyPromptTemplates(nextTemplates, null);
+      onNotifyMessage("Prompt 模板已删除");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "删除 Prompt 模板失败");
+    } finally {
+      setIsPromptLoading(false);
+    }
+  }
+
+  function openNewPromptTemplateModal() {
+    setPromptTemplateError(null);
+    setNewPromptDraft(buildEmptyPromptTemplateDraft(promptTemplateType));
+    setIsNewPromptModalOpen(true);
+  }
+
+  function selectModel(modelId: string) {
+    const nextDefinition =
+      modelRows.find((definition) => definition.modelId === modelId) ?? selectedDefinition;
+    onSelectedModelIdChange(modelId);
+    onOutputCountChange(
+      normalizeIntegerParam(
+        outputCount,
+        nextDefinition.output.minCount,
+        nextDefinition.output.maxCount,
+        nextDefinition.output.minCount,
+      ),
+    );
+  }
+
+  return (
+    <section className="settings-center">
+      <header className="settings-center__header">
+        <Button className="settings-back-button" onClick={onBack} type="button" variant="default">
+          <ChevronLeft size={16} />
+          返回工作台
+        </Button>
+        <div className="settings-header-actions">
+          {activeSettingsPage === "prompt" ? (
+            <>
+              <Button
+                className="settings-header-action settings-header-action--create"
+                onClick={openNewPromptTemplateModal}
+                type="button"
+              >
+                <Plus size={16} />
+                新建模板
+              </Button>
+              <Button
+                className={`settings-header-action settings-header-action--save${
+                  isPromptTemplateDirty ? " is-dirty" : ""
+                }`}
+                disabled={!canSavePromptTemplate}
+                onClick={() => void handleSavePromptTemplate()}
+                title={canSavePromptTemplate ? "保存当前模板修改" : "当前模板无可保存修改"}
+                type="button"
+              >
+                <Save size={16} />
+                {isPromptLoading ? "保存中" : "保存模板"}
+              </Button>
+              <Button
+                className="settings-header-action settings-header-action--restore"
+                disabled={isPromptLoading}
+                onClick={() => void handleRestorePromptTemplates()}
+                type="button"
+              >
+                <RotateCcw size={16} />
+                恢复默认
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button disabled={isSaving} onClick={onSave} type="button">
+                <Save size={16} />
+                {isSaving ? "保存中" : "保存设置"}
+              </Button>
+              <Button disabled={isTesting} onClick={onTest} type="button">
+                <Wrench size={16} />
+                {isTesting ? "检查中" : "测试连接"}
+              </Button>
+              <Button onClick={onReset} type="button">
+                <RotateCcw size={16} />
+                恢复默认
+              </Button>
+            </>
+          )}
+        </div>
+      </header>
+      <div className="settings-center__body">
+        <aside className="settings-sidebar">
+          <h2>设置中心</h2>
+          <Button
+            className={activeSettingsPage === "model" ? "is-active" : ""}
+            onClick={() => setActiveSettingsPage("model")}
+            type="button"
+          >
+            <KeyRound size={18} />
+            模型与 API Key
+          </Button>
+          <Button
+            className={activeSettingsPage === "prompt" ? "is-active" : ""}
+            onClick={() => setActiveSettingsPage("prompt")}
+            type="button"
+          >
+            <FileText size={18} />
+            Prompt 模板配置
+          </Button>
+          <Button disabled type="button">
+            <BriefcaseBusiness size={18} />
+            工作区设置
+          </Button>
+          <Button disabled type="button">
+            <SlidersHorizontal size={18} />
+            高级设置
+          </Button>
+        </aside>
+        {activeSettingsPage === "prompt" ? (
+          <PromptTemplateSettingsPage
+            draft={promptDraft}
+            error={promptTemplateError}
+            filteredTemplates={filteredPromptTemplates}
+            isLoading={isPromptLoading}
+            isReadOnly={isPromptTemplateReadOnly}
+            preview={promptPreview}
+            search={promptSearch}
+            selectedTemplate={selectedPromptTemplate}
+            selectedType={promptTemplateType}
+            validation={promptValidation}
+            onChangeDraft={setPromptDraft}
+            onChangeSearch={setPromptSearch}
+            onChangeType={changePromptTemplateType}
+            onDeleteTemplate={(template) => void handleDeletePromptTemplate(template)}
+            onSelectTemplate={selectPromptTemplate}
+          />
+        ) : (
+          <>
+            <main className="settings-main">
+          <div className="settings-top-grid">
+            <section className="settings-card provider-card">
+              <h3>A. Provider 列表</h3>
+              <div className="provider-list">
+                {DEFAULT_VISIBLE_PROVIDER_OPTIONS.map((provider) => (
+                  <Button
+                    className={provider.id === selectedProvider ? "is-active" : ""}
+                    disabled={!provider.enabled}
+                    key={provider.id}
+                    title={provider.enabled ? provider.label : "后端暂未接入该 Provider"}
+                    onClick={() => onProviderChange(provider.id)}
+                    type="button"
+                  >
+                    <span>{provider.icon}</span>
+                    {provider.label}
+                    {provider.id === selectedProvider ? <CircleCheck size={16} /> : null}
+                  </Button>
+                ))}
+              </div>
+            </section>
+            <section className="settings-card api-status-card">
+              <div className="settings-card__title-row">
+                <h3>B. API Key 状态</h3>
+                <span className="local-secret-note">
+                  <ShieldCheck size={15} />
+                  密钥仅存储在本地设备
+                </span>
+              </div>
+              <div className="api-status-line">
+                <span className={`settings-status-badge ${configured ? "is-enabled" : ""}`}>
+                  {configured ? "已启用" : "未启用"}
+                </span>
+                <strong>{selectedProviderOption.label} API Key {configured ? "已生效" : "待配置"}</strong>
+              </div>
+              <div className="settings-api-input">
+                <Input
+                  value={apiKeyDraft}
+                  onChange={(event) => onApiKeyDraftChange(event.target.value)}
+                  placeholder={credentialStatus?.maskedKey ?? `输入 ${selectedProviderOption.label} API Key`}
+                  type="password"
+                />
+                <Button aria-label="API Key 保存在系统密钥库" disabled type="button">
+                  <ShieldCheck size={17} />
+                </Button>
+              </div>
+              <p>输入您的 {selectedProviderOption.label} API Key，启用后可保存并校验该 Provider 的模型配置。</p>
+              <div className="endpoint-box">
+                <label>
+                  API 接入点
+                  {endpointInputEnabled ? (
+                    <Input
+                      value={customBaseUrl}
+                      onChange={(event) => onCustomBaseUrlChange(event.target.value)}
+                      placeholder="https://your-provider.example/v1"
+                    />
+                  ) : (
+                    <Select value="official" disabled>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="official">官方默认（{endpointLabel}）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                </label>
+                <Button
+                  onClick={() =>
+                    onCustomEndpointEnabledChange(
+                      selectedProvider === CUSTOM_PROVIDER ? true : !isCustomEndpointEnabled,
+                    )
+                  }
+                  type="button"
+                >
+                  {endpointInputEnabled && selectedProvider !== CUSTOM_PROVIDER
+                    ? "使用官方默认"
+                    : "自定义接入点"}
+                  <ChevronRight size={14} />
+                </Button>
+                <small>
+                  {endpointInputEnabled
+                    ? "请手动输入 API 接入点，保存后会写入当前模型配置。"
+                    : `${selectedProviderOption.label} 使用默认接入点：${endpointLabel}`}
+                </small>
+              </div>
+              <div className="settings-card-actions">
+                <Button className="settings-primary-button" disabled={isSaving} onClick={onSave} type="button">
+                  <Save size={16} />
+                  保存
+                </Button>
+                <Button disabled={isTesting} onClick={onTest} type="button">
+                  <Wrench size={16} />
+                  测试连接
+                </Button>
+              </div>
+            </section>
+          </div>
+          <div className="settings-bottom-grid">
+            <section className="settings-card model-list-card">
+              <h3>C. 模型列表（{selectedProviderOption.label}）</h3>
+              <div className="model-table">
+                <div className="model-table__head">
+                  <span>模型名称</span>
+                  <span>能力</span>
+                  <span>状态</span>
+                  <span>默认模型</span>
+                </div>
+                {modelRows.map((definition) => (
+                  <Button
+                    className={definition.modelId === effectiveModelId ? "is-active" : ""}
+                    key={definition.modelId}
+                    onClick={() => selectModel(definition.modelId)}
+                    type="button"
+                  >
+                    <span>
+                      <strong>{definition.modelId}</strong>
+                      {definition.modelId === DEFAULT_MODEL_ID ? <em>推荐</em> : null}
+                      {definition.advanced ? <em className="is-experimental">高级</em> : null}
+                    </span>
+                    <span>{getModelCapabilityText(definition)}</span>
+                    <span className="model-available">
+                      <CircleCheck size={13} />
+                      可用
+                    </span>
+                    <span className="model-radio">
+                      <i />
+                    </span>
+                  </Button>
+                ))}
+              </div>
+              <p className="settings-tip">
+                <CircleAlert size={15} />
+                不同模型的服装数量与生成数量上限不同，保存前会按后端模型定义校验。
+              </p>
+            </section>
+            <div className="settings-right-stack">
+              <section className="settings-card default-model-card">
+                <h3>D. 默认模型</h3>
+                <label>
+                  当前默认模型
+                  {selectedProvider === CUSTOM_PROVIDER ? (
+                    <Input
+                      value={customModelId}
+                      onChange={(event) => onCustomModelIdChange(event.target.value)}
+                      placeholder={DEFAULT_CUSTOM_MODEL_ID}
+                    />
+                  ) : (
+                    <Select
+                      value={selectedModelId}
+                      onValueChange={selectModel}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {modelRows.map((definition) => (
+                          <SelectItem key={definition.modelId} value={definition.modelId}>
+                            {definition.modelId}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </label>
+                <p>作为工作区中生成任务的默认使用模型，保存后写入本地模型配置。</p>
+              </section>
+              <section className="settings-card param-card">
+                <h3>E. 参数预设</h3>
+                <div className="param-grid">
+                  <label>
+                    画布尺寸
+                    <Select
+                      value={modelSize}
+                      onValueChange={(value) =>
+                        onModelSizeChange(value as (typeof MODEL_SIZES)[number])
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MODEL_SIZES.map((size) => (
+                          <SelectItem key={size} value={size}>
+                            {size}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </label>
+                  <label>
+                    图片格式
+                    <Select
+                      value={imageFormat}
+                      onValueChange={onImageFormatChange}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="PNG">PNG</SelectItem>
+                        <SelectItem value="JPEG">JPEG</SelectItem>
+                        <SelectItem value="WEBP">WEBP</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
+                  <label>
+                    生成数量
+                    <span className="number-stepper">
+                      <Button
+                        disabled={outputCount <= outputMin}
+                        onClick={() => onOutputCountChange(Math.max(outputMin, outputCount - 1))}
+                        type="button"
+                      >
+                        <Minus size={14} />
+                      </Button>
+                      <Input
+                        max={outputMax}
+                        min={outputMin}
+                        type="number"
+                        value={outputCount}
+                        onChange={(event) =>
+                          onOutputCountChange(
+                            normalizeIntegerParam(
+                              event.target.value,
+                              outputMin,
+                              outputMax,
+                              outputMin,
+                            ),
+                          )
+                        }
+                      />
+                      <Button
+                        disabled={outputCount >= outputMax}
+                        onClick={() => onOutputCountChange(Math.min(outputMax, outputCount + 1))}
+                        type="button"
+                      >
+                        <Plus size={14} />
+                      </Button>
+                    </span>
+                  </label>
+                  <label>
+                    超时时间（秒）
+                    <Input
+                      min={30}
+                      max={600}
+                      type="number"
+                      value={timeoutSeconds}
+                      onChange={(event) =>
+                        onTimeoutSecondsChange(
+                          normalizeIntegerParam(event.target.value, 30, 600, DEFAULT_TIMEOUT_SECONDS),
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    Seed（-1 随机）
+                    <Input
+                      min={-1}
+                      max={999999}
+                      type="number"
+                      value={seed}
+                      onChange={(event) =>
+                        onSeedChange(normalizeIntegerParam(event.target.value, -1, 999999, DEFAULT_SEED))
+                      }
+                    />
+                  </label>
+                  <label>
+                    并发请求数
+                    <Input
+                      min={1}
+                      max={5}
+                      type="number"
+                      value={concurrency}
+                      onChange={(event) =>
+                        onConcurrencyChange(
+                          normalizeIntegerParam(event.target.value, 1, 5, DEFAULT_CONCURRENCY),
+                        )
+                      }
+                    />
+                    <small>1-5，数值越大越快</small>
+                  </label>
+                </div>
+                <label className="settings-switch">
+                  <Switch
+                    checked={autoSaveResult}
+                    onCheckedChange={(checked) => onAutoSaveResultChange(checked === true)}
+                  />
+                  生成完成后自动保存到结果库
+                </label>
+              </section>
+            </div>
+          </div>
+        </main>
+        <aside className="settings-summary">
+          <h2>当前配置摘要</h2>
+          <div className="summary-block">
+            <span>Provider</span>
+            <strong>
+              <span className="summary-provider-icon">{selectedProviderOption.icon}</span>
+              {selectedProviderOption.label}
+            </strong>
+          </div>
+          <div className="summary-block">
+            <span>默认模型</span>
+            <strong>
+              {effectiveModelId}
+              {effectiveModelId === DEFAULT_MODEL_ID ? <em>默认</em> : null}
+            </strong>
+          </div>
+          <div className="summary-block">
+            <span>接入点</span>
+            <strong>
+              <CircleCheck size={15} />
+              {endpointInputEnabled ? "自定义" : "官方默认"}
+            </strong>
+            <small>{endpointLabel}</small>
+          </div>
+          <div className="summary-block">
+            <span>API Key 状态</span>
+            <strong>
+              <span className={`settings-status-badge ${configured ? "is-enabled" : ""}`}>
+                {configured ? "已启用" : "未启用"}
+              </span>
+            </strong>
+          </div>
+          <div className="summary-block">
+            <span>最后测试结果</span>
+            <strong>
+              {lastTestSuccess ? <CircleCheck size={15} /> : <Clock3 size={15} />}
+              {lastTestSuccess ? "连接成功" : "--"}
+            </strong>
+          </div>
+          <div className="summary-block">
+            <span>区域/端点</span>
+            <strong>{endpointLabel}</strong>
+          </div>
+          <div className="summary-block">
+            <span>备注</span>
+            <strong>--</strong>
+          </div>
+          <Button onClick={onTest} disabled={isTesting} type="button">
+            <RefreshCw size={16} />
+            刷新摘要
+          </Button>
+            </aside>
+          </>
+        )}
+        {isNewPromptModalOpen ? (
+          <PromptTemplateCreateModal
+            draft={newPromptDraft}
+            isSaving={isPromptLoading}
+            onCancel={() => setIsNewPromptModalOpen(false)}
+            onChange={setNewPromptDraft}
+            onSave={() => void handleCreatePromptTemplate()}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function PromptTemplateSettingsPage({
+  draft,
+  error,
+  filteredTemplates,
+  isLoading,
+  isReadOnly,
+  preview,
+  search,
+  selectedTemplate,
+  selectedType,
+  validation,
+  onChangeDraft,
+  onChangeSearch,
+  onChangeType,
+  onDeleteTemplate,
+  onSelectTemplate,
+}: {
+  draft: PromptTemplateDraft;
+  error: string | null;
+  filteredTemplates: PromptTemplate[];
+  isLoading: boolean;
+  isReadOnly: boolean;
+  preview: string;
+  search: string;
+  selectedTemplate: PromptTemplate | null;
+  selectedType: PromptTemplateType;
+  validation: string | null;
+  onChangeDraft: (draft: PromptTemplateDraft) => void;
+  onChangeSearch: (value: string) => void;
+  onChangeType: (type: PromptTemplateType) => void;
+  onDeleteTemplate: (template: PromptTemplate) => void;
+  onSelectTemplate: (template: PromptTemplate) => void;
+}) {
+  const syncedDraft = syncPromptTemplateDraftVariables(draft);
+
+  return (
+    <main className="settings-main prompt-template-main">
+      <div className="prompt-template-layout">
+        <section className="settings-card prompt-template-list-card">
+          <h3>模板列表</h3>
+          <div className="prompt-type-tabs">
+            {PROMPT_TEMPLATE_TYPES.map((type) => (
+              <Button
+                className={selectedType === type ? "is-active" : ""}
+                key={type}
+                onClick={() => onChangeType(type)}
+                type="button"
+              >
+                {getPromptTemplateTypeLabel(type)}
+              </Button>
+            ))}
+          </div>
+          <div className="prompt-search-row">
+            <label>
+              <Search size={15} />
+              <Input
+                className="prompt-search-input"
+                value={search}
+                onChange={(event) => onChangeSearch(event.target.value)}
+                placeholder="搜索模板名称"
+              />
+            </label>
+            <Button className="prompt-search-filter-button" title="筛选" type="button">
+              <Filter size={16} />
+            </Button>
+          </div>
+          <div className="prompt-template-table">
+            <div className="prompt-template-table__head">
+              <span />
+              <span>模板名称</span>
+              <span>类型</span>
+              <span>来源</span>
+            </div>
+            {filteredTemplates.map((template) => (
+              <Button
+                className={template.id === selectedTemplate?.id ? "is-active" : ""}
+                key={template.id}
+                onClick={() => onSelectTemplate(template)}
+                type="button"
+              >
+                <span className="prompt-template-radio">
+                  <i />
+                </span>
+                <strong>{getPromptTemplateDisplayName(template)}</strong>
+                <span>{getPromptTemplateTypeLabel(template.templateType)}</span>
+                <span>{getPromptTemplateSourceLabel(template.source)}</span>
+              </Button>
+            ))}
+            {filteredTemplates.length === 0 ? (
+              <div className="prompt-template-empty">暂无匹配模板</div>
+            ) : null}
+          </div>
+          <div className="prompt-template-count">共 {filteredTemplates.length} 条</div>
+        </section>
+        <div className="prompt-template-editor-stack">
+          <section className="settings-card prompt-template-editor-card">
+            <div className="settings-card__title-row">
+              <h3>模板编辑</h3>
+              {isLoading ? <span className="settings-status-badge">处理中</span> : null}
+            </div>
+            {error ? <p className="prompt-template-error">{error}</p> : null}
+            <div className="prompt-editor-form-grid">
+              <label>
+                模板名称
+                <Input
+                  disabled={isReadOnly}
+                  maxLength={50}
+                  value={draft.name}
+                  onChange={(event) => onChangeDraft({ ...draft, name: event.target.value })}
+                />
+              </label>
+              <label>
+                模板类型
+                <Select
+                  disabled={isReadOnly}
+                  value={draft.templateType}
+                  onValueChange={(value) =>
+                    onChangeDraft({
+                      ...draft,
+                      templateType: value as PromptTemplateType,
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PROMPT_TEMPLATE_TYPES.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {getPromptTemplateTypeLabel(type)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
+            <label className="prompt-body-field">
+              <span>模板内容</span>
+              <Textarea
+                disabled={isReadOnly}
+                value={syncedDraft.body}
+                onChange={(event) =>
+                  onChangeDraft(
+                    syncPromptTemplateDraftVariables({
+                      ...syncedDraft,
+                      body: event.target.value,
+                    }),
+                  )
+                }
+                placeholder="输入 {{变量名}} 引用变量"
+              />
+            </label>
+            <div className="prompt-editor-meta">
+              <span>
+                字符数 {syncedDraft.body.length} / 模型限制 {PROMPT_TEMPLATE_LIMIT}
+              </span>
+              <span>
+                变量数量 {syncedDraft.variables.length}
+                {validation ? <strong className="is-error">{validation}</strong> : <strong>可保存</strong>}
+              </span>
+            </div>
+          </section>
+          <PromptVariableConfigEditor
+            draft={syncedDraft}
+            isReadOnly={isReadOnly}
+            onChange={onChangeDraft}
+          />
+          <section className="settings-card prompt-preview-card">
+            <div className="settings-card__title-row">
+              <h3>预览</h3>
+              <span className="prompt-preview-status">
+                <CircleCheck size={14} />
+                变量已渲染
+              </span>
+            </div>
+            <div className="prompt-preview-stack">
+              <PromptPreviewBlock title={`最终${getPromptTemplateTypeLabel(draft.templateType)}`} text={preview} tone={draft.templateType} />
+            </div>
+          </section>
+          {selectedTemplate && selectedTemplate.source === "custom" ? (
+            <Button
+              className="prompt-delete-button"
+              onClick={() => onDeleteTemplate(selectedTemplate)}
+              type="button"
+            >
+              <Trash2 size={16} />
+              删除模板
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function PromptVariableConfigEditor({
+  draft,
+  isReadOnly,
+  onChange,
+}: {
+  draft: PromptTemplateDraft;
+  isReadOnly: boolean;
+  onChange: (draft: PromptTemplateDraft) => void;
+}) {
+  const variables = syncPromptTemplateVariablesFromBody({
+    body: draft.body,
+    variables: draft.variables,
+  });
+
+  function updateVariable(name: string, nextVariable: PromptTemplateVariable) {
+    const nextVariables = variables.map((variable) =>
+      variable.name === name ? normalizePromptTemplateVariable(nextVariable) : variable,
+    );
+    onChange({ ...draft, variables: nextVariables });
+  }
+
+  return (
+    <section className="settings-card prompt-variable-card prompt-variable-config-card">
+      <div className="settings-card__title-row">
+        <h3>参数编辑</h3>
+        <span className="prompt-variable-detect-status">
+          已识别 {variables.length} 个参数
+        </span>
+      </div>
+      <PromptVariableEditor
+        isReadOnly={isReadOnly}
+        variables={variables}
+        onUpdateVariable={updateVariable}
+      />
+    </section>
+  );
+}
+
+function PromptPreviewBlock({
+  title,
+  text,
+  tone,
+}: {
+  title: string;
+  text: string;
+  tone: PromptTemplateType;
+}) {
+  return (
+    <article className={`prompt-preview-block prompt-preview-block--${tone}`}>
+      <strong>{title}</strong>
+      <p>{text || "填写模板内容和示例值后可查看效果"}</p>
+      <span>{text ? "已渲染" : "未修改"}</span>
+    </article>
+  );
+}
+
+function PromptTemplateCreateModal({
+  draft,
+  isSaving,
+  onCancel,
+  onChange,
+  onSave,
+}: {
+  draft: PromptTemplateDraft;
+  isSaving: boolean;
+  onCancel: () => void;
+  onChange: (draft: PromptTemplateDraft) => void;
+  onSave: () => void;
+}) {
+  const validation = validatePromptTemplateCreateDraft(draft);
+
+  return (
+    <div className="prompt-modal-backdrop">
+      <section className="prompt-modal prompt-template-create-modal">
+        <header>
+          <div>
+            <h2>新建 Prompt 模板</h2>
+            <p>先填写模板名称和类型，创建后在右侧编辑区继续完善内容和参数</p>
+          </div>
+          <Button onClick={onCancel} type="button" aria-label="关闭">
+            <X size={18} />
+          </Button>
+        </header>
+        <main>
+          <section className="settings-card prompt-create-basic">
+            <h3>1. 基本信息</h3>
+            <div className="prompt-create-type-tabs">
+              {PROMPT_TEMPLATE_TYPES.map((type) => (
+                <Button
+                  className={draft.templateType === type ? "is-active" : ""}
+                  key={type}
+                  onClick={() => onChange({ ...draft, templateType: type })}
+                  type="button"
+                >
+                  {getPromptTemplateTypeLabel(type)}
+                </Button>
+              ))}
+            </div>
+            <label>
+              模板名称 *
+              <Input
+                maxLength={50}
+                value={draft.name}
+                onChange={(event) => onChange({ ...draft, name: event.target.value })}
+                placeholder="请输入模板名称"
+              />
+              <span>{draft.name.length}/50</span>
+            </label>
+          </section>
+        </main>
+        <footer>
+          <div>
+            <Button onClick={onCancel} type="button">取消</Button>
+            <Button disabled={isSaving || Boolean(validation)} onClick={onSave} type="button">
+              {isSaving ? "创建中" : "创建模板"}
+            </Button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function PromptVariableEditor({
+  isReadOnly = false,
+  variables,
+  onUpdateVariable,
+}: {
+  isReadOnly?: boolean;
+  variables: PromptTemplateVariable[];
+  onUpdateVariable: (name: string, variable: PromptTemplateVariable) => void;
+}) {
+  function updateOptions(variable: PromptTemplateVariable, options: string[]) {
+    onUpdateVariable(variable.name, {
+      ...variable,
+      options,
+      defaultValue:
+        variable.controlType === "select" && !options.includes(variable.defaultValue ?? "")
+          ? options[0] ?? ""
+          : variable.defaultValue,
+      exampleValue: options.join("、"),
+    });
+  }
+
+  return (
+    <div className="prompt-variable-editor">
+      <div>
+        <span>参数</span>
+        <span>显示名称</span>
+        <span>控件类型</span>
+        <span>默认值</span>
+        <span>选项值</span>
+      </div>
+      {variables.length === 0 ? (
+        <div className="prompt-variable-editor__empty">
+          模板内容中使用 {`{{参数名}}`} 后会自动生成配置项
+        </div>
+      ) : null}
+      {variables.map((variable) => (
+        <div key={variable.name}>
+          <code>{`{{${variable.name}}}`}</code>
+          <Input
+            disabled={isReadOnly}
+            value={variable.displayName ?? variable.description ?? variable.name}
+            onChange={(event) =>
+              onUpdateVariable(variable.name, {
+                ...variable,
+                displayName: event.target.value,
+              })
+            }
+            placeholder="例如：画面比例"
+          />
+          <Select
+            disabled={isReadOnly}
+            value={variable.controlType ?? "input"}
+            onValueChange={(value) =>
+              onUpdateVariable(variable.name, {
+                ...variable,
+                controlType:
+                  value === "select" || value === "combobox" ? value : "input",
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="input">输入框</SelectItem>
+              <SelectItem value="select">下拉选项</SelectItem>
+              <SelectItem value="combobox">可选可输入</SelectItem>
+            </SelectContent>
+          </Select>
+          {variable.controlType === "select" ? (
+            <Select
+              disabled={isReadOnly || !variable.options?.length}
+              value={variable.defaultValue ?? ""}
+              onValueChange={(value) =>
+                onUpdateVariable(variable.name, {
+                  ...variable,
+                  defaultValue: value,
+                  exampleValue: value,
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="选择默认值" />
+              </SelectTrigger>
+              <SelectContent>
+                {(variable.options ?? []).map((option) => (
+                  <SelectItem key={option} value={option}>
+                    {option}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            variable.controlType === "combobox" ? (
+              <PromptVariableComboboxInput
+                disabled={isReadOnly}
+                options={variable.options ?? []}
+                value={variable.defaultValue ?? ""}
+                onChange={(value) =>
+                  onUpdateVariable(variable.name, {
+                    ...variable,
+                    defaultValue: value,
+                    exampleValue: value,
+                  })
+                }
+                placeholder="输入默认值"
+              />
+            ) : (
+              <Input
+                disabled={isReadOnly}
+                value={variable.defaultValue ?? ""}
+                onChange={(event) =>
+                  onUpdateVariable(variable.name, {
+                    ...variable,
+                    defaultValue: event.target.value,
+                    exampleValue: event.target.value,
+                  })
+                }
+                placeholder="输入默认值"
+              />
+            )
+          )}
+          <PromptVariableOptionsEditor
+            disabled={isReadOnly || variable.controlType === "input"}
+            options={variable.options ?? []}
+            onChange={(options) => updateOptions(variable, options)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PromptVariableComboboxInput({
+  disabled,
+  options,
+  value,
+  onChange,
+  placeholder,
+}: {
+  disabled?: boolean;
+  options: string[];
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const uniqueOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return options.filter((option) => {
+      const value = option.trim();
+      if (!value || seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+  }, [options]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof globalThis.Node) || !rootRef.current?.contains(target)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [isOpen]);
+
+  function selectOption(option: string) {
+    onChange(option);
+    setIsOpen(false);
+  }
+
+  return (
+    <span
+      className={`prompt-variable-combobox${isOpen ? " is-open" : ""}`}
+      onBlur={(event) => {
+        const nextFocusedElement = event.relatedTarget;
+        if (
+          !nextFocusedElement ||
+          !rootRef.current?.contains(nextFocusedElement)
+        ) {
+          setIsOpen(false);
+        }
+      }}
+      ref={rootRef}
+    >
+      <Input
+        disabled={disabled}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onFocus={() => {
+          if (!disabled) {
+            setIsOpen(true);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setIsOpen(false);
+          }
+        }}
+        placeholder={placeholder}
+      />
+      <Button
+        aria-label="展开候选值"
+        disabled={disabled}
+        onClick={() => setIsOpen((current) => !current)}
+        type="button"
+        size="icon"
+        variant="ghost"
+      >
+        <ChevronDown size={15} />
+      </Button>
+      {isOpen ? (
+        <div className="prompt-variable-combobox__menu" role="listbox">
+          {uniqueOptions.length ? (
+            uniqueOptions.map((option) => (
+              <button
+                aria-selected={option === value}
+                className={option === value ? "is-selected" : undefined}
+                key={option}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => selectOption(option)}
+                type="button"
+                role="option"
+              >
+                <span>{option}</span>
+                {option === value ? <CircleCheck size={14} /> : null}
+              </button>
+            ))
+          ) : (
+            <small>暂无候选值</small>
+          )}
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
+function PromptVariableOptionsEditor({
+  disabled,
+  options,
+  onChange,
+}: {
+  disabled: boolean;
+  options: string[];
+  onChange: (options: string[]) => void;
+}) {
+  const [draftOptions, setDraftOptions] = useState(options);
+  const [draftOption, setDraftOption] = useState("");
+  const optionsKey = options.join("\u0000");
+  const nextOption = draftOption.trim();
+  const canAdd =
+    !disabled && Boolean(nextOption) && !normalizeOptions(draftOptions).includes(nextOption);
+
+  useEffect(() => {
+    setDraftOptions(options);
+  }, [optionsKey]);
+
+  function normalizeOptions(values: string[]) {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    values.forEach((value) => {
+      const option = value.trim();
+      if (!option || seen.has(option)) {
+        return;
+      }
+      seen.add(option);
+      normalized.push(option);
+    });
+    return normalized;
+  }
+
+  function commitOptions(values = draftOptions) {
+    const normalized = normalizeOptions(values);
+    setDraftOptions(normalized);
+    onChange(normalized);
+  }
+
+  function addOption() {
+    if (!canAdd) {
+      return;
+    }
+    const normalized = normalizeOptions([...draftOptions, nextOption]);
+    setDraftOptions(normalized);
+    onChange(normalized);
+    setDraftOption("");
+  }
+
+  function updateDraftOption(index: number, value: string) {
+    setDraftOptions((current) =>
+      current.map((item, itemIndex) => (itemIndex === index ? value : item)),
+    );
+  }
+
+  function removeOption(index: number) {
+    const nextOptions = draftOptions.filter((_, itemIndex) => itemIndex !== index);
+    const normalized = normalizeOptions(nextOptions);
+    setDraftOptions(normalized);
+    onChange(normalized);
+  }
+
+  return (
+    <div className={`prompt-variable-options-editor${disabled ? " is-disabled" : ""}`}>
+      {draftOptions.map((option, index) => (
+        <div className="prompt-variable-options-editor__row" key={`${option}-${index}`}>
+          <Input
+            disabled={disabled}
+            value={option}
+            onBlur={() => commitOptions()}
+            onChange={(event) => updateDraftOption(index, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitOptions();
+              }
+            }}
+            placeholder="输入选项值"
+          />
+          <Button
+            aria-label={`删除选项 ${option || index + 1}`}
+            disabled={disabled}
+            onClick={() => removeOption(index)}
+            type="button"
+            size="icon"
+            variant="ghost"
+          >
+            <X size={14} />
+          </Button>
+        </div>
+      ))}
+      <div className="prompt-variable-options-editor__row prompt-variable-options-editor__row--add">
+        <Input
+          disabled={disabled}
+          value={draftOption}
+          onChange={(event) => setDraftOption(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              addOption();
+            }
+          }}
+          placeholder={disabled ? "输入框无需选项" : "输入选项值"}
+        />
+        <Button
+          aria-label="添加选项值"
+          disabled={!canAdd}
+          onClick={addOption}
+          type="button"
+          size="icon"
+          variant="default"
+        >
+          <Plus size={14} />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function buildFallbackModelDefinition(provider: ProviderId = DEFAULT_PROVIDER): ModelDefinition {
+  if (provider === GOOGLE_PROVIDER) {
+    return {
+      provider: GOOGLE_PROVIDER,
+      modelId: "nano-banana",
+      displayName: "Nano Banana",
+      advanced: false,
+      inputLimits: {
+        minGarments: 1,
+        maxGarments: 4,
+      },
+      paramsSchema: [],
+      output: {
+        countParamKey: "outputCount",
+        minCount: 1,
+        maxCount: 4,
+      },
+      providerBaseUrl: getDefaultProviderBaseUrl(GOOGLE_PROVIDER),
+    };
+  }
+
+  return {
+    provider: DEFAULT_PROVIDER,
+    modelId: DEFAULT_MODEL_ID,
+    displayName: "GPT Image 1",
+    advanced: false,
+    inputLimits: {
+      minGarments: 1,
+      maxGarments: 4,
+    },
+    paramsSchema: [],
+    output: {
+      countParamKey: "outputCount",
+      minCount: 1,
+      maxCount: 4,
+    },
+    providerBaseUrl: null,
+  };
+}
+
+function buildCustomModelDefinition(modelId: string, providerBaseUrl: string): ModelDefinition {
+  const effectiveModelId = modelId.trim() || DEFAULT_CUSTOM_MODEL_ID;
+  return {
+    provider: CUSTOM_PROVIDER,
+    modelId: effectiveModelId,
+    displayName: effectiveModelId,
+    advanced: false,
+    inputLimits: {
+      minGarments: 1,
+      maxGarments: 8,
+    },
+    paramsSchema: [],
+    output: {
+      countParamKey: "outputCount",
+      minCount: 1,
+      maxCount: 8,
+    },
+    providerBaseUrl: providerBaseUrl.trim() || null,
+  };
+}
+
+function getModelCapabilityText(definition: ModelDefinition) {
+  const maxCount = definition.output.maxCount;
+  const maxGarments = definition.inputLimits.maxGarments;
+  if (definition.provider === GOOGLE_PROVIDER) {
+    return `Google 图片生成 · 最多 ${maxGarments} 张服装 · ${maxCount} 张输出`;
+  }
+  if (definition.provider === CUSTOM_PROVIDER) {
+    return `自定义接入点 · 最多 ${maxGarments} 张服装 · ${maxCount} 张输出`;
+  }
+  if (definition.modelId.includes("fast")) {
+    return `快速生成 · 最多 ${maxGarments} 张服装 · ${maxCount} 张输出`;
+  }
+  if (definition.advanced) {
+    return `高级细节 · 最多 ${maxGarments} 张服装 · ${maxCount} 张输出`;
+  }
+  return `高质量生成 · 最多 ${maxGarments} 张服装 · ${maxCount} 张输出`;
+}
+
+function normalizeProviderId(provider: string): ProviderId {
+  const option = PROVIDER_OPTIONS.find((item) => item.id === provider);
+  if (option?.enabled) {
+    return option.id;
+  }
+  return DEFAULT_PROVIDER;
+}
+
+function getProviderLabel(provider: ProviderId) {
+  return PROVIDER_OPTIONS.find((option) => option.id === provider)?.label ?? provider;
+}
+
+function getDefaultProviderBaseUrl(provider: ProviderId) {
+  if (provider === GOOGLE_PROVIDER) {
+    return "https://generativelanguage.googleapis.com/v1beta";
+  }
+  if (provider === CUSTOM_PROVIDER) {
+    return "";
+  }
+  return "https://api.openai.com/v1";
+}
+
+function getProviderStatusLabel(provider: ProviderId) {
+  if (provider === CUSTOM_PROVIDER) {
+    return "自定义模型配置已保存；执行调用需要对应 Provider adapter。";
+  }
+  if (provider === GOOGLE_PROVIDER) {
+    return "Google nano banana 模型配置已保存；执行调用需要 Google provider adapter。";
+  }
+  return "OpenAI 模型配置已保存，可继续执行生成。";
+}
+
+function buildPromptTemplateDraft(template: PromptTemplate): PromptTemplateDraft {
+  return syncPromptTemplateDraftVariables({
+    id: template.id,
+    name: template.name,
+    templateType: template.templateType,
+    body: template.body,
+    variables: template.variables.map((variable) => normalizePromptTemplateVariable({ ...variable })),
+    description: template.description,
+    tags: [...template.tags],
+    isDefault: template.isDefault,
+    locked: template.locked,
+  });
+}
+
+function arePromptTemplateDraftsEqual(
+  left: PromptTemplateDraft,
+  right: PromptTemplateDraft,
+) {
+  return (
+    JSON.stringify(buildPromptTemplateDraftSnapshot(left)) ===
+    JSON.stringify(buildPromptTemplateDraftSnapshot(right))
+  );
+}
+
+function buildPromptTemplateDraftSnapshot(draft: PromptTemplateDraft) {
+  const syncedDraft = syncPromptTemplateDraftVariables(draft);
+  return {
+    id: syncedDraft.id ?? null,
+    name: syncedDraft.name,
+    templateType: syncedDraft.templateType,
+    body: syncedDraft.body,
+    description: syncedDraft.description,
+    tags: syncedDraft.tags,
+    isDefault: syncedDraft.isDefault,
+    locked: syncedDraft.locked,
+    variables: syncedDraft.variables.map((variable) =>
+      normalizePromptTemplateVariable({ ...variable }),
+    ),
+  };
+}
+
+function buildEmptyPromptTemplateDraft(type: PromptTemplateType): PromptTemplateDraft {
+  return {
+    id: null,
+    name: "",
+    templateType: type,
+    body: "",
+    variables: [],
+    description: "",
+    tags: [],
+    isDefault: false,
+    locked: false,
+  };
+}
+
+function buildEmptyPromptPresetDraft(sourcePreset?: PromptPresetOption | null): PromptPresetDraft {
+  const variables = promptWorkbenchVariablesToTemplateVariables(
+    sourcePreset?.variables ?? DEFAULT_PROMPT_WORKBENCH_STATE.variables,
+  );
+  return {
+    id: null,
+    name: "",
+    scenario: sourcePreset?.scenario ?? "白底主图",
+    description: sourcePreset?.description ?? "",
+    system: sourcePreset?.system ?? buildPromptBindingSection("builtin_system_commerce_display"),
+    user: sourcePreset?.user ?? buildPromptBindingSection("builtin_user_tryon_general"),
+    negative:
+      sourcePreset?.negative ?? buildPromptBindingSection("builtin_negative_clean_background"),
+    variables,
+    isDefault: false,
+    locked: false,
+  };
+}
+
+function buildPromptPresetDraftFromOption(preset: PromptPresetOption): PromptPresetDraft {
+  return {
+    id: preset.id,
+    name: preset.name,
+    scenario: preset.scenario,
+    description: preset.description,
+    system: preset.system,
+    user: preset.user,
+    negative: preset.negative,
+    variables: promptWorkbenchVariablesToTemplateVariables(preset.variables),
+    isDefault: preset.isDefault,
+    locked: preset.locked,
+  };
+}
+
+function syncPromptPresetDraftVariables(
+  draft: PromptPresetDraft,
+  templates: PromptTemplate[],
+): PromptPresetDraft {
+  return {
+    ...draft,
+    variables: buildPromptPresetVariablesForSections({
+      sections: [draft.system, draft.user, draft.negative],
+      templates,
+      existingVariables: draft.variables,
+    }),
+  };
+}
+
+function arePromptPresetDraftsEqual(
+  left: PromptPresetDraft,
+  right: PromptPresetDraft,
+  templates: PromptTemplate[],
+) {
+  return (
+    JSON.stringify(buildPromptPresetDraftSnapshot(left, templates)) ===
+    JSON.stringify(buildPromptPresetDraftSnapshot(right, templates))
+  );
+}
+
+function buildPromptPresetDraftSnapshot(draft: PromptPresetDraft, templates: PromptTemplate[]) {
+  const syncedDraft = syncPromptPresetDraftVariables(draft, templates);
+  return {
+    id: syncedDraft.id ?? null,
+    name: syncedDraft.name,
+    scenario: syncedDraft.scenario,
+    description: syncedDraft.description,
+    system: syncedDraft.system,
+    user: syncedDraft.user,
+    negative: syncedDraft.negative,
+    isDefault: syncedDraft.isDefault,
+    locked: syncedDraft.locked,
+    variables: syncedDraft.variables.map((variable) =>
+      normalizePromptTemplateVariable({ ...variable }),
+    ),
+  };
+}
+
+function promptWorkbenchVariablesToTemplateVariables(
+  variables: PromptWorkbenchVariables,
+): PromptTemplateVariable[] {
+  const knownVariables: PromptTemplateVariable[] = [
+    {
+      name: "style",
+      displayName: "风格",
+      description: "风格",
+      exampleValue: "休闲、商务、复古",
+      required: true,
+      defaultValue: variables.style,
+    },
+    {
+      name: "background",
+      displayName: "背景",
+      description: "背景",
+      exampleValue: "纯白背景、室内场景、自然光棚",
+      required: true,
+      defaultValue: variables.background,
+    },
+    {
+      name: "aspectRatio",
+      displayName: "画面比例",
+      description: "画面比例",
+      exampleValue: "1:1、3:4、4:5、9:16",
+      required: true,
+      defaultValue: variables.aspectRatio,
+    },
+    {
+      name: "garmentCategory",
+      displayName: "服装类别",
+      description: "服装类别",
+      exampleValue: "连衣裙、上衣、外套、裤子",
+      required: true,
+      defaultValue: variables.garmentCategory,
+    },
+    {
+      name: "outputCount",
+      displayName: "生成数量",
+      description: "生成数量",
+      exampleValue: "1、2、3、4",
+      required: true,
+      defaultValue: variables.outputCount,
+    },
+  ];
+  const knownNames = new Set(knownVariables.map((variable) => variable.name));
+  const customVariables = Object.entries(variables)
+    .filter(([name]) => !knownNames.has(name))
+    .map(([name, value]) => ({
+      name,
+      displayName: name,
+      description: name,
+      exampleValue: value,
+      required: true,
+      defaultValue: value,
+      controlType: "input" as const,
+      options: [],
+    }));
+  return [...knownVariables, ...customVariables];
+}
+
+function buildPromptBindingSection(baseTemplateId: string | null): PromptBindingSection {
+  return {
+    mode: "default",
+    baseTemplateId,
+    appendText: "",
+    overrideText: "",
+  };
+}
+
+function buildPreviewValues(variables: PromptTemplateVariable[]): PromptTemplatePreviewValues {
+  return Object.fromEntries(
+    variables.map((variable) => [
+      variable.name,
+      buildPromptVariablePreviewValue(variable) || variable.name,
+    ]),
+  );
+}
+
+function renderPromptTemplatePreview(
+  body: string,
+  values: PromptTemplatePreviewValues,
+): string {
+  return body.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, name: string) => {
+    const key = name.trim();
+    return values[key] ?? `{{${key}}}`;
+  });
+}
+
+function renderPromptSectionPreview(
+  section: PromptBindingSection,
+  templates: PromptTemplate[],
+  values: PromptWorkbenchVariables,
+): string {
+  const templateBody =
+    templates.find((template) => template.id === section.baseTemplateId)?.body ?? "";
+  const renderedTemplate = renderPromptTemplatePreview(templateBody, values);
+  if (section.mode === "override") {
+    return section.overrideText || "未配置";
+  }
+  if (section.mode === "append") {
+    const base = renderedTemplate.trim();
+    const appendText = section.appendText.trim();
+    if (!base) {
+      return appendText || "未配置";
+    }
+    if (!appendText) {
+      return renderedTemplate || "未配置";
+    }
+    return `${base}\n\n${appendText}`;
+  }
+  return renderedTemplate || "未配置";
+}
+
+function validatePromptTemplateCreateDraft(draft: PromptTemplateDraft): string | null {
+  if (!draft.name.trim()) {
+    return "请填写模板名称";
+  }
+  if (draft.name.length > 50) {
+    return "模板名称不能超过 50 字";
+  }
+  return null;
+}
+
+function validatePromptTemplateDraft(draft: PromptTemplateDraft): string | null {
+  const syncedDraft = syncPromptTemplateDraftVariables(draft);
+  if (!draft.name.trim()) {
+    return "请填写模板名称";
+  }
+  if (!syncedDraft.body.trim()) {
+    return "请填写模板内容";
+  }
+  if (syncedDraft.body.length > PROMPT_TEMPLATE_LIMIT) {
+    return "模板内容超过 4000 字符";
+  }
+  const variableNames = new Set<string>();
+  for (const variable of syncedDraft.variables) {
+    const name = variable.name.trim();
+    if (!name) {
+      return "变量名不能为空";
+    }
+    if (name.startsWith("__")) {
+      return "变量名不能以 __ 开头";
+    }
+    if (variableNames.has(name)) {
+      return `变量 ${name} 重复`;
+    }
+    variableNames.add(name);
+    if (variable.controlType === "select") {
+      const options = variable.options ?? [];
+      if (options.length === 0) {
+        return `参数 ${name} 需要配置选项值`;
+      }
+      if (variable.defaultValue && !options.includes(variable.defaultValue)) {
+        return `参数 ${name} 的默认值必须来自选项值`;
+      }
+    }
+  }
+  for (const placeholder of extractPromptVariableNames(syncedDraft.body)) {
+    if (!variableNames.has(placeholder)) {
+      return `变量 ${placeholder} 未声明`;
+    }
+  }
+  return null;
+}
+
+function syncPromptTemplateDraftVariables(draft: PromptTemplateDraft): PromptTemplateDraft {
+  return {
+    ...draft,
+    variables: syncPromptTemplateVariablesFromBody({
+      body: draft.body,
+      variables: draft.variables,
+    }),
+  };
+}
+
+function syncPromptTemplateVariablesForTemplate(template: PromptTemplate): PromptTemplate {
+  const syncedDraft = syncPromptTemplateDraftVariables(template);
+  return {
+    ...template,
+    variables: syncedDraft.variables,
+  };
+}
+
+function buildFallbackPromptTemplates(): PromptTemplate[] {
+  const now = new Date().toISOString();
+  const baseTemplates: PromptTemplateDraft[] = [
+    {
+      id: "builtin_system_commerce_display",
+      name: "电商服装展示系统规则",
+      templateType: "system",
+      body: "你是专业的服装摄影与电商视觉生成助手。\n请基于以下参数生成高质量、真实感的服装展示图，适用于电商平台。\n风格：{{style}}。\n背景：{{background}}。\n画幅比例：{{aspectRatio}}。\n服装品类：{{garmentCategory}}。\n生成数量：{{outputCount}} 张。\n要求：光线自然、细节清晰、色彩真实、构图简洁，突出服装主体。",
+      variables: DEFAULT_PROMPT_TEMPLATE_VARIABLES.map((item) => ({ ...item })),
+      description: "服装展示图的系统指令模板",
+      tags: ["commerce", "system"],
+      isDefault: true,
+      locked: false,
+    },
+    {
+      id: "builtin_user_tryon_general",
+      name: "通用试穿细节描述",
+      templateType: "user",
+      body: "画幅比例：{{aspectRatio}}。\n服装品类：{{garmentCategory}}。\n生成数量：{{outputCount}} 张。\n要求：光线自然、细节清晰、色彩真实、构图简洁，突出服装主体。",
+      variables: DEFAULT_PROMPT_TEMPLATE_VARIABLES.map((item) => ({ ...item })),
+      description: "通用服装试穿用户提示词",
+      tags: ["tryon", "user"],
+      isDefault: true,
+      locked: false,
+    },
+    {
+      id: "builtin_negative_clean_background",
+      name: "纯色背景避坑描述",
+      templateType: "negative",
+      body: "模糊、低清晰度、噪点、畸形、拉伸、变形、过曝、过暗、色偏、文字、水印、logo、边框。",
+      variables: [],
+      description: "常用负面提示词",
+      tags: ["negative"],
+      isDefault: true,
+      locked: false,
+    },
+    {
+      id: "builtin_user_luxury_detail",
+      name: "高级质感增强细节描述",
+      templateType: "user",
+      body: "强化面料质感与剪裁细节，保持真实比例。\n风格：{{style}}。\n背景：{{background}}。\n输出 {{outputCount}} 张高质量结果。",
+      variables: DEFAULT_PROMPT_TEMPLATE_VARIABLES.map((item) => ({ ...item })),
+      description: "强调质感与细节的用户提示词",
+      tags: ["detail"],
+      isDefault: false,
+      locked: false,
+    },
+    {
+      id: "builtin_system_extreme_style",
+      name: "极简风格系统规则",
+      templateType: "system",
+      body: "生成极简、干净、商业摄影风格的服装展示图。\n背景保持{{background}}，画面比例为{{aspectRatio}}。",
+      variables: DEFAULT_PROMPT_TEMPLATE_VARIABLES.map((item) => ({ ...item })),
+      description: "极简商业摄影系统提示词",
+      tags: ["minimal"],
+      isDefault: false,
+      locked: false,
+    },
+    {
+      id: "builtin_negative_detail_clean",
+      name: "细节优化避坑描述",
+      templateType: "negative",
+      body: "手部错误、面部扭曲、服装纹理错乱、布料断裂、不自然阴影、低质感、错误反射。",
+      variables: [],
+      description: "细节修正负面提示词",
+      tags: ["negative", "detail"],
+      isDefault: false,
+      locked: false,
+    },
+  ];
+
+  return baseTemplates.map((template) => ({
+    ...syncPromptTemplateDraftVariables(template),
+    id: template.id ?? `prompt_template_${Date.now()}`,
+    source: "built_in",
+    createdAt: now,
+    updatedAt: now,
+  }));
+}
+
+function buildFallbackPromptPresets(): PromptPreset[] {
+  const now = new Date().toISOString();
+  const builtInPresets: Array<{
+    id: string;
+    name: string;
+    scenario: string;
+    description: string;
+    userTemplateId: string;
+    variables: PromptWorkbenchVariables;
+    isDefault: boolean;
+  }> = [
+    {
+      id: "builtin_ecommerce_white_background",
+      name: "电商白底主图",
+      scenario: "白底主图",
+      description: "用于电商平台白底主图，突出服装主体。",
+      userTemplateId: "builtin_user_tryon_general",
+      variables: DEFAULT_PROMPT_WORKBENCH_STATE.variables,
+      isDefault: true,
+    },
+    {
+      id: "builtin_model_display",
+      name: "模特展示图",
+      scenario: "模特展示",
+      description: "保留人物自然状态，呈现完整服装上身效果。",
+      userTemplateId: "builtin_user_tryon_general",
+      variables: {
+        style: "自然写实",
+        background: "室内场景",
+        aspectRatio: "3:4",
+        garmentCategory: "连衣裙",
+        outputCount: "1",
+      },
+      isDefault: false,
+    },
+    {
+      id: "builtin_detail_display",
+      name: "细节展示图",
+      scenario: "细节展示",
+      description: "强调面料、剪裁与局部细节质感。",
+      userTemplateId: "builtin_user_luxury_detail",
+      variables: {
+        style: "高级质感",
+        background: "纯色背景",
+        aspectRatio: "4:5",
+        garmentCategory: "外套",
+        outputCount: "1",
+      },
+      isDefault: false,
+    },
+    {
+      id: "builtin_social_style",
+      name: "社媒风格图",
+      scenario: "社媒风格",
+      description: "适合社媒内容流的自然场景展示。",
+      userTemplateId: "builtin_user_luxury_detail",
+      variables: {
+        style: "社媒自然风",
+        background: "自然光棚",
+        aspectRatio: "9:16",
+        garmentCategory: "套装",
+        outputCount: "1",
+      },
+      isDefault: false,
+    },
+  ];
+
+  return builtInPresets.map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    scenario: preset.scenario,
+    description: preset.description,
+    source: "built_in",
+    system: buildPromptBindingSection("builtin_system_commerce_display"),
+    user: buildPromptBindingSection(preset.userTemplateId),
+    negative: buildPromptBindingSection("builtin_negative_clean_background"),
+    variables: promptWorkbenchVariablesToTemplateVariables(preset.variables),
+    isDefault: preset.isDefault,
+    locked: true,
+    createdAt: now,
+    updatedAt: now,
+  }));
+}
+
+function buildLocalPromptTemplate(draft: PromptTemplateDraft): PromptTemplate {
+  const now = new Date().toISOString();
+  const syncedDraft = syncPromptTemplateDraftVariables(draft);
+  return {
+    ...syncedDraft,
+    id: syncedDraft.id || `prompt_template_local_${Date.now()}`,
+    source: syncedDraft.id?.startsWith("builtin_") ? "built_in" : "custom",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function buildLocalPromptPreset(draft: PromptPresetDraft): PromptPreset {
+  const now = new Date().toISOString();
+  return {
+    ...draft,
+    id: draft.id || `prompt_preset_local_${Date.now()}`,
+    source: draft.id?.startsWith("builtin_") ? "built_in" : "custom",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function upsertPromptPreset(presets: PromptPreset[], preset: PromptPreset): PromptPreset[] {
+  const exists = presets.some((item) => item.id === preset.id);
+  return exists
+    ? presets.map((item) => (item.id === preset.id ? preset : item))
+    : [preset, ...presets];
+}
+
+function upsertPromptTemplate(
+  templates: PromptTemplate[],
+  template: PromptTemplate,
+): PromptTemplate[] {
+  const exists = templates.some((item) => item.id === template.id);
+  return exists
+    ? templates.map((item) => (item.id === template.id ? template : item))
+    : [template, ...templates];
+}
+
+function getPromptTemplateTypeLabel(type: PromptTemplateType) {
+  if (type === "system") {
+    return "系统规则";
+  }
+  if (type === "negative") {
+    return "避坑描述";
+  }
+  return "细节描述";
+}
+
+function getPromptTemplateDisplayName(template: PromptTemplate) {
+  return template.name
+    .replace(/\s*System\b/g, "系统规则")
+    .replace(/\s*User\b/g, "细节描述")
+    .replace(/\s*Negative\b/g, "避坑描述")
+    .replace(/\bPrompt\b/g, "输出方案");
+}
+
+function getPromptTemplateSourceLabel(source: PromptTemplate["source"]) {
+  return source === "built_in" ? "内置" : "自定义";
+}
+
+function getPromptVariableDisplayLabel(variable: PromptTemplateVariable) {
+  if (variable.displayName?.trim()) {
+    return variable.displayName.trim();
+  }
+  if (variable.description?.trim()) {
+    return variable.description.trim();
+  }
+  const labels: Record<string, string> = {
+    aspectRatio: "画面比例",
+    background: "背景",
+    garmentCategory: "服装类别",
+    outputCount: "生成数量",
+    style: "风格",
+  };
+  return labels[variable.name] ?? variable.name;
+}
+
+function formatShortDateTime(value?: string | null) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hour = `${date.getHours()}`.padStart(2, "0");
+  const minute = `${date.getMinutes()}`.padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day} ${hour}:${minute}`;
+}
+
+function compareDateDesc(left?: string | null, right?: string | null) {
+  const leftTime = left ? new Date(left).getTime() : Number.NaN;
+  const rightTime = right ? new Date(right).getTime() : Number.NaN;
+  const hasLeftTime = Number.isFinite(leftTime);
+  const hasRightTime = Number.isFinite(rightTime);
+  if (hasLeftTime && hasRightTime) {
+    return rightTime - leftTime;
+  }
+  if (hasLeftTime) {
+    return -1;
+  }
+  if (hasRightTime) {
+    return 1;
+  }
+  return 0;
+}
+
+function copyTextWithFallback(text: string) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const isCopied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!isCopied) {
+    throw new Error("复制最终输出失败");
+  }
+}
+
+function PromptPresetCenterPage({
+  draft,
+  error,
+  isSaving,
+  presets,
+  selectedPresetId,
+  templates,
+  onApply,
+  onBack,
+  onDraftChange,
+  onNew,
+  onReset,
+  onSave,
+  onSelectPreset,
+  onCopyPreviewError,
+  onCopyPreviewSuccess,
+}: {
+  draft: PromptPresetDraft;
+  error: string | null;
+  isSaving: boolean;
+  presets: PromptPresetOption[];
+  selectedPresetId: string;
+  templates: PromptTemplate[];
+  onApply: () => void;
+  onBack: () => void;
+  onDraftChange: (draft: PromptPresetDraft) => void;
+  onNew: () => void;
+  onReset: () => void;
+  onSave: () => void;
+  onSelectPreset: (presetId: string) => void;
+  onCopyPreviewError: (message: string) => void;
+  onCopyPreviewSuccess: () => void;
+}) {
+  const [searchText, setSearchText] = useState("");
+  const selectedPreset = findPromptPresetOption(presets, selectedPresetId);
+  const isBuiltIn = draft.locked || selectedPreset?.source === "built_in";
+  const isDirty = selectedPreset
+    ? !arePromptPresetDraftsEqual(
+        draft,
+        buildPromptPresetDraftFromOption(selectedPreset),
+        templates,
+      )
+    : false;
+  const canSave = !isSaving && !isBuiltIn && isDirty;
+  const filteredPresets = [...presets]
+    .sort((left, right) => compareDateDesc(left.updatedAt, right.updatedAt))
+    .filter((preset) => {
+      const keyword = searchText.trim().toLowerCase();
+      return (
+        !keyword ||
+        preset.name.toLowerCase().includes(keyword) ||
+        preset.scenario.toLowerCase().includes(keyword)
+      );
+    });
+  const activeVariables = buildPromptPresetVariablesForSections({
+    sections: [draft.system, draft.user, draft.negative],
+    templates,
+    existingVariables: draft.variables,
+  });
+  const previewValues = buildPreviewValues(activeVariables);
+  const systemPreview = renderPromptSectionPreview(
+    draft.system,
+    templates,
+    previewValues as PromptWorkbenchVariables,
+  );
+  const userPreview = renderPromptSectionPreview(
+    draft.user,
+    templates,
+    previewValues as PromptWorkbenchVariables,
+  );
+  const negativePreview = draft.negative
+    ? renderPromptSectionPreview(draft.negative, templates, previewValues as PromptWorkbenchVariables)
+    : "未配置";
+
+  function updateDraft(patch: Partial<PromptPresetDraft>) {
+    onDraftChange({ ...draft, ...patch });
+  }
+
+  function updateSection(
+    key: "system" | "user" | "negative",
+    patch: Partial<PromptBindingSection>,
+  ) {
+    const currentSection = key === "negative" ? draft.negative : draft[key];
+    const nextDraft = {
+      ...draft,
+      [key]: {
+        mode: currentSection?.mode ?? "default",
+        baseTemplateId: currentSection?.baseTemplateId ?? null,
+        appendText: currentSection?.appendText ?? "",
+        overrideText: currentSection?.overrideText ?? "",
+        ...patch,
+      },
+    } as PromptPresetDraft;
+    onDraftChange(syncPromptPresetDraftVariables(nextDraft, templates));
+  }
+
+  function updateVariableDefault(name: string, defaultValue: string) {
+    updateDraft({
+      variables: activeVariables.map((variable) =>
+        variable.name === name ? { ...variable, defaultValue } : variable,
+      ),
+    });
+  }
+
+  function renderVariableDefaultControl(variable: PromptTemplateVariable) {
+    const currentValue = variable.defaultValue ?? "";
+    if (variable.controlType === "select") {
+      return (
+        <Select
+          disabled={isBuiltIn || !variable.options?.length}
+          value={currentValue}
+          onValueChange={(value) => updateVariableDefault(variable.name, value)}
+        >
+          <SelectTrigger className="prompt-preset-center-select-trigger">
+            <SelectValue placeholder="选择默认值" />
+          </SelectTrigger>
+          <SelectContent>
+            {(variable.options ?? []).map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      );
+    }
+    if (variable.controlType === "combobox") {
+      return (
+        <PromptVariableComboboxInput
+          disabled={isBuiltIn}
+          options={variable.options ?? []}
+          value={currentValue}
+          onChange={(value) => updateVariableDefault(variable.name, value)}
+          placeholder="输入或选择默认值"
+        />
+      );
+    }
+    return (
+      <Input
+        disabled={isBuiltIn}
+        value={currentValue}
+        onChange={(event) => updateVariableDefault(variable.name, event.target.value)}
+      />
+    );
+  }
+
+  async function copyPreview() {
+    const text = buildOutputPlanPreviewClipboardText({
+      system: systemPreview,
+      user: userPreview,
+      negative: negativePreview,
+    });
+    try {
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          copyTextWithFallback(text);
+        }
+      } else {
+        copyTextWithFallback(text);
+      }
+      onCopyPreviewSuccess();
+    } catch (error) {
+      onCopyPreviewError(error instanceof Error ? error.message : "复制最终输出失败");
+    }
+  }
+
+  return (
+    <section className="prompt-preset-center" aria-label="方案中心">
+      <header className="prompt-preset-center__header">
+        <Button className="settings-back-button" onClick={onBack} type="button">
+          <ChevronLeft size={16} />
+          返回工作台
+        </Button>
+        <div className="prompt-preset-center__title">
+          <h1>方案中心</h1>
+          <p>管理和编辑输出方案，统一管理模板与变量默认值</p>
+        </div>
+        <div className="settings-header-actions">
+          <Button
+            className="settings-header-action settings-header-action--create"
+            onClick={onNew}
+            type="button"
+            variant="default"
+          >
+            <Plus size={16} />
+            新建方案
+          </Button>
+          <Button
+            className={`settings-header-action settings-header-action--save${
+              isDirty ? " is-dirty" : ""
+            }`}
+            disabled={!canSave}
+            onClick={onSave}
+            title={
+              isBuiltIn
+                ? "内置方案不能修改"
+                : canSave
+                  ? "保存当前方案修改"
+                  : "当前方案无可保存修改"
+            }
+            type="button"
+            variant="primary"
+          >
+            <Save size={16} />
+            {isSaving ? "保存中" : "保存方案"}
+          </Button>
+          <Button
+            className="settings-header-action settings-header-action--restore"
+            disabled={isSaving || !isDirty}
+            onClick={onReset}
+            title={isDirty ? "恢复为当前方案已保存状态" : "当前方案无可恢复修改"}
+            type="button"
+            variant="default"
+          >
+            <RotateCcw size={16} />
+            恢复默认
+          </Button>
+          <Button className="icon-button" type="button" aria-label="更多" size="icon" variant="default">
+            <MoreHorizontal size={17} />
+          </Button>
+        </div>
+      </header>
+
+      <div className="prompt-preset-center__body">
+        <aside className="prompt-preset-list-panel">
+          <h2>方案列表</h2>
+          <label className="prompt-preset-search">
+            <Search size={15} />
+            <Input
+              placeholder="搜索方案名称或场景..."
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+            />
+          </label>
+          <div className="prompt-preset-list">
+            {filteredPresets.map((preset) => (
+              <Button
+                className={`prompt-preset-list-item${preset.id === selectedPresetId ? " is-active" : ""}`}
+                key={preset.id}
+                onClick={() => onSelectPreset(preset.id)}
+                type="button"
+                variant="ghost"
+              >
+                <span className="prompt-preset-list-item__radio">
+                  {preset.id === selectedPresetId ? <CircleCheck size={14} /> : null}
+                </span>
+                <span className="prompt-preset-list-item__thumb">{preset.name.slice(0, 1)}</span>
+                <span className="prompt-preset-list-item__main">
+                  <strong>{preset.name}</strong>
+                  <small>系统规则 + 细节描述 + 避坑描述</small>
+                  <small>更新于 {formatShortDateTime(preset.updatedAt)}</small>
+                </span>
+                <span className="prompt-preset-list-item__meta">
+                  <Badge variant="default">{preset.scenario}</Badge>
+                  <Badge variant={preset.source === "built_in" ? "success" : "secondary"}>
+                    {preset.source === "built_in" ? "内置" : "自定义"}
+                  </Badge>
+                </span>
+              </Button>
+            ))}
+          </div>
+          <footer className="prompt-preset-list-footer">共 {filteredPresets.length} 个方案</footer>
+        </aside>
+
+        <main className="prompt-preset-edit-panel">
+          <h2>方案编辑</h2>
+          {error ? (
+            <div className="modal-error prompt-preset-center-error">
+              <CircleAlert size={15} />
+              {error}
+            </div>
+          ) : null}
+          {isBuiltIn ? (
+            <div className="prompt-preset-readonly-note">
+              <ShieldCheck size={15} />
+              当前为内置方案，仅可查看和应用，不能直接修改。
+            </div>
+          ) : null}
+          <Card className="prompt-preset-edit-card">
+            <h3>
+              <span>1</span>
+              基本信息
+            </h3>
+            <div className="prompt-preset-basic-grid">
+              <label>
+                <span>方案名称</span>
+                <Input
+                  disabled={isBuiltIn}
+                  maxLength={50}
+                  value={draft.name}
+                  onChange={(event) => updateDraft({ name: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>适用场景</span>
+                <Select
+                  value={draft.scenario}
+                  onValueChange={(value) => updateDraft({ scenario: value })}
+                  disabled={isBuiltIn}
+                >
+                  <SelectTrigger className="prompt-preset-center-select-trigger">
+                    <SelectValue placeholder="选择适用场景" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="白底主图">白底主图</SelectItem>
+                    <SelectItem value="模特展示">模特展示</SelectItem>
+                    <SelectItem value="细节展示">细节展示</SelectItem>
+                    <SelectItem value="社媒风格">社媒风格</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="prompt-preset-basic-grid__full">
+                <span>方案描述</span>
+                <Textarea
+                  disabled={isBuiltIn}
+                  maxLength={200}
+                  value={draft.description}
+                  onChange={(event) => updateDraft({ description: event.target.value })}
+                />
+              </label>
+            </div>
+          </Card>
+
+          <Card className="prompt-preset-edit-card">
+            <h3>
+              <span>2</span>
+              绑定输出方案模板
+            </h3>
+            <PromptPresetCenterTemplateRow
+              disabled={isBuiltIn}
+              label="系统规则模板"
+              section={draft.system}
+              templates={templates.filter((template) => template.templateType === "system")}
+              onChange={(patch) => updateSection("system", patch)}
+            />
+            <PromptPresetCenterTemplateRow
+              disabled={isBuiltIn}
+              label="细节描述模板"
+              section={draft.user}
+              templates={templates.filter((template) => template.templateType === "user")}
+              onChange={(patch) => updateSection("user", patch)}
+            />
+            <PromptPresetCenterTemplateRow
+              disabled={isBuiltIn}
+              label="避坑描述模板"
+              optional
+              section={draft.negative}
+              templates={templates.filter((template) => template.templateType === "negative")}
+              onChange={(patch) => updateSection("negative", patch)}
+            />
+          </Card>
+
+          <Card className="prompt-preset-edit-card">
+            <h3>
+              <span>3</span>
+              变量默认值
+              <small>已配置 {activeVariables.length}</small>
+            </h3>
+            <div className="prompt-preset-center-variable-list">
+              {activeVariables.map((variable) => (
+                <div className="prompt-preset-center-variable-row" key={variable.name}>
+                  <span className="prompt-preset-center-variable-name">
+                    {getPromptVariableDisplayLabel(variable)}
+                  </span>
+                  <code>{`{{${variable.name}}}`}</code>
+                  <span>=</span>
+                  {renderVariableDefaultControl(variable)}
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card className="prompt-preset-edit-card">
+            <h3>
+              <span>4</span>
+              追加描述
+              <small>可选</small>
+            </h3>
+            <Textarea
+              className="prompt-preset-extra-textarea"
+              disabled={isBuiltIn}
+              maxLength={300}
+              placeholder="请输入要追加到细节描述中的内容，例如：保持面料质感、自然光效、避免过曝等..."
+              value={draft.user.appendText}
+              onChange={(event) =>
+                updateSection("user", { mode: "append", appendText: event.target.value })
+              }
+            />
+          </Card>
+        </main>
+
+        <aside className="prompt-preset-preview-panel">
+          <Card className="prompt-preset-preview-card">
+            <h2>方案预览 / 当前摘要</h2>
+            <dl className="prompt-preset-preview-summary">
+              <dt>方案名称</dt>
+              <dd>{draft.name || "--"}</dd>
+              <dt>适用场景</dt>
+              <dd>{draft.scenario || "--"}</dd>
+              <dt>变量状态</dt>
+              <dd>已配置 {activeVariables.length}</dd>
+              <dt>来源</dt>
+              <dd>{isBuiltIn ? "内置方案" : "自定义方案"}</dd>
+              <dt>适配模型</dt>
+              <dd>支持系统规则 / 支持避坑描述 / 多图输入</dd>
+            </dl>
+          </Card>
+          <Card className="prompt-preset-preview-card">
+            <div className="prompt-preset-preview-title">
+            <h2>最终输出预览</h2>
+              <Button onClick={() => void copyPreview()} type="button" size="sm" variant="default">
+                <Copy size={15} />
+                复制全部
+              </Button>
+            </div>
+            <div className="prompt-preview-stack">
+              <PromptPreviewBlock title="系统规则" text={systemPreview} tone="system" />
+              <PromptPreviewBlock title="细节描述" text={userPreview} tone="user" />
+              <PromptPreviewBlock
+                title="避坑描述"
+                text={negativePreview}
+                tone="negative"
+              />
+            </div>
+          </Card>
+          <footer className="prompt-preset-preview-actions">
+            <Button className="primary-action" onClick={onApply} type="button" variant="primary">
+              <Play size={15} />
+              应用到当前组合
+            </Button>
+            <Button className="toolbar-button" onClick={onBack} type="button" variant="default">
+              取消
+            </Button>
+          </footer>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function PromptPresetCenterTemplateRow({
+  disabled,
+  label,
+  optional = false,
+  section,
+  templates,
+  onChange,
+}: {
+  disabled: boolean;
+  label: string;
+  optional?: boolean;
+  section: PromptBindingSection | null | undefined;
+  templates: PromptTemplate[];
+  onChange: (patch: Partial<PromptBindingSection>) => void;
+}) {
+  const templateValue = section?.baseTemplateId ?? (optional ? "__none" : templates[0]?.id ?? "");
+  return (
+    <div className="prompt-preset-center-template-row">
+      <div className="prompt-preset-center-template-label">
+        <FileText size={14} />
+        <span>{label}</span>
+      </div>
+      <Select
+        value={templateValue}
+        onValueChange={(value) =>
+          onChange({ baseTemplateId: value === "__none" ? null : value })
+        }
+        disabled={disabled}
+      >
+        <SelectTrigger className="prompt-preset-center-select-trigger">
+          <SelectValue placeholder={optional ? "不使用" : "选择模板"} />
+        </SelectTrigger>
+        <SelectContent>
+          {optional ? <SelectItem value="__none">不使用</SelectItem> : null}
+          {templates.map((template) => (
+            <SelectItem key={template.id} value={template.id}>
+              {getPromptTemplateDisplayName(template)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -1158,10 +5218,21 @@ function NewCombinationModal({
   onFormChange: (form: NewCombinationForm) => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
 }) {
+  const selectedPersonIds = form.personAssetId ? [form.personAssetId] : [];
   const selectedPerson = people.find((asset) => asset.asset.id === form.personAssetId) ?? null;
   const selectedGarments = form.garmentAssetIds
     .map((assetId) => garments.find((asset) => asset.asset.id === assetId))
     .filter((asset): asset is AssetFileView => Boolean(asset));
+  const visiblePersonAssets = filterNewCombinationPickerAssets(
+    people,
+    selectedPersonIds,
+    (asset) => asset.asset.id,
+  );
+  const visibleGarmentAssets = filterNewCombinationPickerAssets(
+    garments,
+    form.garmentAssetIds,
+    (asset) => asset.asset.id,
+  );
 
   function updateForm(patch: Partial<NewCombinationForm>) {
     onFormChange({ ...form, ...patch });
@@ -1182,9 +5253,9 @@ function NewCombinationModal({
             <h2>新建组合</h2>
             <p>创建一个新的图片组合，开始你的生图流程</p>
           </div>
-          <button onClick={onCancel} type="button" aria-label="关闭">
+          <Button onClick={onCancel} type="button" aria-label="关闭">
             <X size={18} />
-          </button>
+          </Button>
         </header>
         {error ? (
           <div className="modal-error">
@@ -1207,7 +5278,7 @@ function NewCombinationModal({
                     <b>*</b> 组合名称
                   </span>
                   <div className="modal-input-wrap">
-                    <input
+                    <Input
                       maxLength={50}
                       value={form.name}
                       onChange={(event) => updateForm({ name: event.target.value })}
@@ -1218,7 +5289,7 @@ function NewCombinationModal({
                 <label>
                   <span>组合编码（可选）</span>
                   <div className="modal-input-wrap">
-                    <input
+                    <Input
                       maxLength={50}
                       value={form.code}
                       onChange={(event) => updateForm({ code: event.target.value })}
@@ -1230,7 +5301,7 @@ function NewCombinationModal({
               <label className="modal-field-block">
                 <span>描述（可选）</span>
                 <div className="modal-input-wrap modal-input-wrap--textarea">
-                  <textarea
+                  <Textarea
                     maxLength={200}
                     rows={3}
                     placeholder="输入组合的描述，帮助你更好地管理和识别"
@@ -1245,13 +5316,13 @@ function NewCombinationModal({
               <h3>2. 选择初始素材 <span>（创建入库前必须选择人物图和服装图）</span></h3>
               <div className="modal-asset-layout">
                 <ModalAssetPicker
-                  assets={people}
+                  assets={visiblePersonAssets}
                   emptyText="暂无人物图"
                   importLabel={importingType === "person" ? "导入中" : "导入人物图"}
                   isImporting={importingType === "person"}
                   label="人物图片"
-                  selectedIds={form.personAssetId ? [form.personAssetId] : []}
-                  helperText="点击缩略图选择，或从本地导入新人物图"
+                  selectedIds={selectedPersonIds}
+                  helperText="创建时不会自动带入素材库图片，请从本地导入人物图"
                   onImport={() => onImport("person")}
                   onSelect={(assetId) => updateForm({ personAssetId: assetId })}
                 />
@@ -1262,13 +5333,13 @@ function NewCombinationModal({
                   label="预览"
                 />
                 <ModalAssetPicker
-                  assets={garments}
+                  assets={visibleGarmentAssets}
                   emptyText="暂无服装图"
                   importLabel={importingType === "garment" ? "导入中" : "导入服装图"}
                   isImporting={importingType === "garment"}
                   label="服装图片（至少 1 张建议多角度）"
                   selectedIds={form.garmentAssetIds}
-                  helperText="可选择多张，最多 4 张，顺序按选择时间排列"
+                  helperText="创建时不会自动带入素材库图片，请从本地导入服装图"
                   onImport={() => onImport("garment")}
                   onSelect={toggleGarmentForDraft}
                 />
@@ -1280,86 +5351,325 @@ function NewCombinationModal({
                 />
               </div>
             </section>
-            <section className="modal-section">
-              <h3>3. 默认设置</h3>
-              <div className="modal-setting-grid">
-                <label>
-                  默认 Prompt 模板
-                  <select
-                    value={form.promptTemplate}
-                    onChange={(event) => updateForm({ promptTemplate: event.target.value })}
-                  >
-                    <option>默认模板（通用）</option>
-                  </select>
-                </label>
-                <label>
-                  默认模型
-                  <select
-                    value={form.modelId}
-                    onChange={(event) => updateForm({ modelId: event.target.value })}
-                  >
-                    <option>FLUX.1 dev</option>
-                    <option>{DEFAULT_MODEL_ID}</option>
-                  </select>
-                </label>
-                <label>
-                  默认尺寸
-                  <select
-                    value={form.size}
-                    onChange={(event) =>
-                      updateForm({ size: event.target.value as (typeof MODEL_SIZES)[number] })
-                    }
-                  >
-                    {MODEL_SIZES.map((size) => (
-                      <option key={size} value={size}>
-                        {size}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  默认生成数量
-                  <span className="modal-stepper">
-                    <button
-                      onClick={() => updateForm({ outputCount: Math.max(1, form.outputCount - 1) })}
-                      type="button"
-                      aria-label="减少生成数量"
-                    >
-                      <Minus size={15} />
-                    </button>
-                    <input value={form.outputCount} readOnly />
-                    <button
-                      onClick={() => updateForm({ outputCount: Math.min(4, form.outputCount + 1) })}
-                      type="button"
-                      aria-label="增加生成数量"
-                    >
-                      <Plus size={15} />
-                    </button>
-                  </span>
-                </label>
-              </div>
-            </section>
           </div>
           <footer className="modal-footer">
-            <label className="modal-checkbox">
-              <input
-                checked={form.openAfterCreate}
-                onChange={(event) => updateForm({ openAfterCreate: event.target.checked })}
-                type="checkbox"
-              />
-              创建后立即打开并进入编辑
-            </label>
             <div>
-              <button className="toolbar-button" onClick={onCancel} type="button">
+              <Button className="toolbar-button" onClick={onCancel} type="button">
                 取消
-              </button>
-              <button className="primary-action" disabled={isSaving || !form.name.trim()} type="submit">
+              </Button>
+              <Button className="primary-action" disabled={isSaving || !form.name.trim()} type="submit">
                 {isSaving ? "创建中" : "创建组合"}
-              </button>
+              </Button>
             </div>
           </footer>
         </form>
       </section>
+    </div>
+  );
+}
+
+function PromptPresetModal({
+  copyPresetId,
+  draft,
+  error,
+  isSaving,
+  presets,
+  shouldApplyAfterCreate,
+  sourceMode,
+  templates,
+  onApplyAfterCreateChange,
+  onCancel,
+  onCopyPresetIdChange,
+  onCreate,
+  onDraftChange,
+  onSourceModeChange,
+}: {
+  copyPresetId: string;
+  draft: PromptPresetDraft;
+  error: string | null;
+  isSaving: boolean;
+  presets: PromptPresetOption[];
+  shouldApplyAfterCreate: boolean;
+  sourceMode: PromptPresetSourceMode;
+  templates: PromptTemplate[];
+  onApplyAfterCreateChange: (value: boolean) => void;
+  onCancel: () => void;
+  onCopyPresetIdChange: (presetId: string) => void;
+  onCreate: () => void;
+  onDraftChange: (draft: PromptPresetDraft) => void;
+  onSourceModeChange: (mode: PromptPresetSourceMode) => void;
+}) {
+  const systemTemplates = templates.filter((template) => template.templateType === "system");
+  const userTemplates = templates.filter((template) => template.templateType === "user");
+  const negativeTemplates = templates.filter((template) => template.templateType === "negative");
+  const activeVariables = buildPromptPresetVariablesForSections({
+    sections: [draft.system, draft.user, draft.negative],
+    templates,
+    existingVariables: draft.variables,
+  });
+  const previewValues = buildPreviewValues(activeVariables);
+
+  function updateDraft(patch: Partial<PromptPresetDraft>) {
+    onDraftChange({ ...draft, ...patch });
+  }
+
+  function updateSection(
+    key: "system" | "user" | "negative",
+    patch: Partial<PromptBindingSection>,
+  ) {
+    const currentSection = key === "negative" ? draft.negative : draft[key];
+    const nextSection: PromptBindingSection = {
+      mode: currentSection?.mode ?? "default",
+      baseTemplateId: currentSection?.baseTemplateId ?? null,
+      appendText: currentSection?.appendText ?? "",
+      overrideText: currentSection?.overrideText ?? "",
+      ...patch,
+    };
+    const nextDraft = { ...draft, [key]: nextSection } as PromptPresetDraft;
+    onDraftChange(syncPromptPresetDraftVariables(nextDraft, templates));
+  }
+
+  function updateVariableDefault(name: string, defaultValue: string) {
+    updateDraft({
+      variables: activeVariables.map((variable) =>
+        variable.name === name ? { ...variable, defaultValue } : variable,
+      ),
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="prompt-preset-modal" aria-modal="true" role="dialog">
+        <header className="modal-header">
+          <div>
+            <h2>新建组合方案</h2>
+            <p>创建一个可复用的输出方案，统一绑定模板与默认变量值</p>
+          </div>
+          <Button onClick={onCancel} type="button" aria-label="关闭">
+            <X size={18} />
+          </Button>
+        </header>
+        {error ? (
+          <div className="modal-error">
+            <CircleAlert size={15} />
+            {error}
+          </div>
+        ) : null}
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCreate();
+          }}
+        >
+          <div className="prompt-preset-grid">
+            <section className="settings-card prompt-preset-card">
+              <h3>1. 基本信息</h3>
+              <label>
+                <span>方案名称</span>
+                <Input
+                  maxLength={50}
+                  placeholder="请输入方案名称"
+                  value={draft.name}
+                  onChange={(event) => updateDraft({ name: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>适用场景</span>
+                <Select
+                  value={draft.scenario}
+                  onValueChange={(value) => updateDraft({ scenario: value })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="白底主图">白底主图</SelectItem>
+                    <SelectItem value="模特展示">模特展示</SelectItem>
+                    <SelectItem value="细节展示">细节展示</SelectItem>
+                    <SelectItem value="社媒风格">社媒风格</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label>
+                <span>方案描述</span>
+                <Textarea
+                  maxLength={200}
+                  placeholder="请输入方案描述（选填）"
+                  value={draft.description}
+                  onChange={(event) => updateDraft({ description: event.target.value })}
+                />
+              </label>
+              <div className="prompt-preset-source">
+                <strong>来源方式</strong>
+                <RadioGroup
+                  value={sourceMode}
+                  onValueChange={(value) => onSourceModeChange(value as PromptPresetSourceMode)}
+                >
+                  <label>
+                    <RadioGroupItem value="blank" />
+                    空白创建
+                  </label>
+                  <label>
+                    <RadioGroupItem value="copy" />
+                    从现有方案复制
+                  </label>
+                </RadioGroup>
+                <Select
+                  disabled={sourceMode !== "copy"}
+                  value={copyPresetId}
+                  onValueChange={onCopyPresetIdChange}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择已有方案" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {presets.map((preset) => (
+                      <SelectItem key={preset.id} value={preset.id}>
+                        {preset.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </section>
+            <section className="settings-card prompt-preset-card">
+              <h3>2. 绑定输出方案模板</h3>
+              <PromptPresetTemplateRow
+                label="系统规则模板"
+                section={draft.system}
+                templates={systemTemplates}
+                onChange={(patch) => updateSection("system", patch)}
+              />
+              <PromptPresetTemplateRow
+                label="细节描述模板"
+                section={draft.user}
+                templates={userTemplates}
+                onChange={(patch) => updateSection("user", patch)}
+              />
+              <PromptPresetTemplateRow
+                label="避坑描述模板"
+                section={draft.negative}
+                templates={negativeTemplates}
+                optional
+                onChange={(patch) => updateSection("negative", patch)}
+              />
+              <p className="panel-note">系统会自动组合三段输出内容，工作台默认以方案方式使用。</p>
+            </section>
+            <section className="settings-card prompt-preset-card">
+              <h3>3. 默认变量值</h3>
+              <div className="prompt-preset-variable-table">
+                <div className="prompt-preset-variable-table__head">
+                  <span>变量</span>
+                  <span>含义</span>
+                  <span>默认值</span>
+                </div>
+                {activeVariables.map((variable) => (
+                  <div className="prompt-preset-variable-row" key={variable.name}>
+                    <code>{`{{${variable.name}}}`}</code>
+                    <span>{getPromptVariableDisplayLabel(variable)}</span>
+                    <Input
+                      value={variable.defaultValue ?? ""}
+                      onChange={(event) => updateVariableDefault(variable.name, event.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section className="settings-card prompt-preset-card">
+              <h3>4. 预览摘要</h3>
+              <dl className="plain-dl prompt-preset-summary">
+                <dt>方案名称</dt>
+                <dd>{draft.name || "--"}</dd>
+                <dt>适用场景</dt>
+                <dd>{draft.scenario || "--"}</dd>
+                <dt>绑定模板</dt>
+                <dd>细节描述 / 避坑描述</dd>
+                <dt>变量状态</dt>
+                <dd>已配置 {activeVariables.length}</dd>
+              </dl>
+              <div className="prompt-preview-stack">
+                <PromptPreviewBlock
+                  title="系统规则"
+                  text={renderPromptSectionPreview(draft.system, templates, previewValues as PromptWorkbenchVariables)}
+                  tone="system"
+                />
+                <PromptPreviewBlock
+                  title="细节描述"
+                  text={renderPromptSectionPreview(draft.user, templates, previewValues as PromptWorkbenchVariables)}
+                  tone="user"
+                />
+                {draft.negative ? (
+                  <PromptPreviewBlock
+                    title="避坑描述"
+                    text={renderPromptSectionPreview(draft.negative, templates, previewValues as PromptWorkbenchVariables)}
+                    tone="negative"
+                  />
+                ) : null}
+              </div>
+            </section>
+          </div>
+          <footer className="modal-footer prompt-preset-footer">
+            <label>
+              <Checkbox
+                checked={shouldApplyAfterCreate}
+                onCheckedChange={(checked) => onApplyAfterCreateChange(checked === true)}
+              />
+              创建后立即应用到当前方案
+            </label>
+            <div>
+              <Button className="toolbar-button" onClick={onCancel} type="button">
+                取消
+              </Button>
+              <Button className="primary-action" disabled={isSaving || !draft.name.trim()} type="submit">
+                {isSaving ? "创建中" : "创建方案"}
+              </Button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function PromptPresetTemplateRow({
+  disabled = false,
+  label,
+  optional = false,
+  section,
+  templates,
+  onChange,
+}: {
+  disabled?: boolean;
+  label: string;
+  optional?: boolean;
+  section: PromptBindingSection | null | undefined;
+  templates: PromptTemplate[];
+  onChange: (patch: Partial<PromptBindingSection>) => void;
+}) {
+  const templateValue = section?.baseTemplateId ?? (optional ? "__none" : templates[0]?.id ?? "");
+
+  return (
+    <div className="prompt-preset-template-row">
+      <label>
+        <span>{label}</span>
+        <Select
+          disabled={disabled}
+          value={templateValue}
+          onValueChange={(value) => onChange({ baseTemplateId: value === "__none" ? null : value })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择模板" />
+          </SelectTrigger>
+          <SelectContent>
+            {optional ? <SelectItem value="__none">不使用</SelectItem> : null}
+            {templates.map((template) => (
+              <SelectItem key={template.id} value={template.id}>
+                {getPromptTemplateDisplayName(template)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </label>
     </div>
   );
 }
@@ -1389,16 +5699,16 @@ function ModalAssetPicker({
     <div className="modal-asset-picker">
       <div className="modal-asset-picker__header">
         <strong>{label}</strong>
-        <button disabled={isImporting} onClick={onImport} type="button">
+        <Button disabled={isImporting} onClick={onImport} type="button">
           <Import size={13} />
           {importLabel}
-        </button>
+        </Button>
       </div>
       {assets.length ? (
         <div className="modal-dropzone has-assets">
           <div className="modal-resource-grid">
             {assets.slice(0, 8).map((asset) => (
-              <button
+              <Button
                 className={selectedIds.includes(asset.asset.id) ? "is-selected" : ""}
                 key={asset.asset.id}
                 onClick={(event) => {
@@ -1413,12 +5723,12 @@ function ModalAssetPicker({
                     <CircleCheck size={13} fill="currentColor" />
                   </i>
                 ) : null}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
       ) : (
-        <button
+        <Button
           className="modal-dropzone modal-dropzone--empty"
           disabled={isImporting}
           onClick={onImport}
@@ -1429,7 +5739,7 @@ function ModalAssetPicker({
             <span>{emptyText}</span>
             <small>点击这里从本地选择图片</small>
           </>
-        </button>
+        </Button>
       )}
       <small className="modal-picker-hint">{helperText}</small>
     </div>
@@ -1482,6 +5792,7 @@ function AssetLibrary({
   onRefresh,
   onSelectPerson,
   onToggleGarment,
+  onReorder,
 }: {
   people: AssetFileView[];
   garments: AssetFileView[];
@@ -1494,12 +5805,13 @@ function AssetLibrary({
   onRefresh: () => void;
   onSelectPerson: (assetId: string) => void;
   onToggleGarment: (assetId: string) => void;
+  onReorder: (assetType: SortableAssetType, activeId: string, overId: string) => void;
 }) {
   return (
     <aside className="asset-library">
       <div className="panel-title">
         <h2>资源库</h2>
-        <button
+        <Button
           className="panel-collapse-button"
           onClick={onCollapse}
           title="折叠资源库"
@@ -1507,7 +5819,7 @@ function AssetLibrary({
           aria-label="折叠资源库"
         >
           <Menu size={18} />
-        </button>
+        </Button>
       </div>
       <AssetSection
         title="人物图片"
@@ -1518,6 +5830,7 @@ function AssetLibrary({
         isImporting={importingType === "person"}
         onAction={() => onImport("person")}
         onSelect={onSelectPerson}
+        onReorder={(activeId, overId) => onReorder("person", activeId, overId)}
       />
       <AssetSection
         title="服装图片"
@@ -1530,6 +5843,7 @@ function AssetLibrary({
         isImporting={importingType === "garment"}
         onAction={() => onImport("garment")}
         onSelect={onToggleGarment}
+        onReorder={(activeId, overId) => onReorder("garment", activeId, overId)}
       />
       <AssetSection
         title="结果图片"
@@ -1545,11 +5859,11 @@ function AssetLibrary({
         action="刷新"
         onAction={onRefresh}
       />
-      <button className="all-assets" onClick={onRefresh} type="button">
+      <Button className="all-assets" onClick={onRefresh} type="button">
         <Archive size={16} />
         刷新全部资源
         <ChevronRight size={16} />
-      </button>
+      </Button>
     </aside>
   );
 }
@@ -1563,6 +5877,7 @@ function AssetSection({
   isImporting = false,
   onAction,
   onSelect,
+  onReorder,
 }: {
   title: string;
   count: number;
@@ -1572,7 +5887,46 @@ function AssetSection({
   isImporting?: boolean;
   onAction: () => void;
   onSelect?: (assetId: string) => void;
+  onReorder?: (activeId: string, overId: string) => void;
 }) {
+  const suppressNextClick = useRef(false);
+  const canReorder = Boolean(onReorder);
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  function handleSelect(assetId: string) {
+    if (suppressNextClick.current) {
+      suppressNextClick.current = false;
+      return;
+    }
+    onSelect?.(assetId);
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!onReorder || !overId || activeId === overId) {
+      return;
+    }
+    suppressNextClick.current = true;
+    onReorder(activeId, overId);
+  }
+
+  const assetThumbs = assets.map((asset) => (
+    <SortableAssetThumb
+      asset={asset}
+      canReorder={canReorder}
+      key={asset.id}
+      onSelect={handleSelect}
+    />
+  ));
+
   return (
     <section className="asset-section">
       <div className="asset-section__header">
@@ -1582,28 +5936,26 @@ function AssetSection({
             {title} <span>({count})</span>
           </strong>
         </div>
-        <button disabled={isImporting} onClick={onAction} type="button">
+        <Button disabled={isImporting} onClick={onAction} type="button">
           {action === "导入" ? <Import size={14} /> : <RefreshCw size={14} />}
           {isImporting ? "导入中" : action}
-        </button>
+        </Button>
       </div>
       <div className="asset-grid">
         {assets.length ? (
-          assets.map((asset) => (
-            <button
-              key={asset.id}
-              className={`asset-thumb ${asset.selected ? "is-selected" : ""}`}
-              onClick={() => onSelect?.(asset.id)}
-              type="button"
+          canReorder ? (
+            <DndContext
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+              sensors={sensors}
             >
-              <AssetImage asset={asset} />
-              {asset.selected ? (
-                <span className="asset-thumb__check">
-                  <CircleCheck size={13} fill="currentColor" />
-                </span>
-              ) : null}
-            </button>
-          ))
+              <SortableContext items={assets.map((asset) => asset.id)} strategy={rectSortingStrategy}>
+                {assetThumbs}
+              </SortableContext>
+            </DndContext>
+          ) : (
+            assetThumbs
+          )
         ) : (
           <div className="asset-empty">
             <ImageIcon size={18} />
@@ -1611,17 +5963,63 @@ function AssetSection({
           </div>
         )}
         {action === "导入" ? (
-          <button
+          <Button
             className="asset-thumb asset-thumb--add"
             onClick={onAction}
             type="button"
             aria-label={`添加${title}`}
           >
             <Plus size={22} />
-          </button>
+          </Button>
         ) : null}
       </div>
     </section>
+  );
+}
+
+function SortableAssetThumb({
+  asset,
+  canReorder,
+  onSelect,
+}: {
+  asset: SelectableAsset;
+  canReorder: boolean;
+  onSelect: (assetId: string) => void;
+}) {
+  const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
+    disabled: !canReorder,
+    id: asset.id,
+  });
+  const style = {
+    transform: DndCSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <Button
+      ref={setNodeRef}
+      className={[
+        "asset-thumb",
+        asset.selected ? "is-selected" : "",
+        canReorder ? "is-sortable" : "",
+        isDragging ? "is-dragging" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onClick={() => onSelect(asset.id)}
+      style={style}
+      title={canReorder ? "拖动调整顺序" : undefined}
+      type="button"
+      {...attributes}
+      {...listeners}
+    >
+      <AssetImage asset={asset} />
+      {asset.selected ? (
+        <span className="asset-thumb__check">
+          <CircleCheck size={13} fill="currentColor" />
+        </span>
+      ) : null}
+    </Button>
   );
 }
 
@@ -1630,10 +6028,12 @@ function FlowWorkbench({
   canvasTool,
   credentialStatus,
   currentCombination,
+  isCanvasMaximized,
   latestTask,
+  modelId,
   modelSize,
   outputCount,
-  promptText,
+  promptSummaryText,
   results,
   selectedFlowNode,
   selectedGarments,
@@ -1642,6 +6042,7 @@ function FlowWorkbench({
   resetRevision,
   zoom,
   onCanvasToolChange,
+  onCanvasMaximizeToggle,
   onNodeSelect,
   onRun,
   onZoomChange,
@@ -1650,10 +6051,12 @@ function FlowWorkbench({
   canvasTool: CanvasTool;
   credentialStatus: ProviderCredentialStatus | null;
   currentCombination: ImageCombination | null;
+  isCanvasMaximized: boolean;
   latestTask: GenerationTaskDetail | null;
+  modelId: string;
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
-  promptText: string;
+  promptSummaryText: string;
   results: GenerationTaskResultAsset[];
   selectedFlowNode: FlowNodeId;
   selectedGarments: AssetFileView[];
@@ -1662,6 +6065,7 @@ function FlowWorkbench({
   resetRevision: number;
   zoom: number;
   onCanvasToolChange: (tool: CanvasTool) => void;
+  onCanvasMaximizeToggle: () => void;
   onNodeSelect: (nodeId: FlowNodeId) => void;
   onRun: () => void;
   onZoomChange: (zoom: number) => void;
@@ -1669,13 +6073,25 @@ function FlowWorkbench({
   const [nodePositions, setNodePositions] = useState<Record<FlowNodeId, FlowNodePosition>>(
     cloneInitialWorkflowNodePositions,
   );
+  const [nodeSizes, setNodeSizes] = useState<Record<FlowNodeId, FlowNodeSize>>(
+    cloneInitialWorkflowNodeSizes,
+  );
   const [viewport, setViewport] = useState<Viewport>(REACT_FLOW_DEFAULT_VIEWPORT);
   const [flowInstanceRevision, setFlowInstanceRevision] = useState(0);
+  const [isCanvasReady, setIsCanvasReady] = useState(false);
+  const [isSpacePanning, setIsSpacePanning] = useState(false);
+  const [isGridVisible, setIsGridVisible] = useState(true);
+  const canvasShellRef = useRef<HTMLElement | null>(null);
   const reactFlowRef = useRef<ReactFlowInstance<WorkflowReactFlowNode, WorkflowReactFlowEdge> | null>(
     null,
   );
   const taskStatus = getGenerationTaskStatusLabel(latestTask?.task.status);
   const modelReady = credentialStatus?.configured === true;
+  const isCanvasPanMode = canvasTool === "hand" || isSpacePanning;
+  const nodeEditEnabled = canvasTool === "select" && !isSpacePanning;
+  const nodeMoveEnabled = !isSpacePanning;
+  const nodeResizeEnabled = nodeEditEnabled;
+  const nodeSelectionEnabled = nodeEditEnabled;
   const taskInProgress = latestTask
     ? ["queued", "preparing", "calling_model", "waiting_result", "saving_result"].includes(
         latestTask.task.status,
@@ -1701,6 +6117,10 @@ function FlowWorkbench({
     [taskInProgress],
   );
   const nodeTypes = useMemo(() => ({ workflowNode: FlowNode }), []);
+  const flowNodeRenderQualityStyle = useMemo(
+    () => buildFlowNodeRenderQualityStyle(zoom) as CSSProperties,
+    [zoom],
+  );
 
   useEffect(() => {
     const nextZoom = clampZoom(zoom) / 100;
@@ -1714,20 +6134,66 @@ function FlowWorkbench({
 
   useEffect(() => {
     setNodePositions(cloneInitialWorkflowNodePositions());
+    setNodeSizes(cloneInitialWorkflowNodeSizes());
     setViewport(REACT_FLOW_DEFAULT_VIEWPORT);
     setFlowInstanceRevision((revision) => revision + 1);
   }, [resetRevision]);
 
-  const flowNodes = useMemo<WorkflowReactFlowNode[]>(
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.code !== "Space" || event.repeat || isEditableKeyTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      setIsSpacePanning(true);
+    }
+
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code === "Space") {
+        setIsSpacePanning(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    const canvasShell = canvasShellRef.current;
+    if (!canvasShell) {
+      return undefined;
+    }
+    const observedCanvasShell = canvasShell;
+
+    function updateCanvasReadiness() {
+      const rect = observedCanvasShell.getBoundingClientRect();
+      setIsCanvasReady(rect.width > 0 && rect.height > 0);
+    }
+
+    updateCanvasReadiness();
+    const resizeObserver = new ResizeObserver(updateCanvasReadiness);
+    resizeObserver.observe(observedCanvasShell);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  const baseFlowNodes = useMemo<WorkflowReactFlowNode[]>(
     () => [
       createWorkflowNode({
         accent: "green",
         body: selectedPerson ? (
           <>
-            <img
+            <AssetCanvasImage
+              asset={selectedPerson}
               className="flow-node__hero-image"
               alt={selectedPerson.asset.originalName}
-              src={assetThumbSrc(selectedPerson)}
             />
             <small>{selectedPerson.asset.originalName}</small>
             <strong>{formatDimensions(selectedPerson.asset.width, selectedPerson.asset.height)}</strong>
@@ -1735,9 +6201,11 @@ function FlowWorkbench({
         ) : (
           <NodeEmpty icon={<UserRound size={24} />} text="导入人物图" />
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "person",
         position: nodePositions.person,
         selected: selectedFlowNode === "person",
+        size: nodeSizes.person,
         status: selectedPerson ? "done" : "required",
         subtitle: selectedPerson ? "必选" : "未选择",
         title: "人物图",
@@ -1748,7 +6216,11 @@ function FlowWorkbench({
           <>
             <div className="flow-node__image-grid">
               {selectedGarments.slice(0, 4).map((asset) => (
-                <img alt={asset.asset.originalName} key={asset.asset.id} src={assetThumbSrc(asset)} />
+                <AssetCanvasImage
+                  asset={asset}
+                  alt={asset.asset.originalName}
+                  key={asset.asset.id}
+                />
               ))}
             </div>
             <span className="flow-node__count">{selectedGarments.length} 张</span>
@@ -1756,9 +6228,11 @@ function FlowWorkbench({
         ) : (
           <NodeEmpty icon={<BriefcaseBusiness size={24} />} text="导入服装图" />
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "garments",
         position: nodePositions.garments,
         selected: selectedFlowNode === "garments",
+        size: nodeSizes.garments,
         status: selectedGarments.length ? "done" : "required",
         subtitle: "至少 1 张",
         title: "服装图组",
@@ -1769,17 +6243,19 @@ function FlowWorkbench({
           <>
             <div className="flow-node__document">
               <FileText size={42} />
-              <span>用户 Prompt</span>
+            <span>输出方案</span>
             </div>
-            <strong>{promptText.trim().length} 字符</strong>
+            <strong>{promptSummaryText || "未选择方案"}</strong>
           </>
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "prompt",
         position: nodePositions.prompt,
         selected: selectedFlowNode === "prompt",
-        status: promptText.trim() ? "done" : "required",
-        subtitle: promptText.trim() ? "已配置" : "未配置",
-        title: "Prompt",
+        size: nodeSizes.prompt,
+        status: promptSummaryText ? "done" : "required",
+        subtitle: promptSummaryText ? "已配置" : "未配置",
+        title: "输出方案",
       }),
       createWorkflowNode({
         accent: "orange",
@@ -1788,15 +6264,17 @@ function FlowWorkbench({
             <div className="flow-node__model">
               <Box size={44} />
             </div>
-            <strong>{DEFAULT_MODEL_ID}</strong>
+            <strong>{modelId}</strong>
             <small>
               {modelSize} / {outputCount} 张
             </small>
           </>
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "model",
         position: nodePositions.model,
         selected: selectedFlowNode === "model",
+        size: nodeSizes.model,
         status: modelReady ? "done" : "pending",
         subtitle: modelReady ? "已选择" : "待配置",
         title: "模型",
@@ -1805,7 +6283,7 @@ function FlowWorkbench({
         accent: "blue",
         body: (
           <>
-            <button
+            <Button
               className="flow-node__play nodrag nopan"
               disabled={!canRun}
               onClick={(event) => {
@@ -1815,13 +6293,15 @@ function FlowWorkbench({
               type="button"
             >
               <Play size={30} fill="currentColor" />
-            </button>
+            </Button>
             <small>{canRun ? "点击执行生成" : "输入未完整"}</small>
           </>
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "execute",
         position: nodePositions.execute,
         selected: selectedFlowNode === "execute",
+        size: nodeSizes.execute,
         status: validationResult?.executable ? "done" : "required",
         subtitle: canRun ? "就绪" : "待补齐",
         title: "执行",
@@ -1831,15 +6311,17 @@ function FlowWorkbench({
         body: results.length ? (
           <div className="flow-node__image-grid flow-node__image-grid--results">
             {results.slice(0, 4).map((result) => (
-              <img alt="生成结果" key={result.id} src={convertFileSrc(result.thumbFilePath)} />
+              <img alt="生成结果" key={result.id} src={convertFileSrc(result.filePath)} />
             ))}
           </div>
         ) : (
           <NodeEmpty icon={<ImageIcon size={28} />} text={`将生成 ${outputCount} 张图片`} />
         ),
+        canResize: nodeResizeEnabled,
         nodeId: "result",
         position: nodePositions.result,
         selected: selectedFlowNode === "result",
+        size: nodeSizes.result,
         status: results.length ? "done" : "pending",
         subtitle: taskStatus,
         title: "结果",
@@ -1847,12 +6329,15 @@ function FlowWorkbench({
     ],
     [
       canRun,
+      nodeResizeEnabled,
+      modelId,
       modelReady,
       modelSize,
       nodePositions,
+      nodeSizes,
       onRun,
       outputCount,
-      promptText,
+      promptSummaryText,
       results,
       selectedFlowNode,
       selectedGarments,
@@ -1861,30 +6346,46 @@ function FlowWorkbench({
       validationResult?.executable,
     ],
   );
+  const [flowNodes, setFlowNodes] = useState<WorkflowReactFlowNode[]>(baseFlowNodes);
+
+  useEffect(() => {
+    setFlowNodes((currentNodes) => mergeWorkflowNodes(currentNodes, baseFlowNodes));
+  }, [baseFlowNodes]);
 
   const handleNodesChange = useCallback((changes: NodeChange<WorkflowReactFlowNode>[]) => {
-    setNodePositions((currentPositions) => {
-      let nextPositions = currentPositions;
-      for (const change of changes) {
-        if (change.type !== "position" || !change.position || !isFlowNodeId(change.id)) {
-          continue;
-        }
-        if (nextPositions === currentPositions) {
-          nextPositions = { ...currentPositions };
-        }
-        nextPositions[change.id] = change.position;
+    const allowedChanges = changes.filter((change) => {
+      if (change.type === "position") {
+        return nodeMoveEnabled;
       }
-      return nextPositions;
+      if (change.type === "dimensions") {
+        return nodeResizeEnabled;
+      }
+      return true;
     });
-  }, []);
+
+    setFlowNodes((currentNodes) => applyNodeChanges(allowedChanges, currentNodes));
+    setNodePositions((currentPositions) =>
+      applyWorkflowNodePositionChanges(currentPositions, changes, {
+        allowPositionChange: nodeMoveEnabled,
+      }),
+    );
+    setNodeSizes((currentSizes) =>
+      applyWorkflowNodeSizeChanges(currentSizes, changes, {
+        allowSizeChange: nodeResizeEnabled,
+      }),
+    );
+  }, [nodeMoveEnabled, nodeResizeEnabled]);
 
   const handleNodeClick = useCallback<NodeMouseHandler<WorkflowReactFlowNode>>(
     (_event, node) => {
+      if (!nodeSelectionEnabled) {
+        return;
+      }
       if (isFlowNodeId(node.id)) {
         onNodeSelect(node.id);
       }
     },
-    [onNodeSelect],
+    [nodeSelectionEnabled, onNodeSelect],
   );
 
   const handleViewportChange = useCallback(
@@ -1902,70 +6403,75 @@ function FlowWorkbench({
     [handleViewportChange],
   );
 
-  function handleFitCanvas() {
-    const instance = reactFlowRef.current;
-    if (instance) {
-      void instance.fitView({ duration: 160, maxZoom: 1, minZoom: 1, padding: 0.18 });
-    } else {
-      setViewport(REACT_FLOW_DEFAULT_VIEWPORT);
-    }
-    onZoomChange(100);
-  }
-
   return (
-    <section className={`canvas-shell canvas-shell--${canvasTool}`}>
+    <section
+      ref={canvasShellRef}
+      className={`canvas-shell canvas-shell--${isCanvasPanMode ? "hand" : "select"}${
+        isGridVisible ? " is-grid-visible" : ""
+      }`}
+      style={flowNodeRenderQualityStyle}
+    >
       <CanvasToolbar
         canvasTool={canvasTool}
+        isCanvasMaximized={isCanvasMaximized}
+        isGridVisible={isGridVisible}
         zoom={zoom}
         onCanvasToolChange={onCanvasToolChange}
+        onCanvasMaximizeToggle={onCanvasMaximizeToggle}
+        onGridVisibilityChange={setIsGridVisible}
         onZoomChange={onZoomChange}
-        onFitCanvas={handleFitCanvas}
       />
-      <ReactFlowProvider key={flowInstanceRevision}>
-        <FlowInternalsUpdater
-          revision={[
-            flowInstanceRevision,
-            selectedPerson?.asset.id ?? "",
-            selectedGarments.map((asset) => asset.asset.id).join("|"),
-            results.map((result) => result.id).join("|"),
-          ].join(":")}
-        />
-        <ReactFlow<WorkflowReactFlowNode, WorkflowReactFlowEdge>
-          className="flow-canvas"
-          nodes={flowNodes}
-          edges={workflowEdges}
-          nodeTypes={nodeTypes}
-          viewport={viewport}
-          minZoom={CANVAS_MIN_ZOOM / 100}
-          maxZoom={CANVAS_MAX_ZOOM / 100}
-          nodesConnectable={false}
-          edgesReconnectable={false}
-          connectOnClick={false}
-          deleteKeyCode={null}
-          edgesFocusable={false}
-          nodesDraggable
-          panOnDrag
-          panOnScroll
-          panOnScrollSpeed={1}
-          zoomOnPinch
-          zoomOnScroll={false}
-          zoomOnDoubleClick={false}
-          preventScrolling
-          selectNodesOnDrag={false}
-          onlyRenderVisibleElements={false}
-          proOptions={{ hideAttribution: true }}
-          onInit={(instance) => {
-            reactFlowRef.current = instance;
-          }}
-          onNodesChange={handleNodesChange}
-          onNodeClick={handleNodeClick}
-          onMoveEnd={handleMoveEnd}
-          onViewportChange={handleViewportChange}
-        >
-          <Background gap={18} size={1.4} color="#cbd5e1" />
-          <MiniMap className="flow-minimap" pannable zoomable />
-        </ReactFlow>
-      </ReactFlowProvider>
+      {isCanvasReady ? (
+        <ReactFlowProvider key={flowInstanceRevision}>
+          <FlowInternalsUpdater
+            revision={[
+              flowInstanceRevision,
+              selectedPerson?.asset.id ?? "",
+              selectedGarments.map((asset) => asset.asset.id).join("|"),
+              results.map((result) => result.id).join("|"),
+            ].join(":")}
+          />
+          <ReactFlow<WorkflowReactFlowNode, WorkflowReactFlowEdge>
+            className="flow-canvas"
+            nodes={flowNodes}
+            edges={workflowEdges}
+            nodeTypes={nodeTypes}
+            viewport={viewport}
+            minZoom={CANVAS_MIN_ZOOM / 100}
+            maxZoom={CANVAS_MAX_ZOOM / 100}
+            nodesConnectable={false}
+            edgesReconnectable={false}
+            connectOnClick={false}
+            deleteKeyCode={null}
+            edgesFocusable={false}
+            elementsSelectable={nodeSelectionEnabled}
+            nodesDraggable={nodeMoveEnabled}
+            nodesFocusable={nodeSelectionEnabled}
+            panOnDrag={isCanvasPanMode}
+            panOnScroll
+            panOnScrollSpeed={1}
+            zoomOnPinch
+            zoomOnScroll={false}
+            zoomOnDoubleClick={false}
+            preventScrolling
+            selectNodesOnDrag={false}
+            onlyRenderVisibleElements={false}
+            proOptions={{ hideAttribution: true }}
+            onInit={(instance) => {
+              reactFlowRef.current = instance;
+            }}
+            onNodesChange={handleNodesChange}
+            onNodeClick={handleNodeClick}
+            onMoveEnd={handleMoveEnd}
+            onViewportChange={handleViewportChange}
+          >
+            <Background gap={18} size={1.4} color="#cbd5e1" />
+            <MiniMap className="flow-minimap" pannable zoomable />
+          </ReactFlow>
+        </ReactFlowProvider>
+      ) : (
+        <div className="flow-canvas flow-canvas--pending" aria-hidden="true" />
+      )}
       <div className="flow-context">
         <span>{currentCombination?.name ?? "未保存组合"}</span>
         <strong>{validationResult?.executable ? "流程已就绪" : "待补充输入"}</strong>
@@ -1994,23 +6500,58 @@ function FlowInternalsUpdater({ revision }: { revision: string }) {
 
 function CanvasToolbar({
   canvasTool,
+  isCanvasMaximized,
+  isGridVisible,
   zoom,
+  onCanvasMaximizeToggle,
   onCanvasToolChange,
-  onFitCanvas,
+  onGridVisibilityChange,
   onZoomChange,
 }: {
   canvasTool: CanvasTool;
+  isCanvasMaximized: boolean;
+  isGridVisible: boolean;
   zoom: number;
+  onCanvasMaximizeToggle: () => void;
   onCanvasToolChange: (tool: CanvasTool) => void;
-  onFitCanvas: () => void;
+  onGridVisibilityChange: (isVisible: boolean) => void;
   onZoomChange: (zoom: number) => void;
 }) {
   const zoomLabel = Math.round(zoom);
+  const canvasMaximizeLabel = isCanvasMaximized ? "恢复画布布局" : "最大化画布";
+  const [isFlowHelpOpen, setIsFlowHelpOpen] = useState(false);
+  const flowHelpRef = useRef<HTMLDivElement>(null);
   const tools: Array<{ id: CanvasTool; icon: ReactNode; label: string }> = [
-    { id: "hand", icon: <Hand size={17} />, label: "拖拽画布" },
     { id: "select", icon: <MousePointer2 size={17} />, label: "选择节点" },
-    { id: "grid", icon: <Grid3X3 size={17} />, label: "网格视图" },
+    { id: "hand", icon: <Hand size={17} />, label: "拖动画布" },
   ];
+
+  useEffect(() => {
+    if (!isFlowHelpOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof Node && flowHelpRef.current?.contains(target)) {
+        return;
+      }
+      setIsFlowHelpOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsFlowHelpOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [isFlowHelpOpen]);
 
   function updateZoom(nextZoom: number) {
     onZoomChange(clampZoom(nextZoom));
@@ -2020,7 +6561,7 @@ function CanvasToolbar({
     <div className="canvas-toolbar">
       <div className="tool-segment" role="group" aria-label="画布工具">
         {tools.map((tool) => (
-          <button
+          <Button
             aria-label={tool.label}
             className={canvasTool === tool.id ? "is-active" : ""}
             key={tool.id}
@@ -2029,32 +6570,85 @@ function CanvasToolbar({
             type="button"
           >
             {tool.icon}
-          </button>
+          </Button>
         ))}
       </div>
       <div className="zoom-control" role="group" aria-label="缩放">
-        <button onClick={() => updateZoom(getPreviousZoomLevel(zoom))} type="button" aria-label="缩小">
+        <Button onClick={() => updateZoom(getPreviousZoomLevel(zoom))} type="button" aria-label="缩小">
           <Minus size={16} />
-        </button>
+        </Button>
         <span>{zoomLabel}%</span>
-        <button onClick={() => updateZoom(getNextZoomLevel(zoom))} type="button" aria-label="放大">
+        <Button onClick={() => updateZoom(getNextZoomLevel(zoom))} type="button" aria-label="放大">
           <Plus size={16} />
-        </button>
+        </Button>
       </div>
-      <button
-        className="canvas-icon"
-        onClick={onFitCanvas}
-        title="适配画布"
+      <Button
+        aria-pressed={isCanvasMaximized}
+        className={`canvas-icon${isCanvasMaximized ? " is-active" : ""}`}
+        onClick={onCanvasMaximizeToggle}
+        title={canvasMaximizeLabel}
         type="button"
-        aria-label="适配画布"
+        aria-label={canvasMaximizeLabel}
       >
-        <Maximize2 size={17} />
-      </button>
-      <button className="flow-help" type="button">
-        <CircleAlert size={16} />
-        流程说明
-        <ChevronDown size={15} />
-      </button>
+        {isCanvasMaximized ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+      </Button>
+      <Button
+        aria-pressed={isGridVisible}
+        aria-label={isGridVisible ? "隐藏网格" : "显示网格"}
+        className={`canvas-icon${isGridVisible ? " is-active" : ""}`}
+        onClick={() => onGridVisibilityChange(!isGridVisible)}
+        title={isGridVisible ? "隐藏网格" : "显示网格"}
+        type="button"
+      >
+        <Grid3X3 size={17} />
+      </Button>
+      <div className="flow-help-wrap" ref={flowHelpRef}>
+        <Button
+          aria-expanded={isFlowHelpOpen}
+          className={`flow-help${isFlowHelpOpen ? " is-open" : ""}`}
+          onClick={() => setIsFlowHelpOpen((value) => !value)}
+          type="button"
+        >
+          <CircleAlert size={16} />
+          流程说明
+          <ChevronDown size={15} />
+        </Button>
+        {isFlowHelpOpen ? (
+          <div className="flow-help-popover" role="dialog" aria-label="当前流程使用说明">
+            <header>
+              <strong>当前流程使用说明</strong>
+              <span>固定 6 个节点 / 5 条连线</span>
+            </header>
+            <ol>
+              <li>
+                <b>人物图</b>
+                <span>选择一张人物图片，作为试穿主体。</span>
+              </li>
+              <li>
+                <b>服装图组</b>
+                <span>至少选择一张服装图，可按资源库顺序调整多角度素材。</span>
+              </li>
+              <li>
+                <b>输出方案</b>
+                <span>选择输出方案，填写风格、背景、比例和追加描述。</span>
+              </li>
+              <li>
+                <b>模型</b>
+                <span>在设置中配置 Provider、模型、尺寸和生成数量。</span>
+              </li>
+              <li>
+                <b>执行</b>
+                <span>校验通过后点击执行生成，任务状态会在底部面板更新。</span>
+              </li>
+              <li>
+                <b>结果</b>
+                <span>生成完成后可在结果库预览、替换或复用图片。</span>
+              </li>
+            </ol>
+            <p>选择工具用于选中、拖动和缩放节点；拖动画布工具用于平移画布。</p>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -2062,9 +6656,11 @@ function CanvasToolbar({
 function createWorkflowNode({
   accent,
   body,
+  canResize,
   nodeId,
   position,
   selected,
+  size,
   status,
   subtitle,
   title,
@@ -2076,11 +6672,17 @@ function createWorkflowNode({
     sourcePosition: Position.Right,
     targetPosition: Position.Left,
     selected,
+    style: {
+      width: size.width,
+      height: size.height,
+    },
     data: {
       accent,
       body,
+      canResize,
       nodeId,
       selected,
+      size,
       status,
       subtitle,
       title,
@@ -2088,35 +6690,65 @@ function createWorkflowNode({
   };
 }
 
+function mergeWorkflowNodes(
+  currentNodes: WorkflowReactFlowNode[],
+  baseNodes: WorkflowReactFlowNode[],
+) {
+  const currentById = new Map(currentNodes.map((node) => [node.id, node]));
+  return baseNodes.map((baseNode) => {
+    const currentNode = currentById.get(baseNode.id);
+    return currentNode
+      ? {
+          ...currentNode,
+          ...baseNode,
+        }
+      : baseNode;
+  });
+}
+
 function FlowNode({ data, selected }: NodeProps<WorkflowReactFlowNode>) {
+  const isSelected = selected || data.selected;
+
   return (
-    <div
-      className={`flow-node flow-node--${data.accent} ${selected || data.selected ? "is-selected" : ""}`}
-      data-node-id={data.nodeId}
-    >
-      <Handle
-        className="flow-node__handle flow-node__handle--target"
-        id="target"
-        isConnectable={false}
-        position={Position.Left}
-        type="target"
+    <>
+      <NodeResizer
+        color="var(--node-border)"
+        handleClassName="flow-node__resize-handle nodrag nopan"
+        lineClassName="flow-node__resize-line nodrag nopan"
+        isVisible={data.canResize}
+        minWidth={WORKFLOW_NODE_MIN_SIZE.width}
+        minHeight={WORKFLOW_NODE_MIN_SIZE.height}
       />
-      <Handle
-        className="flow-node__handle flow-node__handle--source"
-        id="source"
-        isConnectable={false}
-        position={Position.Right}
-        type="source"
-      />
-      <div className="flow-node__header">
-        <div>
-          <strong>{data.title}</strong>
-          <span>{data.subtitle}</span>
+      <div
+        className={`flow-node flow-node--${data.accent} ${isSelected ? "is-selected" : ""}`}
+        data-node-id={data.nodeId}
+      >
+        <Handle
+          className="flow-node__handle flow-node__handle--target"
+          id="target"
+          isConnectable={false}
+          position={Position.Left}
+          type="target"
+        />
+        <Handle
+          className="flow-node__handle flow-node__handle--source"
+          id="source"
+          isConnectable={false}
+          position={Position.Right}
+          type="source"
+        />
+        <div className="flow-node__content">
+          <div className="flow-node__header">
+            <div>
+              <strong>{data.title}</strong>
+              <span>{data.subtitle}</span>
+            </div>
+            <StatusMark status={data.status} />
+          </div>
+          <div className="flow-node__body">{data.body}</div>
         </div>
-        <StatusMark status={data.status} />
       </div>
-      <div className="flow-node__body">{data.body}</div>
-    </div>
+    </>
   );
 }
 
@@ -2153,6 +6785,13 @@ function NodeEmpty({ icon, text }: { icon: ReactNode; text: string }) {
 
 function clampZoom(zoom: number) {
   return Math.max(CANVAS_MIN_ZOOM, Math.min(CANVAS_MAX_ZOOM, zoom));
+}
+
+function isEditableKeyTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 }
 
 function getPreviousZoomLevel(zoom: number) {
@@ -2192,7 +6831,7 @@ function ComposerHeader({
     <section className="composer-header">
       <div>
         <p>生成工作台</p>
-        <h1>配置图片、Prompt 和模型后直接提交生成</h1>
+        <h1>配置图片、输出方案和模型后直接提交生成</h1>
       </div>
       <div className="composer-status-row">
         <StatusPill active={Boolean(selectedPerson)} label="人物图" />
@@ -2259,16 +6898,16 @@ function AssetInputCard({
           </dl>
         </div>
       ) : (
-        <button className="upload-dropzone" onClick={onImport} type="button">
+        <Button className="upload-dropzone" onClick={onImport} type="button">
           <ImageIcon size={28} />
           <strong>选择本地图片</strong>
           <span>支持 PNG/JPG/JPEG，导入后会复制到工作区并生成缩略图。</span>
-        </button>
+        </Button>
       )}
-      <button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
+      <Button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
         <Import size={15} />
         {isImporting ? "导入中" : actionLabel}
-      </button>
+      </Button>
     </section>
   );
 }
@@ -2300,56 +6939,23 @@ function GarmentInputCard({
           {garments.map((asset) => (
             <article key={asset.asset.id}>
               <img alt={asset.asset.originalName} src={assetThumbSrc(asset)} />
-              <button onClick={() => onRemove(asset.asset.id)} type="button" aria-label="移除服装">
+              <Button onClick={() => onRemove(asset.asset.id)} type="button" aria-label="移除服装">
                 <X size={13} />
-              </button>
+              </Button>
             </article>
           ))}
         </div>
       ) : (
-        <button className="upload-dropzone" onClick={onImport} type="button">
+        <Button className="upload-dropzone" onClick={onImport} type="button">
           <BriefcaseBusiness size={28} />
           <strong>导入服装图</strong>
           <span>至少一张服装图才能保存组合并执行生成。</span>
-        </button>
+        </Button>
       )}
-      <button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
+      <Button className="ghost-wide" disabled={isImporting} onClick={onImport} type="button">
         <Import size={15} />
         {isImporting ? "导入中" : "添加服装图"}
-      </button>
-    </section>
-  );
-}
-
-function PromptEditorCard({
-  promptText,
-  onPromptChange,
-}: {
-  promptText: string;
-  onPromptChange: (value: string) => void;
-}) {
-  return (
-    <section className="composer-card prompt-editor-card">
-      <div className="composer-card__header">
-        <span>
-          <FileText size={28} />
-        </span>
-        <div>
-          <h2>Prompt</h2>
-          <p>这里的文本会写入 prompt binding，并进入生成任务快照。</p>
-        </div>
-      </div>
-      <textarea
-        value={promptText}
-        onChange={(event) => onPromptChange(event.target.value)}
-        rows={9}
-      />
-      <div className="field-meta">
-        <span>{promptText.trim().length} 字符</span>
-        <button onClick={() => onPromptChange(DEFAULT_PROMPT_TEXT)} type="button">
-          恢复默认
-        </button>
-      </div>
+      </Button>
     </section>
   );
 }
@@ -2358,6 +6964,7 @@ function ModelSettingsCard({
   apiKeyDraft,
   credentialStatus,
   isSavingApiKey,
+  modelId,
   modelSize,
   outputCount,
   onApiKeyDraftChange,
@@ -2368,6 +6975,7 @@ function ModelSettingsCard({
   apiKeyDraft: string;
   credentialStatus: ProviderCredentialStatus | null;
   isSavingApiKey: boolean;
+  modelId: string;
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
   onApiKeyDraftChange: (value: string) => void;
@@ -2389,30 +6997,35 @@ function ModelSettingsCard({
       <div className="settings-form-grid">
         <label>
           Provider
-          <input value={DEFAULT_PROVIDER} readOnly />
+          <Input value={DEFAULT_PROVIDER} readOnly />
         </label>
         <label>
           模型
-          <input value={DEFAULT_MODEL_ID} readOnly />
+          <Input value={modelId} readOnly />
         </label>
         <label>
           尺寸
-          <select
+          <Select
             value={modelSize}
-            onChange={(event) =>
-              onModelSizeChange(event.target.value as (typeof MODEL_SIZES)[number])
+            onValueChange={(value) =>
+              onModelSizeChange(value as (typeof MODEL_SIZES)[number])
             }
           >
-            {MODEL_SIZES.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {MODEL_SIZES.map((size) => (
+                <SelectItem key={size} value={size}>
+                  {size}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </label>
         <label>
           生成数量
-          <input
+          <Input
             min={1}
             max={4}
             type="number"
@@ -2431,15 +7044,15 @@ function ModelSettingsCard({
         <KeyRound size={18} />
       </div>
       <div className="api-key-row">
-        <input
+        <Input
           value={apiKeyDraft}
           onChange={(event) => onApiKeyDraftChange(event.target.value)}
           placeholder="粘贴 OpenAI API Key"
           type="password"
         />
-        <button disabled={!apiKeyDraft.trim() || isSavingApiKey} onClick={onSaveApiKey} type="button">
+        <Button disabled={!apiKeyDraft.trim() || isSavingApiKey} onClick={onSaveApiKey} type="button">
           {isSavingApiKey ? "保存中" : "保存"}
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -2463,7 +7076,7 @@ function ValidationSummary({
             ))}
           </ul>
         ) : (
-          <p>保存组合后会创建 prompt binding，并用当前模型参数提交任务。</p>
+          <p>保存组合后会创建输出方案绑定，并用当前模型参数提交任务。</p>
         )}
       </div>
     </div>
@@ -2502,10 +7115,16 @@ function PanelRestoreButton({
 }) {
   return (
     <aside className={`panel-restore panel-restore--${side}`}>
-      <button onClick={onClick} title={label} type="button" aria-label={label}>
+      <Button
+        className="panel-restore__button"
+        onClick={onClick}
+        title={label}
+        type="button"
+        aria-label={label}
+      >
         {side === "left" ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
         <span>{label.replace("展开", "")}</span>
-      </button>
+      </Button>
     </aside>
   );
 }
@@ -2516,10 +7135,14 @@ function InspectorPanel({
   currentCombination,
   latestTask,
   mode,
+  modelId,
+  modelProvider,
   modelSize,
   outputCount,
-  promptText,
-  recentTasks,
+  promptPresetOptions,
+  promptSummaryText,
+  promptTemplates,
+  promptWorkbench,
   results,
   selectedFlowNode,
   selectedGarments,
@@ -2531,20 +7154,22 @@ function InspectorPanel({
   onModelSizeChange,
   onModeChange,
   onOutputCountChange,
-  onPromptChange,
+  onPromptWorkbenchChange,
   onSaveApiKey,
-  onSelectNode,
-  onTaskChanged,
 }: {
   apiKeyDraft: string;
   credentialStatus: ProviderCredentialStatus | null;
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
   mode: SidePanelMode;
+  modelId: string;
+  modelProvider: string;
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
-  promptText: string;
-  recentTasks: GenerationTaskDetail[];
+  promptPresetOptions: PromptPresetOption[];
+  promptSummaryText: string;
+  promptTemplates: PromptTemplate[];
+  promptWorkbench: PromptWorkbenchState;
   results: GenerationTaskResultAsset[];
   selectedFlowNode: FlowNodeId;
   selectedGarments: AssetFileView[];
@@ -2556,12 +7181,12 @@ function InspectorPanel({
   onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
   onModeChange: (mode: SidePanelMode) => void;
   onOutputCountChange: (value: number) => void;
-  onPromptChange: (value: string) => void;
+  onPromptWorkbenchChange: (value: PromptWorkbenchState) => void;
   onSaveApiKey: () => void;
-  onSelectNode: (nodeId: FlowNodeId) => void;
-  onTaskChanged: (detail: GenerationTaskDetail | null) => void;
 }) {
   const nodeLabel = getFlowNodeLabel(selectedFlowNode);
+  const panelModes = getInspectorPanelModes(selectedFlowNode);
+  const activeMode = normalizeInspectorPanelMode(selectedFlowNode, mode);
   return (
     <aside className="property-panel">
       <div className="property-panel__header">
@@ -2571,7 +7196,7 @@ function InspectorPanel({
             当前选择： <strong>{nodeLabel}</strong>
           </p>
         </div>
-        <button
+        <Button
           className="panel-collapse-button"
           onClick={onCollapse}
           title="折叠属性面板"
@@ -2579,45 +7204,30 @@ function InspectorPanel({
           aria-label="折叠属性面板"
         >
           <ChevronLeft size={18} />
-        </button>
+        </Button>
       </div>
       <div className="tabs">
-        <button
-          className={mode === "details" ? "is-active" : ""}
-          onClick={() => onModeChange("details")}
-          type="button"
-        >
-          详情
-        </button>
-        <button
-          className={mode === "edit" ? "is-active" : ""}
-          onClick={() => onModeChange("edit")}
-          type="button"
-        >
-          编辑
-        </button>
-        <button
-          className={mode === "links" ? "is-active" : ""}
-          onClick={() => onModeChange("links")}
-          type="button"
-        >
-          关联
-        </button>
-        <button
-          className={mode === "history" ? "is-active" : ""}
-          onClick={() => onModeChange("history")}
-          type="button"
-        >
-          历史
-        </button>
+        {panelModes.map((panelMode) => (
+          <Button
+            className={activeMode === panelMode ? "is-active" : ""}
+            key={panelMode}
+            onClick={() => onModeChange(panelMode)}
+            type="button"
+          >
+            {panelMode === "details" ? "详情" : "编辑"}
+          </Button>
+        ))}
       </div>
-      {mode === "details" ? (
+      {activeMode === "details" ? (
         <NodeDetails
           currentCombination={currentCombination}
           latestTask={latestTask}
+          modelId={modelId}
+          modelProvider={modelProvider}
           modelSize={modelSize}
           outputCount={outputCount}
-          promptText={promptText}
+          promptSummaryText={promptSummaryText}
+          promptWorkbench={promptWorkbench}
           results={results}
           selectedFlowNode={selectedFlowNode}
           selectedGarments={selectedGarments}
@@ -2626,33 +7236,25 @@ function InspectorPanel({
           onImport={onImport}
         />
       ) : null}
-      {mode === "edit" ? (
+      {activeMode === "edit" ? (
         <NodeEditor
           apiKeyDraft={apiKeyDraft}
           credentialStatus={credentialStatus}
+          modelId={modelId}
           modelSize={modelSize}
           outputCount={outputCount}
-          promptText={promptText}
+          promptPresetOptions={promptPresetOptions}
+          promptTemplates={promptTemplates}
+          promptWorkbench={promptWorkbench}
           selectedFlowNode={selectedFlowNode}
           onApiKeyDraftChange={onApiKeyDraftChange}
           onImport={onImport}
           onModelSizeChange={onModelSizeChange}
           onOutputCountChange={onOutputCountChange}
-          onPromptChange={onPromptChange}
+          onPromptWorkbenchChange={onPromptWorkbenchChange}
           onSaveApiKey={onSaveApiKey}
         />
       ) : null}
-      {mode === "links" ? (
-        <NodeLinks
-          selectedFlowNode={selectedFlowNode}
-          onSelectNode={(nodeId) => {
-            onSelectNode(nodeId);
-            onModeChange("details");
-          }}
-        />
-      ) : null}
-      {mode === "history" ? <TaskHistory tasks={recentTasks} onTaskChanged={onTaskChanged} /> : null}
-      {mode !== "history" ? <TaskHistory tasks={recentTasks.slice(0, 3)} onTaskChanged={onTaskChanged} /> : null}
     </aside>
   );
 }
@@ -2660,9 +7262,12 @@ function InspectorPanel({
 function NodeDetails({
   currentCombination,
   latestTask,
+  modelId,
+  modelProvider,
   modelSize,
   outputCount,
-  promptText,
+  promptSummaryText,
+  promptWorkbench,
   results,
   selectedFlowNode,
   selectedGarments,
@@ -2672,9 +7277,12 @@ function NodeDetails({
 }: {
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
+  modelId: string;
+  modelProvider: string;
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
-  promptText: string;
+  promptSummaryText: string;
+  promptWorkbench: PromptWorkbenchState;
   results: GenerationTaskResultAsset[];
   selectedFlowNode: FlowNodeId;
   selectedGarments: AssetFileView[];
@@ -2700,16 +7308,21 @@ function NodeDetails({
   if (selectedFlowNode === "prompt") {
     return (
       <section className="detail-block">
-        <h3>Prompt 摘要</h3>
+        <h3>输出方案摘要</h3>
         <dl className="plain-dl">
-          <dt>来源</dt>
-          <dd>当前组合内置 Prompt</dd>
-          <dt>字符数</dt>
-          <dd>{promptText.trim().length}</dd>
+          <dt>输出方案</dt>
+          <dd>{promptSummaryText || "未选择方案"}</dd>
+          <dt>生成风格</dt>
+          <dd>{promptWorkbench.variables.style}</dd>
+          <dt>背景</dt>
+          <dd>{promptWorkbench.variables.background}</dd>
+          <dt>画面比例</dt>
+          <dd>{promptWorkbench.variables.aspectRatio}</dd>
+          <dt>服装类别</dt>
+          <dd>{promptWorkbench.variables.garmentCategory}</dd>
           <dt>状态</dt>
-          <dd>{promptText.trim() ? "已配置" : "未配置"}</dd>
+          <dd>{promptSummaryText ? "已配置" : "未配置"}</dd>
         </dl>
-        <p className="panel-note">{promptText || "还没有填写 Prompt。"}</p>
       </section>
     );
   }
@@ -2720,9 +7333,9 @@ function NodeDetails({
         <h3>模型配置</h3>
         <dl className="plain-dl">
           <dt>Provider</dt>
-          <dd>{DEFAULT_PROVIDER}</dd>
+          <dd>{modelProvider}</dd>
           <dt>模型</dt>
-          <dd>{DEFAULT_MODEL_ID}</dd>
+          <dd>{modelId}</dd>
           <dt>尺寸</dt>
           <dd>{modelSize}</dd>
           <dt>生成数量</dt>
@@ -2747,7 +7360,7 @@ function NodeDetails({
       {results.length ? (
         <div className="garment-detail-grid">
           {results.slice(0, 6).map((result) => (
-            <button
+            <Button
               key={result.id}
               onClick={() => {
                 openGenerationResult(result.assetId).catch(() => undefined);
@@ -2755,7 +7368,7 @@ function NodeDetails({
               type="button"
             >
               <img alt="生成结果" src={convertFileSrc(result.thumbFilePath)} />
-            </button>
+            </Button>
           ))}
         </div>
       ) : (
@@ -2777,28 +7390,34 @@ function NodeDetails({
 function NodeEditor({
   apiKeyDraft,
   credentialStatus,
+  modelId,
   modelSize,
   outputCount,
-  promptText,
+  promptPresetOptions,
+  promptTemplates,
+  promptWorkbench,
   selectedFlowNode,
   onApiKeyDraftChange,
   onImport,
   onModelSizeChange,
   onOutputCountChange,
-  onPromptChange,
+  onPromptWorkbenchChange,
   onSaveApiKey,
 }: {
   apiKeyDraft: string;
   credentialStatus: ProviderCredentialStatus | null;
+  modelId: string;
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
-  promptText: string;
+  promptPresetOptions: PromptPresetOption[];
+  promptTemplates: PromptTemplate[];
+  promptWorkbench: PromptWorkbenchState;
   selectedFlowNode: FlowNodeId;
   onApiKeyDraftChange: (value: string) => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
   onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
   onOutputCountChange: (value: number) => void;
-  onPromptChange: (value: string) => void;
+  onPromptWorkbenchChange: (value: PromptWorkbenchState) => void;
   onSaveApiKey: () => void;
 }) {
   if (selectedFlowNode === "person" || selectedFlowNode === "garments") {
@@ -2806,28 +7425,22 @@ function NodeEditor({
     return (
       <section className="detail-block">
         <h3>{selectedFlowNode === "person" ? "人物图片" : "服装图片"}</h3>
-        <button className="ghost-wide" onClick={() => onImport(assetType)} type="button">
+        <Button className="ghost-wide" onClick={() => onImport(assetType)} type="button">
           <Import size={15} />
           {selectedFlowNode === "person" ? "替换人物图" : "添加服装图"}
-        </button>
+        </Button>
       </section>
     );
   }
 
   if (selectedFlowNode === "prompt") {
     return (
-      <section className="detail-block">
-        <h3>Prompt 编辑</h3>
-        <textarea
-          rows={10}
-          value={promptText}
-          onChange={(event) => onPromptChange(event.target.value)}
-        />
-        <button className="ghost-wide" onClick={() => onPromptChange(DEFAULT_PROMPT_TEXT)} type="button">
-          <RefreshCw size={15} />
-          恢复默认 Prompt
-        </button>
-      </section>
+      <PromptWorkbenchEditor
+        presetOptions={promptPresetOptions}
+        templates={promptTemplates}
+        value={promptWorkbench}
+        onChange={onPromptWorkbenchChange}
+      />
     );
   }
 
@@ -2837,23 +7450,32 @@ function NodeEditor({
         <section className="detail-block">
           <h3>模型参数</h3>
           <label>
+            模型
+            <Input value={modelId} readOnly />
+          </label>
+          <label>
             尺寸
-            <select
+            <Select
               value={modelSize}
-              onChange={(event) =>
-                onModelSizeChange(event.target.value as (typeof MODEL_SIZES)[number])
+              onValueChange={(value) =>
+                onModelSizeChange(value as (typeof MODEL_SIZES)[number])
               }
             >
-              {MODEL_SIZES.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MODEL_SIZES.map((size) => (
+                  <SelectItem key={size} value={size}>
+                    {size}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </label>
           <label>
             生成数量
-            <input
+            <Input
               min={1}
               max={4}
               type="number"
@@ -2882,35 +7504,292 @@ function NodeEditor({
   );
 }
 
-function NodeLinks({
-  selectedFlowNode,
-  onSelectNode,
+function PromptWorkbenchEditor({
+  presetOptions,
+  templates,
+  value,
+  onChange,
 }: {
-  selectedFlowNode: FlowNodeId;
-  onSelectNode: (nodeId: FlowNodeId) => void;
+  presetOptions: PromptPresetOption[];
+  templates: PromptTemplate[];
+  value: PromptWorkbenchState;
+  onChange: (value: PromptWorkbenchState) => void;
 }) {
-  const nodeOrder: FlowNodeId[] = ["person", "garments", "prompt", "model", "execute", "result"];
-  const selectedIndex = nodeOrder.indexOf(selectedFlowNode);
-  const related = nodeOrder.filter(
-    (nodeId, index) => Math.abs(index - selectedIndex) === 1 || nodeId === selectedFlowNode,
-  );
+  const selectedPreset = findPromptPresetOption(presetOptions, value.presetId);
+  const binding = buildPromptBindingFromWorkbench({
+    combinationId: "draft",
+    preset: selectedPreset,
+    variables: value.variables,
+    additionalInstructions: value.additionalInstructions,
+    advanced: value.advanced,
+  });
+  const advanced = value.advanced ?? {
+    system: binding.system,
+    user: binding.user,
+    negative: binding.negative ?? null,
+  };
+  const userTemplates = templates.filter((template) => template.templateType === "user");
+  const negativeTemplates = templates.filter((template) => template.templateType === "negative");
+  const activeVariables = buildPromptPresetVariablesForSections({
+    fallbackVariables: selectedPreset?.variableDefinitions ?? [],
+    sections: [advanced.system, advanced.user, advanced.negative],
+    templates,
+    existingVariables: promptWorkbenchVariablesToTemplateVariables(value.variables),
+  });
+
+  function updateVariable(key: string, nextValue: string) {
+    onChange({
+      ...value,
+      variables: {
+        ...value.variables,
+        [key]: nextValue,
+      } as PromptWorkbenchVariables,
+    });
+  }
+
+  function renderVariableControl(variable: PromptTemplateVariable) {
+    const currentValue =
+      value.variables[variable.name] ??
+      buildPromptVariablePreviewValue(variable) ??
+      "";
+    if (variable.controlType === "select") {
+      return (
+        <Select
+          disabled={!variable.options?.length}
+          value={currentValue}
+          onValueChange={(nextValue) => updateVariable(variable.name, nextValue)}
+        >
+          <SelectTrigger className="prompt-workbench-variable-control">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {(variable.options ?? []).map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      );
+    }
+    if (variable.controlType === "combobox") {
+      return (
+        <PromptVariableComboboxInput
+          options={variable.options ?? []}
+          value={currentValue}
+          onChange={(nextValue) => updateVariable(variable.name, nextValue)}
+          placeholder={`输入${getPromptVariableDisplayLabel(variable)}`}
+        />
+      );
+    }
+    return (
+      <Input
+        value={currentValue}
+        onChange={(event) => updateVariable(variable.name, event.target.value)}
+        placeholder={`输入${getPromptVariableDisplayLabel(variable)}`}
+      />
+    );
+  }
+
+  function updateAdvancedSection(
+    key: keyof AdvancedPromptSections,
+    section: AdvancedPromptSections[keyof AdvancedPromptSections],
+  ) {
+    onChange({
+      ...value,
+      advanced: {
+        ...advanced,
+        [key]: section,
+      },
+    });
+  }
+
+  function buildTemplateOptions(templateOptions: PromptTemplate[]) {
+    return templateOptions.map((template) => (
+      <SelectItem key={template.id} value={template.id}>
+        {getPromptTemplateDisplayName(template)}
+        {template.source === "custom" ? "（自定义）" : ""}
+      </SelectItem>
+    ));
+  }
+
   return (
-    <section className="detail-block">
-      <h3>节点关联</h3>
-      <div className="node-link-list">
-        {related.map((nodeId) => (
-          <button
-            className={nodeId === selectedFlowNode ? "is-active" : ""}
-            key={nodeId}
-            onClick={() => onSelectNode(nodeId)}
-            type="button"
-          >
-            {getFlowNodeLabel(nodeId)}
-            <ChevronRight size={14} />
-          </button>
+    <section className="detail-block prompt-workbench-editor">
+      <h3>输出方案配置</h3>
+      <label>
+        输出方案
+        <Select
+          value={selectedPreset?.id ?? ""}
+          onValueChange={(nextPresetId) => {
+            const nextPreset = findPromptPresetOption(presetOptions, nextPresetId);
+            onChange({
+              ...value,
+              presetId: nextPresetId,
+              variables: nextPreset?.variables ?? value.variables,
+              advanced: null,
+            });
+          }}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择输出方案" />
+          </SelectTrigger>
+          <SelectContent>
+            {presetOptions.map((preset) => (
+              <SelectItem key={preset.id} value={preset.id}>
+                {preset.name}
+                {preset.source === "custom" ? "（自定义）" : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </label>
+      <div className="prompt-workbench-grid">
+        {activeVariables.map((variable) => (
+          <label key={variable.name}>
+            {getPromptVariableDisplayLabel(variable)}
+            {renderVariableControl(variable)}
+          </label>
         ))}
       </div>
+      <div className="prompt-workbench-actions">
+        <Button className="ghost-wide" onClick={() => onChange(DEFAULT_PROMPT_WORKBENCH_STATE)} type="button">
+          <RefreshCw size={15} />
+          恢复默认
+        </Button>
+      </div>
+      <details className="prompt-workbench-fold">
+        <summary>追加描述</summary>
+        <PromptAdvancedSectionEditor
+          label="细节描述"
+          section={advanced.user}
+          templates={userTemplates}
+          onChange={(section) => updateAdvancedSection("user", section)}
+        >
+          {buildTemplateOptions(userTemplates)}
+        </PromptAdvancedSectionEditor>
+        <PromptAdvancedSectionEditor
+          label="避坑描述"
+          section={advanced.negative}
+          templates={negativeTemplates}
+          onChange={(section) => updateAdvancedSection("negative", section)}
+        >
+          <SelectItem value="__none">不使用避坑描述</SelectItem>
+          {buildTemplateOptions(negativeTemplates)}
+        </PromptAdvancedSectionEditor>
+      </details>
+      <details className="prompt-workbench-fold">
+        <summary>最终输出预览</summary>
+        <div className="prompt-preview-stack">
+          <PromptPreviewBlock
+            title="系统规则"
+            text={renderPromptSectionPreview(binding.system, templates, value.variables)}
+            tone="system"
+          />
+          <PromptPreviewBlock
+            title="细节描述"
+            text={renderPromptSectionPreview(binding.user, templates, value.variables)}
+            tone="user"
+          />
+          {binding.negative ? (
+            <PromptPreviewBlock
+              title="避坑描述"
+              text={renderPromptSectionPreview(binding.negative, templates, value.variables)}
+              tone="negative"
+            />
+          ) : null}
+        </div>
+      </details>
     </section>
+  );
+}
+
+function PromptAdvancedSectionEditor({
+  children,
+  label,
+  section,
+  templates,
+  onChange,
+}: {
+  children: ReactNode;
+  label: string;
+  section: PromptBindingSection | null;
+  templates: PromptTemplate[];
+  onChange: (section: PromptBindingSection | null) => void;
+}) {
+  const nextSection = section ?? {
+    mode: "default" as PromptMode,
+    baseTemplateId: templates[0]?.id ?? null,
+    appendText: "",
+    overrideText: "",
+  };
+  const isNegativeSection = label === "避坑描述";
+  const templateValue = section?.baseTemplateId ?? (isNegativeSection ? "__none" : templates[0]?.id ?? "");
+  const isCustomTextVisible = nextSection.mode === "append" || nextSection.mode === "override";
+  const customTextValue =
+    nextSection.mode === "override" ? nextSection.overrideText : nextSection.appendText;
+  const customTextPlaceholder =
+    nextSection.mode === "override"
+      ? `输入${label}的替换内容`
+      : `输入要追加到${label}中的内容`;
+
+  return (
+    <div className="prompt-advanced-row">
+      <strong>{label}</strong>
+      <div className="prompt-advanced-row__controls">
+        <Select
+          value={templateValue}
+          onValueChange={(value) => {
+            if (value === "__none") {
+              onChange(null);
+              return;
+            }
+            onChange({
+              ...nextSection,
+              baseTemplateId: value,
+            });
+          }}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="选择模板" />
+          </SelectTrigger>
+          <SelectContent>{children}</SelectContent>
+        </Select>
+        <Select
+          value={nextSection.mode}
+          onValueChange={(value) =>
+            onChange({
+              ...nextSection,
+              mode: value as PromptMode,
+            })
+          }
+          disabled={!section && isNegativeSection}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">默认</SelectItem>
+            <SelectItem value="append">追加</SelectItem>
+            <SelectItem value="override">替换</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      {isCustomTextVisible ? (
+        <Textarea
+          rows={3}
+          value={customTextValue}
+          onChange={(event) =>
+            onChange({
+              ...nextSection,
+              appendText: nextSection.mode === "append" ? event.target.value : nextSection.appendText,
+              overrideText:
+                nextSection.mode === "override" ? event.target.value : nextSection.overrideText,
+            })
+          }
+          placeholder={customTextPlaceholder}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -2950,10 +7829,10 @@ function AssetDetailBlock({
           {emptyText}
         </div>
       )}
-      <button className="ghost-wide" onClick={onImport} type="button">
+      <Button className="ghost-wide" onClick={onImport} type="button">
         <RefreshCw size={15} />
         {asset ? "替换图片" : "导入图片"}
-      </button>
+      </Button>
     </section>
   );
 }
@@ -2984,10 +7863,10 @@ function GarmentDetailBlock({
           还没有选择服装图
         </div>
       )}
-      <button className="ghost-wide" onClick={onImport} type="button">
+      <Button className="ghost-wide" onClick={onImport} type="button">
         <Import size={15} />
         导入服装图片
-      </button>
+      </Button>
     </section>
   );
 }
@@ -3015,7 +7894,7 @@ function ValidationDetailBlock({
           ))}
         </ul>
       ) : (
-        <p className="panel-note">校验通过后，执行会先保存组合和 Prompt，再提交生成任务。</p>
+        <p className="panel-note">校验通过后，执行会先保存组合和输出方案，再提交生成任务。</p>
       )}
     </section>
   );
@@ -3043,79 +7922,16 @@ function ApiKeyDetailBlock({
         <KeyRound size={18} />
       </div>
       <div className="api-key-row api-key-row--stacked">
-        <input
+        <Input
           value={apiKeyDraft}
           onChange={(event) => onApiKeyDraftChange(event.target.value)}
           placeholder="OpenAI API Key"
           type="password"
         />
-        <button disabled={!apiKeyDraft.trim()} onClick={onSaveApiKey} type="button">
+        <Button disabled={!apiKeyDraft.trim()} onClick={onSaveApiKey} type="button">
           保存 API Key
-        </button>
+        </Button>
       </div>
-    </section>
-  );
-}
-
-function TaskHistory({
-  tasks,
-  onTaskChanged,
-}: {
-  tasks: GenerationTaskDetail[];
-  onTaskChanged: (detail: GenerationTaskDetail | null) => void;
-}) {
-  async function handleRetry(taskId: string) {
-    const task = await retryGenerationTask(taskId);
-    const detail = await getGenerationTaskDetail(task.id);
-    onTaskChanged(detail ?? { task, results: [] });
-  }
-
-  return (
-    <section className="history-block">
-      <div className="history-block__header">
-        <h3>历史任务</h3>
-        <span>{tasks.length} 条</span>
-      </div>
-      {tasks.length ? (
-        tasks.slice(0, 6).map((item) => (
-          <article className="history-item" key={item.task.id}>
-            {item.results[0] ? (
-              <img alt="任务结果" src={convertFileSrc(item.results[0].thumbFilePath)} />
-            ) : (
-              <span className="history-item__placeholder">
-                <ImageIcon size={16} />
-              </span>
-            )}
-            <div>
-              <strong>{item.task.modelId}</strong>
-              <span>
-                {item.task.provider} <i /> {item.task.outputCount} 张
-              </span>
-            </div>
-            <div className="history-item__meta">
-              <b className={`status-${item.task.status === "failed" ? "danger" : "success"}`}>
-                {getGenerationTaskStatusLabel(item.task.status)}
-              </b>
-              <time>{formatTaskTime(item.task.createdAt)}</time>
-              {item.task.status === "failed" || item.task.status === "cancelled" ? (
-                <button
-                  onClick={() => {
-                    void handleRetry(item.task.id);
-                  }}
-                  type="button"
-                >
-                  重试
-                </button>
-              ) : null}
-            </div>
-          </article>
-        ))
-      ) : (
-        <div className="panel-empty">
-          <Clock3 size={22} />
-          暂无历史任务
-        </div>
-      )}
     </section>
   );
 }
@@ -3123,11 +7939,9 @@ function TaskHistory({
 function BottomDashboard({
   currentCombination,
   latestTask,
-  onCollapse,
 }: {
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
-  onCollapse: () => void;
 }) {
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -3171,16 +7985,7 @@ function BottomDashboard({
   return (
     <section className="bottom-dashboard">
       <div className="task-status">
-        <button
-          className="bottom-panel-collapse-button"
-          onClick={onCollapse}
-          title="折叠任务面板"
-          type="button"
-          aria-label="折叠任务面板"
-        >
-          <span>任务状态</span>
-          <ChevronDown size={15} />
-        </button>
+        <h2>任务状态</h2>
         <div className="progress-layout">
           <div className="progress-ring">
             <svg viewBox="0 0 120 120">
@@ -3215,7 +8020,7 @@ function BottomDashboard({
           </div>
         </div>
         <div className="task-actions">
-          <button
+          <Button
             className="danger-button"
             disabled={!canCancel}
             onClick={() => {
@@ -3225,11 +8030,7 @@ function BottomDashboard({
           >
             <CircleX size={15} />
             {isCancelling ? "取消中" : "取消任务"}
-          </button>
-          <button className="toolbar-button" onClick={onCollapse} type="button">
-            <Eye size={15} />
-            最小化面板
-          </button>
+          </Button>
         </div>
         {cancellationNotice ? <p className="task-cancel-notice">{cancellationNotice}</p> : null}
       </div>
@@ -3356,7 +8157,7 @@ function getFlowNodeLabel(nodeId: FlowNodeId) {
     case "garments":
       return "服装图组节点";
     case "prompt":
-      return "Prompt 节点";
+      return "输出方案节点";
     case "model":
       return "模型节点";
     case "execute":
@@ -3408,7 +8209,7 @@ function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
       </h2>
       <div className="preview-results">
         {results.slice(0, 3).map((result) => (
-          <button
+          <Button
             className="result-card"
             key={result.id}
             onClick={() => {
@@ -3419,7 +8220,7 @@ function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
             <img alt="生成结果" src={convertFileSrc(result.thumbFilePath)} />
             <strong>{result.width} × {result.height}</strong>
             <small>打开大图</small>
-          </button>
+          </Button>
         ))}
       </div>
     </section>

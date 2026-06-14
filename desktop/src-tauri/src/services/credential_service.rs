@@ -107,7 +107,7 @@ impl CredentialStore for SystemCredentialStore {
 }
 
 fn validate_fixed_provider(provider: &str) -> AppResult<()> {
-    if provider == "openai" {
+    if matches!(provider, "openai" | "google" | "custom") {
         return Ok(());
     }
     Err(AppError::InvalidInput(format!(
@@ -121,14 +121,27 @@ fn mask_api_key(api_key: &str) -> String {
         return "****".to_string();
     }
     let prefix: String = chars.iter().take(4).collect();
-    let suffix: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("{prefix}...{suffix}")
 }
 
 #[cfg(target_os = "macos")]
 fn set_system_secret(provider: &str, api_key: &str) -> AppResult<()> {
     let delete_status = Command::new("/usr/bin/security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", provider])
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            provider,
+        ])
         .status()?;
     let _ = delete_status;
 
@@ -199,5 +212,23 @@ mod tests {
     fn mask_api_key_keeps_only_edges() {
         assert_eq!(mask_api_key("placeholder-api-key-value"), "plac...alue");
         assert_eq!(mask_api_key("short"), "****");
+    }
+
+    #[tokio::test]
+    async fn credential_status_accepts_supported_model_providers() {
+        let service = ProviderCredentialService::new(InMemoryCredentialStore::default());
+
+        for provider in ["openai", "google", "custom"] {
+            service
+                .set_provider_api_key(provider, "provider-api-key-value")
+                .await
+                .expect("set key");
+            let status = service
+                .get_provider_credential_status(provider)
+                .await
+                .expect("read status");
+            assert_eq!(status.provider, provider);
+            assert!(status.configured);
+        }
     }
 }

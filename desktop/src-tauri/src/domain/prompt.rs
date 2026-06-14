@@ -3,6 +3,111 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum PromptTemplateType {
+    System,
+    User,
+    Negative,
+}
+
+impl PromptTemplateType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptTemplateType::System => "system",
+            PromptTemplateType::User => "user",
+            PromptTemplateType::Negative => "negative",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "user" => PromptTemplateType::User,
+            "negative" => PromptTemplateType::Negative,
+            _ => PromptTemplateType::System,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTemplateSource {
+    BuiltIn,
+    Custom,
+}
+
+impl PromptTemplateSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptTemplateSource::BuiltIn => "built_in",
+            PromptTemplateSource::Custom => "custom",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "custom" => PromptTemplateSource::Custom,
+            _ => PromptTemplateSource::BuiltIn,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplateVariable {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub description: String,
+    pub example_value: String,
+    pub required: bool,
+    pub default_value: Option<String>,
+    #[serde(default)]
+    pub control_type: PromptVariableControlType,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptVariableControlType {
+    #[default]
+    Input,
+    Select,
+    Combobox,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePromptTemplateRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub template_type: PromptTemplateType,
+    pub body: String,
+    pub variables: Vec<PromptTemplateVariable>,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub is_default: bool,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplate {
+    pub id: String,
+    pub name: String,
+    pub template_type: PromptTemplateType,
+    pub source: PromptTemplateSource,
+    pub body: String,
+    pub variables: Vec<PromptTemplateVariable>,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub is_default: bool,
+    pub locked: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptMode {
     Default,
     Append,
@@ -61,11 +166,7 @@ pub struct SavePromptBindingRequest {
 
 impl SavePromptBindingRequest {
     #[cfg(test)]
-    pub fn minimal_for_test(
-        combination_id: &str,
-        mode: PromptMode,
-        variables_json: Value,
-    ) -> Self {
+    pub fn minimal_for_test(combination_id: &str, mode: PromptMode, variables_json: Value) -> Self {
         Self {
             id: None,
             combination_id: combination_id.to_string(),
@@ -96,6 +197,39 @@ pub struct PromptBinding {
     pub user: PromptBindingSection,
     pub negative: Option<PromptBindingSection>,
     pub variables_json: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePromptPresetRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub scenario: String,
+    pub description: String,
+    pub system: PromptBindingSection,
+    pub user: PromptBindingSection,
+    pub negative: Option<PromptBindingSection>,
+    pub variables: Vec<PromptTemplateVariable>,
+    pub is_default: bool,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPreset {
+    pub id: String,
+    pub name: String,
+    pub scenario: String,
+    pub description: String,
+    pub source: PromptTemplateSource,
+    pub system: PromptBindingSection,
+    pub user: PromptBindingSection,
+    pub negative: Option<PromptBindingSection>,
+    pub variables: Vec<PromptTemplateVariable>,
+    pub is_default: bool,
+    pub locked: bool,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -12,6 +12,10 @@ pub async fn save_image_combination_request(
     request: SaveImageCombinationRequest,
 ) -> AppResult<ImageCombination> {
     validate_combination_assets(database, &request).await?;
+    let person_asset_ids = normalize_person_asset_ids(
+        &request.person_asset_id,
+        request.person_asset_ids.iter().map(String::as_str),
+    );
 
     let id = request
         .id
@@ -40,6 +44,10 @@ pub async fn save_image_combination_request(
             .bind(&id)
             .execute(&mut *writer)
             .await?;
+        sqlx::query("DELETE FROM image_combination_people WHERE combination_id = ?")
+            .bind(&id)
+            .execute(&mut *writer)
+            .await?;
 
         for (index, asset_id) in request.garment_asset_ids.iter().enumerate() {
             sqlx::query(
@@ -49,6 +57,20 @@ pub async fn save_image_combination_request(
                     role,
                     sort_order
                 ) VALUES (?, ?, 'garment', ?)",
+            )
+            .bind(&id)
+            .bind(asset_id)
+            .bind(index as i64)
+            .execute(&mut *writer)
+            .await?;
+        }
+        for (index, asset_id) in person_asset_ids.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO image_combination_people (
+                    combination_id,
+                    asset_id,
+                    sort_order
+                ) VALUES (?, ?, ?)",
             )
             .bind(&id)
             .bind(asset_id)
@@ -100,11 +122,30 @@ pub async fn get_image_combination_by_id(
     .bind(id)
     .fetch_all(database.pool())
     .await?;
+    let person_rows = sqlx::query(
+        "SELECT asset_id
+         FROM image_combination_people
+         WHERE combination_id = ?
+         ORDER BY sort_order ASC",
+    )
+    .bind(id)
+    .fetch_all(database.pool())
+    .await?;
+    let person_asset_id = row.get::<String, _>("person_asset_id");
+    let stored_person_asset_ids = person_rows
+        .iter()
+        .map(|row| row.get::<String, _>("asset_id"))
+        .collect::<Vec<_>>();
+    let person_asset_ids = normalize_person_asset_ids(
+        &person_asset_id,
+        stored_person_asset_ids.iter().map(String::as_str),
+    );
 
     Ok(Some(ImageCombination {
         id: row.get("id"),
         name: row.get("name"),
-        person_asset_id: row.get("person_asset_id"),
+        person_asset_id,
+        person_asset_ids,
         garment_asset_ids: garment_rows
             .into_iter()
             .map(|row| row.get("asset_id"))
@@ -171,6 +212,21 @@ async fn validate_combination_assets(
             "personAssetId must reference a person asset".to_string(),
         ));
     }
+    for person_asset_id in normalize_person_asset_ids(
+        &request.person_asset_id,
+        request.person_asset_ids.iter().map(String::as_str),
+    ) {
+        let person_type: Option<String> =
+            sqlx::query_scalar("SELECT asset_type FROM assets WHERE id = ?")
+                .bind(&person_asset_id)
+                .fetch_optional(database.pool())
+                .await?;
+        if person_type.as_deref() != Some("person") {
+            return Err(AppError::InvalidInput(format!(
+                "person asset {person_asset_id} must reference a person asset"
+            )));
+        }
+    }
 
     for garment_asset_id in &request.garment_asset_ids {
         let garment_type: Option<String> =
@@ -186,6 +242,26 @@ async fn validate_combination_assets(
     }
 
     Ok(())
+}
+
+fn normalize_person_asset_ids<T: AsRef<str>>(
+    active_person_asset_id: &str,
+    person_asset_ids: impl IntoIterator<Item = T>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for asset_id in person_asset_ids {
+        let value = asset_id.as_ref().trim();
+        if value.is_empty() || !seen.insert(value.to_string()) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    let active_value = active_person_asset_id.trim();
+    if !active_value.is_empty() && seen.insert(active_value.to_string()) {
+        normalized.push(active_value.to_string());
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -242,6 +318,7 @@ mod tests {
                 id: None,
                 name: "look 1".to_string(),
                 person_asset_id: person.asset.id,
+                person_asset_ids: vec![],
                 garment_asset_ids: vec![garment_b.asset.id.clone(), garment_a.asset.id.clone()],
             },
         )
@@ -262,6 +339,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_image_combination_persists_ordered_people() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let person_a_path = paths.root().join("person-a.png");
+        let person_b_path = paths.root().join("person-b.png");
+        let garment_path = paths.root().join("garment.png");
+        write_png(&person_a_path, [12, 34, 56, 255]);
+        write_png(&person_b_path, [34, 56, 78, 255]);
+        write_png(&garment_path, [90, 34, 56, 255]);
+
+        let person_a = import_image_file(&database, &paths, person_a_path, AssetType::Person)
+            .await
+            .expect("person a");
+        let person_b = import_image_file(&database, &paths, person_b_path, AssetType::Person)
+            .await
+            .expect("person b");
+        let garment = import_image_file(&database, &paths, garment_path, AssetType::Garment)
+            .await
+            .expect("garment");
+
+        let saved = save_image_combination_request(
+            &database,
+            SaveImageCombinationRequest {
+                id: None,
+                name: "look people".to_string(),
+                person_asset_id: person_b.asset.id.clone(),
+                person_asset_ids: vec![person_a.asset.id.clone(), person_b.asset.id.clone()],
+                garment_asset_ids: vec![garment.asset.id],
+            },
+        )
+        .await
+        .expect("save combination");
+
+        assert_eq!(
+            saved.person_asset_ids,
+            vec![person_a.asset.id.clone(), person_b.asset.id.clone()]
+        );
+
+        let loaded = get_image_combination_by_id(&database, &saved.id)
+            .await
+            .expect("load combination")
+            .expect("combination");
+        assert_eq!(loaded.person_asset_id, person_b.asset.id);
+        assert_eq!(
+            loaded.person_asset_ids,
+            vec![person_a.asset.id, person_b.asset.id]
+        );
+    }
+
+    #[tokio::test]
     async fn save_image_combination_rejects_missing_assets() {
         let (_temp_dir, _paths, database) = test_workspace().await;
 
@@ -271,6 +397,7 @@ mod tests {
                 id: None,
                 name: "invalid".to_string(),
                 person_asset_id: "missing-person".to_string(),
+                person_asset_ids: vec![],
                 garment_asset_ids: vec!["missing-garment".to_string()],
             },
         )
