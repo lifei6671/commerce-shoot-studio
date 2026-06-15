@@ -134,17 +134,6 @@ fn mask_api_key(api_key: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn set_system_secret(provider: &str, api_key: &str) -> AppResult<()> {
-    let delete_status = Command::new("/usr/bin/security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            provider,
-        ])
-        .status()?;
-    let _ = delete_status;
-
     let status = Command::new("/usr/bin/security")
         .args([
             "add-generic-password",

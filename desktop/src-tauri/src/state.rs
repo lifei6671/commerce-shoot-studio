@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 use ulid::Ulid;
 
+use crate::domain::model::SaveModelConfigRequest;
 use crate::domain::task::{
     CreateGenerationTaskSnapshotRequest, LocalGenerationTask, StartGenerationRequest,
 };
@@ -16,10 +17,15 @@ use crate::error::{AppError, AppResult};
 use crate::providers::openai_provider::OpenAiImageProvider;
 use crate::services::assets::run_asset_gc;
 use crate::services::credential_service::ProviderCredentialService;
+use crate::services::system_settings::{
+    build_proxy_client, default_workspace_root, load_system_settings, notify_generation_finished,
+    run_system_maintenance,
+};
 use crate::services::task_runner::{
     cancel_generation_task_by_id, create_generation_task_snapshot, get_generation_task_by_id,
-    recover_interrupted_tasks, run_generation_flow_with_task_id_observer_and_cancellation,
-    GenerationTaskObserver,
+    recover_interrupted_tasks, rerun_generation_from_current_combination_with_provider,
+    retry_generation_task_with_provider,
+    run_generation_flow_with_task_id_observer_and_cancellation, GenerationTaskObserver,
 };
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::migrations::run_workspace_migrations;
@@ -59,6 +65,7 @@ struct GenerationTaskRuntimeState {
 }
 
 pub struct AppState {
+    app_config_dir: PathBuf,
     workspace_paths: WorkspacePaths,
     database: WorkspaceDatabase,
     generation_task_runtime: GenerationTaskRuntimeState,
@@ -66,14 +73,29 @@ pub struct AppState {
 
 impl AppState {
     pub async fn initialize(app_handle: &tauri::AppHandle) -> AppResult<Self> {
-        let workspace_root = app_handle
+        let default_workspace_root = default_workspace_root(app_handle)?;
+        let app_config_dir = app_handle
             .path()
-            .app_data_dir()
+            .app_config_dir()
             .map_err(|_| AppError::WorkspaceUnavailable)?;
-        Self::initialize_with_workspace(workspace_root).await
+        let settings = load_system_settings(&app_config_dir, &default_workspace_root)?;
+        let state = Self::initialize_with_workspace_and_config(
+            settings.workspace_root.clone().into(),
+            app_config_dir,
+        )
+        .await?;
+        run_system_maintenance(&state.database, &state.workspace_paths, &settings).await?;
+        Ok(state)
     }
 
     pub async fn initialize_with_workspace(workspace_root: PathBuf) -> AppResult<Self> {
+        Self::initialize_with_workspace_and_config(workspace_root.clone(), workspace_root).await
+    }
+
+    pub async fn initialize_with_workspace_and_config(
+        workspace_root: PathBuf,
+        app_config_dir: PathBuf,
+    ) -> AppResult<Self> {
         let workspace_paths = WorkspacePaths::new(workspace_root);
         workspace_paths.ensure()?;
 
@@ -83,6 +105,7 @@ impl AppState {
         recover_interrupted_tasks(&database).await?;
 
         Ok(Self {
+            app_config_dir,
             workspace_paths,
             database,
             generation_task_runtime: GenerationTaskRuntimeState::default(),
@@ -95,6 +118,10 @@ impl AppState {
 
     pub fn database(&self) -> &WorkspaceDatabase {
         &self.database
+    }
+
+    pub fn app_config_dir(&self) -> &PathBuf {
+        &self.app_config_dir
     }
 
     pub async fn start_generation_task(
@@ -137,6 +164,139 @@ impl AppState {
         self.run_generation_internal(request, Some(&observer)).await
     }
 
+    pub async fn retry_generation_task(
+        &self,
+        source_task_id: &str,
+    ) -> AppResult<LocalGenerationTask> {
+        self.retry_generation_task_internal(source_task_id, None)
+            .await
+    }
+
+    pub async fn retry_generation_task_with_events(
+        &self,
+        app_handle: tauri::AppHandle,
+        source_task_id: &str,
+    ) -> AppResult<LocalGenerationTask> {
+        let observer = |task: LocalGenerationTask| {
+            emit_generation_task_events(&app_handle, &task);
+        };
+        self.retry_generation_task_internal(source_task_id, Some(&observer))
+            .await
+    }
+
+    async fn retry_generation_task_internal(
+        &self,
+        source_task_id: &str,
+        observer: Option<GenerationTaskObserver<'_>>,
+    ) -> AppResult<LocalGenerationTask> {
+        let _start_guard = self.generation_task_runtime.start_lock.lock().await;
+
+        if let Some(task_id) = self.running_generation_task_id().await {
+            return Err(AppError::TaskAlreadyRunning(task_id));
+        }
+
+        let source_task = get_generation_task_by_id(&self.database, source_task_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!("generation task {source_task_id} was not found"))
+            })?;
+        let api_key = ProviderCredentialService::system()
+            .read_provider_api_key(&source_task.provider)
+            .await?;
+        let task_id = format!("generation_task_{}", Ulid::new());
+        let cancellation_token = CancellationToken::new();
+        {
+            let mut active_task = self.generation_task_runtime.running_task.lock().await;
+            *active_task = Some(RunningGenerationTask {
+                task_id: task_id.clone(),
+                cancellation_token: cancellation_token.clone(),
+            });
+        }
+        let cancellation_checker = || cancellation_token.is_cancelled();
+
+        let result = retry_generation_task_with_provider(
+            &self.database,
+            &self.workspace_paths,
+            &self.openai_provider()?,
+            &api_key,
+            source_task_id,
+            Some(task_id.clone()),
+            observer,
+            Some(&cancellation_checker),
+        )
+        .await;
+        self.clear_generation_task(&task_id).await;
+        result
+    }
+
+    pub async fn rerun_generation_from_current_combination(
+        &self,
+        combination_id: &str,
+        model_config: SaveModelConfigRequest,
+    ) -> AppResult<LocalGenerationTask> {
+        self.rerun_generation_from_current_combination_internal(combination_id, model_config, None)
+            .await
+    }
+
+    pub async fn rerun_generation_from_current_combination_with_events(
+        &self,
+        app_handle: tauri::AppHandle,
+        combination_id: &str,
+        model_config: SaveModelConfigRequest,
+    ) -> AppResult<LocalGenerationTask> {
+        let observer = |task: LocalGenerationTask| {
+            emit_generation_task_events(&app_handle, &task);
+        };
+        self.rerun_generation_from_current_combination_internal(
+            combination_id,
+            model_config,
+            Some(&observer),
+        )
+        .await
+    }
+
+    async fn rerun_generation_from_current_combination_internal(
+        &self,
+        combination_id: &str,
+        model_config: SaveModelConfigRequest,
+        observer: Option<GenerationTaskObserver<'_>>,
+    ) -> AppResult<LocalGenerationTask> {
+        let _start_guard = self.generation_task_runtime.start_lock.lock().await;
+
+        if let Some(task_id) = self.running_generation_task_id().await {
+            return Err(AppError::TaskAlreadyRunning(task_id));
+        }
+
+        let api_key = ProviderCredentialService::system()
+            .read_provider_api_key(&model_config.provider)
+            .await?;
+        let task_id = format!("generation_task_{}", Ulid::new());
+        let cancellation_token = CancellationToken::new();
+        {
+            let mut active_task = self.generation_task_runtime.running_task.lock().await;
+            *active_task = Some(RunningGenerationTask {
+                task_id: task_id.clone(),
+                cancellation_token: cancellation_token.clone(),
+            });
+        }
+        let cancellation_checker = || cancellation_token.is_cancelled();
+
+        let result = rerun_generation_from_current_combination_with_provider(
+            &self.database,
+            &self.workspace_paths,
+            &self.openai_provider()?,
+            &api_key,
+            combination_id,
+            model_config,
+            Some(task_id.clone()),
+            observer,
+            Some(&cancellation_checker),
+        )
+        .await;
+        self.clear_generation_task(&task_id).await;
+        result
+    }
+
     async fn run_generation_internal(
         &self,
         request: StartGenerationRequest,
@@ -171,7 +331,7 @@ impl AppState {
         let result = run_generation_flow_with_task_id_observer_and_cancellation(
             &self.database,
             &self.workspace_paths,
-            &OpenAiImageProvider::new(),
+            &self.openai_provider()?,
             &api_key,
             request,
             Some(task_id.clone()),
@@ -219,7 +379,7 @@ impl AppState {
             .read_provider_api_key(&task.provider)
             .await
             .unwrap_or_default();
-        let provider = OpenAiImageProvider::new();
+        let provider = self.openai_provider()?;
         let task =
             cancel_generation_task_by_id(&self.database, &provider, &api_key, task_id).await?;
         self.clear_generation_task(task_id).await;
@@ -237,6 +397,13 @@ impl AppState {
         }
         false
     }
+
+    fn openai_provider(&self) -> AppResult<OpenAiImageProvider> {
+        let settings = load_system_settings(&self.app_config_dir, self.workspace_paths.root())?;
+        Ok(OpenAiImageProvider::with_client(build_proxy_client(
+            &settings,
+        )?))
+    }
 }
 
 fn emit_generation_task_events(app_handle: &tauri::AppHandle, task: &LocalGenerationTask) {
@@ -250,6 +417,11 @@ fn emit_generation_task_events(app_handle: &tauri::AppHandle, task: &LocalGenera
     };
     if let Some(event) = terminal_event {
         let _ = app_handle.emit(event, task.clone());
+    }
+    if matches!(task.status.as_str(), "succeeded" | "failed") {
+        if let Ok(app_config_dir) = app_handle.path().app_config_dir() {
+            notify_generation_finished(&app_config_dir, &task.status, &task.id);
+        }
     }
 }
 

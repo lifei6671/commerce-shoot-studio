@@ -372,14 +372,14 @@ fn reason(
 }
 
 fn row_to_model_config(row: sqlx::sqlite::SqliteRow) -> AppResult<ModelConfig> {
-    let request = SaveModelConfigRequest {
+    let request = normalize_saved_model_config_request(SaveModelConfigRequest {
         id: Some(row.get("id")),
         provider: row.get("provider"),
         model_id: row.get("model_id"),
         params_json: serde_json::from_str(row.get::<String, _>("params_json").as_str()).map_err(
             |err| AppError::ModelConfigInvalid(format!("params_json is invalid: {err}")),
         )?,
-    };
+    });
     let validated = validate_model_config(ValidateModelConfigInput {
         request: request.clone(),
         advanced_models: true,
@@ -395,6 +395,50 @@ fn row_to_model_config(row: sqlx::sqlite::SqliteRow) -> AppResult<ModelConfig> {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
+}
+
+fn normalize_saved_model_config_request(request: SaveModelConfigRequest) -> SaveModelConfigRequest {
+    if resolve_model_definition(&request).is_ok() {
+        return request;
+    }
+
+    SaveModelConfigRequest {
+        id: request.id,
+        provider: "openai".to_string(),
+        model_id: "gpt-image-1".to_string(),
+        params_json: json!({
+            "outputCount": normalize_legacy_output_count(&request.params_json),
+            "size": normalize_legacy_size(&request.params_json),
+            "timeoutSeconds": normalize_legacy_timeout_seconds(&request.params_json)
+        }),
+    }
+}
+
+fn normalize_legacy_output_count(params_json: &Value) -> u64 {
+    params_json
+        .get("outputCount")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=4).contains(value))
+        .unwrap_or(1)
+}
+
+fn normalize_legacy_size(params_json: &Value) -> String {
+    let value = params_json
+        .get("size")
+        .and_then(Value::as_str)
+        .unwrap_or("1024x1024");
+    match value {
+        "1024x1024" | "1024x1536" | "1536x1024" => value.to_string(),
+        _ => "1024x1024".to_string(),
+    }
+}
+
+fn normalize_legacy_timeout_seconds(params_json: &Value) -> u64 {
+    params_json
+        .get("timeoutSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(120)
+        .clamp(30, 600)
 }
 
 fn validate_required_params(definition: &ModelDefinition, params_json: &Value) -> AppResult<()> {
@@ -459,153 +503,44 @@ fn validate_param_value(schema: &ModelParamSchema, value: &Value) -> AppResult<(
 }
 
 fn fixed_model_definitions() -> Vec<ModelDefinition> {
-    vec![
-        ModelDefinition {
-            provider: "openai".to_string(),
-            model_id: "gpt-image-1".to_string(),
-            display_name: "GPT Image 1".to_string(),
-            advanced: false,
-            input_limits: ModelInputLimits {
-                min_garments: 1,
-                max_garments: 4,
-            },
-            params_schema: vec![
-                ModelParamSchema {
-                    key: "outputCount".to_string(),
-                    label: "Output count".to_string(),
-                    kind: ModelParamKind::Integer,
-                    required: true,
-                    default_value: json!(1),
-                    min: Some(1),
-                    max: Some(4),
-                    options: Vec::new(),
-                },
-                ModelParamSchema {
-                    key: "size".to_string(),
-                    label: "Size".to_string(),
-                    kind: ModelParamKind::Select,
-                    required: true,
-                    default_value: json!("1024x1024"),
-                    min: None,
-                    max: None,
-                    options: vec![json!("1024x1024"), json!("1024x1536"), json!("1536x1024")],
-                },
-            ],
-            output: ModelOutputSchema {
-                count_param_key: "outputCount".to_string(),
-                min_count: 1,
-                max_count: 4,
-            },
-            provider_base_url: None,
+    vec![ModelDefinition {
+        provider: "openai".to_string(),
+        model_id: "gpt-image-1".to_string(),
+        display_name: "GPT Image 1".to_string(),
+        advanced: false,
+        input_limits: ModelInputLimits {
+            min_garments: 1,
+            max_garments: 4,
         },
-        ModelDefinition {
-            provider: "openai".to_string(),
-            model_id: "gpt-image-1-fast".to_string(),
-            display_name: "GPT Image 1 Fast".to_string(),
-            advanced: false,
-            input_limits: ModelInputLimits {
-                min_garments: 1,
-                max_garments: 2,
-            },
-            params_schema: vec![ModelParamSchema {
+        params_schema: vec![
+            ModelParamSchema {
                 key: "outputCount".to_string(),
                 label: "Output count".to_string(),
                 kind: ModelParamKind::Integer,
                 required: true,
                 default_value: json!(1),
                 min: Some(1),
-                max: Some(2),
+                max: Some(4),
                 options: Vec::new(),
-            }],
-            output: ModelOutputSchema {
-                count_param_key: "outputCount".to_string(),
-                min_count: 1,
-                max_count: 2,
             },
-            provider_base_url: None,
-        },
-        ModelDefinition {
-            provider: "openai".to_string(),
-            model_id: "gpt-image-1-pro".to_string(),
-            display_name: "GPT Image 1 Pro".to_string(),
-            advanced: true,
-            input_limits: ModelInputLimits {
-                min_garments: 1,
-                max_garments: 8,
-            },
-            params_schema: vec![ModelParamSchema {
-                key: "outputCount".to_string(),
-                label: "Output count".to_string(),
-                kind: ModelParamKind::Integer,
+            ModelParamSchema {
+                key: "size".to_string(),
+                label: "Size".to_string(),
+                kind: ModelParamKind::Select,
                 required: true,
-                default_value: json!(1),
-                min: Some(1),
-                max: Some(8),
-                options: Vec::new(),
-            }],
-            output: ModelOutputSchema {
-                count_param_key: "outputCount".to_string(),
-                min_count: 1,
-                max_count: 8,
+                default_value: json!("1024x1024"),
+                min: None,
+                max: None,
+                options: vec![json!("1024x1024"), json!("1024x1536"), json!("1536x1024")],
             },
-            provider_base_url: None,
+        ],
+        output: ModelOutputSchema {
+            count_param_key: "outputCount".to_string(),
+            min_count: 1,
+            max_count: 4,
         },
-        ModelDefinition {
-            provider: "google".to_string(),
-            model_id: "nano-banana".to_string(),
-            display_name: "Nano Banana".to_string(),
-            advanced: false,
-            input_limits: ModelInputLimits {
-                min_garments: 1,
-                max_garments: 4,
-            },
-            params_schema: vec![
-                ModelParamSchema {
-                    key: "outputCount".to_string(),
-                    label: "Output count".to_string(),
-                    kind: ModelParamKind::Integer,
-                    required: true,
-                    default_value: json!(1),
-                    min: Some(1),
-                    max: Some(4),
-                    options: Vec::new(),
-                },
-                ModelParamSchema {
-                    key: "size".to_string(),
-                    label: "Size".to_string(),
-                    kind: ModelParamKind::Select,
-                    required: true,
-                    default_value: json!("1024x1024"),
-                    min: None,
-                    max: None,
-                    options: vec![json!("1024x1024"), json!("1024x1536"), json!("1536x1024")],
-                },
-            ],
-            output: ModelOutputSchema {
-                count_param_key: "outputCount".to_string(),
-                min_count: 1,
-                max_count: 4,
-            },
-            provider_base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_string()),
-        },
-        ModelDefinition {
-            provider: "custom".to_string(),
-            model_id: "custom-image-model".to_string(),
-            display_name: "Custom Image Model".to_string(),
-            advanced: false,
-            input_limits: ModelInputLimits {
-                min_garments: 1,
-                max_garments: 8,
-            },
-            params_schema: custom_model_params_schema(),
-            output: ModelOutputSchema {
-                count_param_key: "outputCount".to_string(),
-                min_count: 1,
-                max_count: 8,
-            },
-            provider_base_url: None,
-        },
-    ]
+        provider_base_url: None,
+    }]
 }
 
 fn custom_model_definition(request: &SaveModelConfigRequest) -> AppResult<ModelDefinition> {
@@ -686,15 +621,20 @@ mod tests {
         assert!(public_defs.iter().all(|definition| !definition.advanced));
 
         let all_defs = list_model_definitions(true);
-        assert!(all_defs.iter().any(|definition| definition.advanced));
         assert!(public_defs
             .iter()
-            .any(|definition| definition.provider == "google"
-                && definition.model_id == "nano-banana"));
-        assert!(public_defs
-            .iter()
-            .any(|definition| definition.provider == "custom"
-                && definition.model_id == "custom-image-model"));
+            .any(|definition| definition.provider == "openai"
+                && definition.model_id == "gpt-image-1"));
+        assert_eq!(
+            public_defs
+                .iter()
+                .map(|definition| (&definition.provider, &definition.model_id))
+                .collect::<Vec<_>>(),
+            all_defs
+                .iter()
+                .map(|definition| (&definition.provider, &definition.model_id))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -719,8 +659,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_model_config_accepts_google_nano_banana() {
-        let validated = validate_model_config(ValidateModelConfigInput {
+    fn validate_model_config_rejects_unimplemented_catalog_model() {
+        let result = validate_model_config(ValidateModelConfigInput {
             request: SaveModelConfigRequest {
                 id: None,
                 provider: "google".to_string(),
@@ -731,12 +671,9 @@ mod tests {
                 }),
             },
             advanced_models: false,
-        })
-        .expect("validate model");
+        });
 
-        assert_eq!(validated.definition.provider, "google");
-        assert_eq!(validated.definition.model_id, "nano-banana");
-        assert_eq!(validated.normalized_output_count, 2);
+        assert!(matches!(result, Err(AppError::ModelConfigInvalid(_))));
     }
 
     #[test]
@@ -841,6 +778,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_model_config_falls_back_for_legacy_unsupported_catalog_model() {
+        let (_temp_dir, database) = test_database().await;
+        let mut writer = database.writer().await;
+        sqlx::query(
+            "INSERT INTO model_configs (id, provider, model_id, params_json)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind("legacy_google_config")
+        .bind("google")
+        .bind("nano-banana")
+        .bind(
+            json!({
+                "outputCount": 2,
+                "size": "1024x1536",
+                "timeoutSeconds": 900
+            })
+            .to_string(),
+        )
+        .execute(&mut *writer)
+        .await
+        .expect("insert legacy config");
+        drop(writer);
+
+        let reloaded = get_model_config_by_id(&database, "legacy_google_config")
+            .await
+            .expect("read legacy config")
+            .expect("config exists");
+
+        assert_eq!(reloaded.provider, "openai");
+        assert_eq!(reloaded.model_id, "gpt-image-1");
+        assert_eq!(reloaded.normalized_output_count, 2);
+        assert_eq!(reloaded.params_json["size"], json!("1024x1536"));
+        assert_eq!(reloaded.params_json["timeoutSeconds"], json!(600));
+    }
+
+    #[tokio::test]
     async fn validate_combination_uses_revision_and_draft_model_limits() {
         let (_temp_dir, database) = test_database().await;
         seed_assets_and_prompt_template(&database).await;
@@ -857,14 +830,16 @@ mod tests {
                         "garment_1".to_string(),
                         "garment_2".to_string(),
                         "garment_3".to_string(),
+                        "garment_1".to_string(),
+                        "garment_2".to_string(),
                     ],
                 },
                 draft_prompt_binding: Some(test_prompt_binding(json!({"garment": "linen dress"}))),
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1-fast".to_string(),
-                    params_json: json!({"outputCount": 2}),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 2, "size": "1024x1024"}),
                 }),
             },
         )
@@ -873,7 +848,7 @@ mod tests {
 
         assert_eq!(response.revision, 42);
         assert!(!response.executable);
-        assert_eq!(response.effective_limits.max_garments, 2);
+        assert_eq!(response.effective_limits.max_garments, 4);
         assert_eq!(response.effective_limits.normalized_output_count, 2);
         assert!(response
             .reasons
@@ -882,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_combination_recomputes_limits_when_draft_model_changes() {
+    async fn validate_combination_recomputes_output_count_when_draft_model_changes() {
         let (_temp_dir, database) = test_database().await;
         seed_assets_and_prompt_template(&database).await;
         let draft_combination = DraftImageCombination {
@@ -921,22 +896,20 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1-fast".to_string(),
-                    params_json: json!({"outputCount": 1}),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 3, "size": "1024x1024"}),
                 }),
             },
         )
         .await
-        .expect("validate fast");
+        .expect("validate updated model");
 
         assert!(standard.executable);
         assert_eq!(standard.effective_limits.max_garments, 4);
-        assert!(!fast.executable);
-        assert_eq!(fast.effective_limits.max_garments, 2);
-        assert!(fast
-            .reasons
-            .iter()
-            .any(|reason| reason.code == ValidationReasonCode::GarmentCountAboveMax));
+        assert_eq!(standard.effective_limits.normalized_output_count, 1);
+        assert!(fast.executable);
+        assert_eq!(fast.effective_limits.max_garments, 4);
+        assert_eq!(fast.effective_limits.normalized_output_count, 3);
     }
 
     #[tokio::test]

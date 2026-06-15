@@ -1,5 +1,6 @@
 use std::fs;
 use std::process::Command;
+use std::time::Duration;
 
 use image::GenericImageView;
 use serde_json::json;
@@ -12,14 +13,15 @@ use crate::domain::asset::{Asset, AssetType};
 use crate::domain::combination::{DraftImageCombination, ValidateCombinationRequest};
 use crate::domain::task::{
     CreateGenerationTaskResultRequest, CreateGenerationTaskSnapshotRequest, GenerationTaskDetail,
-    GenerationTaskInputAsset, GenerationTaskInputRole, GenerationTaskResult,
-    GenerationTaskResultAsset, LocalGenerationTask, StartGenerationRequest,
+    GenerationTaskExecutionLog, GenerationTaskHistoryPage, GenerationTaskHistoryQuery,
+    GenerationTaskHistoryStats, GenerationTaskInputAsset, GenerationTaskInputRole,
+    GenerationTaskResult, GenerationTaskResultAsset, LocalGenerationTask, StartGenerationRequest,
     APP_UNEXPECTED_SHUTDOWN, RUNNING_TASK_STATUSES,
 };
 use crate::error::{AppError, AppResult};
 use crate::providers::provider_trait::{
     GenerateInput, GenerateInputImage, GeneratedImage, ImageGenerationProvider, PromptPayload,
-    RemoteCancelResult,
+    ProviderError, RemoteCancelResult,
 };
 use crate::services::assets::get_asset_by_id;
 use crate::services::combinations::get_image_combination_by_id;
@@ -54,8 +56,47 @@ struct GenerationPlan {
 pub type GenerationTaskObserver<'a> = &'a (dyn Fn(LocalGenerationTask) + Send + Sync + 'a);
 pub type GenerationTaskCancellationChecker<'a> = &'a (dyn Fn() -> bool + Send + Sync + 'a);
 
+#[derive(Clone)]
+struct NormalizedHistoryQuery {
+    search: Option<String>,
+    status: Option<String>,
+    provider: Option<String>,
+    model_id: Option<String>,
+    created_from: Option<String>,
+    created_to: Option<String>,
+    limit: i64,
+    offset: i64,
+}
+
+impl From<GenerationTaskHistoryQuery> for NormalizedHistoryQuery {
+    fn from(query: GenerationTaskHistoryQuery) -> Self {
+        Self {
+            search: query.search.and_then(non_empty_string),
+            status: query.status.and_then(non_empty_string),
+            provider: query.provider.and_then(non_empty_string),
+            model_id: query.model_id.and_then(non_empty_string),
+            created_from: query.created_from.and_then(non_empty_string),
+            created_to: query.created_to.and_then(non_empty_string),
+            limit: query.limit.unwrap_or(20).clamp(1, 100),
+            offset: query.offset.unwrap_or(0).max(0),
+        }
+    }
+}
+
 pub async fn recover_interrupted_tasks(database: &WorkspaceDatabase) -> AppResult<u64> {
     let mut writer = database.writer().await;
+    let mut id_builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM generation_tasks WHERE status IN (");
+    let mut id_separated = id_builder.separated(", ");
+    for status in RUNNING_TASK_STATUSES {
+        id_separated.push_bind(status);
+    }
+    id_separated.push_unseparated(")");
+    let interrupted_task_ids: Vec<String> = id_builder
+        .build_query_scalar()
+        .fetch_all(&mut *writer)
+        .await?;
+
     let mut builder =
         QueryBuilder::new("UPDATE generation_tasks SET status = 'failed', error_code = ");
     builder.push_bind(APP_UNEXPECTED_SHUTDOWN);
@@ -68,6 +109,24 @@ pub async fn recover_interrupted_tasks(database: &WorkspaceDatabase) -> AppResul
     separated.push_unseparated(")");
 
     let result = builder.build().execute(&mut *writer).await?;
+    if !interrupted_task_ids.is_empty() {
+        let recovery_error_json = json!({ "code": APP_UNEXPECTED_SHUTDOWN }).to_string();
+        let mut log_builder = QueryBuilder::<sqlx::Sqlite>::new(
+            "UPDATE generation_task_execution_logs
+             SET finished_at = datetime('now'),
+                 success_response_json = NULL,
+                 error_response_json = ",
+        );
+        log_builder.push_bind(recovery_error_json);
+        log_builder
+            .push(", updated_at = datetime('now') WHERE finished_at IS NULL AND task_id IN (");
+        let mut log_separated = log_builder.separated(", ");
+        for task_id in interrupted_task_ids {
+            log_separated.push_bind(task_id);
+        }
+        log_separated.push_unseparated(")");
+        log_builder.build().execute(&mut *writer).await?;
+    }
     Ok(result.rows_affected())
 }
 
@@ -182,6 +241,8 @@ pub async fn retry_generation_task_with_provider<P: ImageGenerationProvider>(
     api_key: &str,
     source_task_id: &str,
     task_id: Option<String>,
+    observer: Option<GenerationTaskObserver<'_>>,
+    cancellation_checker: Option<GenerationTaskCancellationChecker<'_>>,
 ) -> AppResult<LocalGenerationTask> {
     let source_task = get_generation_task_by_id(database, source_task_id)
         .await?
@@ -213,15 +274,27 @@ pub async fn retry_generation_task_with_provider<P: ImageGenerationProvider>(
         },
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
 
-    if let Err(err) =
-        execute_generation_task(database, paths, provider, api_key, &task, plan, None, None).await
+    if let Err(err) = execute_generation_task(
+        database,
+        paths,
+        provider,
+        api_key,
+        &task,
+        plan,
+        observer,
+        cancellation_checker,
+    )
+    .await
     {
         if !matches!(err, AppError::GenerationCancelled(_)) {
             mark_generation_task_failed(database, &task.id, &err).await?;
         }
+        notify_generation_task_change(database, &task.id, observer).await?;
         return Err(err);
     }
+    notify_generation_task_change(database, &task.id, observer).await?;
 
     get_generation_task_by_id(database, &task.id)
         .await?
@@ -236,6 +309,8 @@ pub async fn rerun_generation_from_current_combination_with_provider<P: ImageGen
     combination_id: &str,
     model_config: crate::domain::model::SaveModelConfigRequest,
     task_id: Option<String>,
+    observer: Option<GenerationTaskObserver<'_>>,
+    cancellation_checker: Option<GenerationTaskCancellationChecker<'_>>,
 ) -> AppResult<LocalGenerationTask> {
     let mut plan = build_generation_plan(
         database,
@@ -276,15 +351,27 @@ pub async fn rerun_generation_from_current_combination_with_provider<P: ImageGen
         },
     )
     .await?;
+    notify_generation_task_change(database, &task.id, observer).await?;
 
-    if let Err(err) =
-        execute_generation_task(database, paths, provider, api_key, &task, plan, None, None).await
+    if let Err(err) = execute_generation_task(
+        database,
+        paths,
+        provider,
+        api_key,
+        &task,
+        plan,
+        observer,
+        cancellation_checker,
+    )
+    .await
     {
         if !matches!(err, AppError::GenerationCancelled(_)) {
             mark_generation_task_failed(database, &task.id, &err).await?;
         }
+        notify_generation_task_change(database, &task.id, observer).await?;
         return Err(err);
     }
+    notify_generation_task_change(database, &task.id, observer).await?;
 
     get_generation_task_by_id(database, &task.id)
         .await?
@@ -408,13 +495,19 @@ pub async fn get_generation_task_by_id(
             progress,
             message,
             request_summary_json,
+            response_summary_json,
             input_snapshot_json,
             final_prompt_snapshot_json,
             model_config_snapshot_json,
             asset_snapshot_json,
             output_count,
             cancel_mode,
+            error_code,
+            error_message,
+            error_detail,
             created_at,
+            started_at,
+            finished_at,
             updated_at
          FROM generation_tasks
          WHERE id = ?",
@@ -523,7 +616,12 @@ pub async fn get_generation_task_detail_by_id(
         return Ok(None);
     };
     let results = list_generation_task_result_assets(database, paths, id).await?;
-    Ok(Some(GenerationTaskDetail { task, results }))
+    let execution_logs = list_generation_task_execution_logs(database, id).await?;
+    Ok(Some(GenerationTaskDetail {
+        task,
+        results,
+        execution_logs,
+    }))
 }
 
 pub async fn get_latest_generation_task_detail_by_combination(
@@ -581,6 +679,71 @@ pub async fn list_recent_generation_task_details(
     .fetch_all(database.pool())
     .await?;
     list_generation_task_details_by_ids(database, paths, task_ids).await
+}
+
+pub async fn list_generation_task_history_details(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    query: GenerationTaskHistoryQuery,
+) -> AppResult<GenerationTaskHistoryPage> {
+    let normalized = NormalizedHistoryQuery::from(query);
+
+    let mut stats_builder = QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
+            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+            COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled
+         FROM generation_tasks",
+    );
+    push_history_filters(&mut stats_builder, &normalized, false);
+    let stats_row = stats_builder.build().fetch_one(database.pool()).await?;
+    let stats = GenerationTaskHistoryStats {
+        total: stats_row.get::<i64, _>("total"),
+        succeeded: stats_row.get::<i64, _>("succeeded"),
+        failed: stats_row.get::<i64, _>("failed"),
+        cancelled: stats_row.get::<i64, _>("cancelled"),
+    };
+    let providers =
+        list_generation_task_history_distinct_values(database, "provider", &normalized, |query| {
+            query.provider = None;
+        })
+        .await?;
+    let model_ids =
+        list_generation_task_history_distinct_values(database, "model_id", &normalized, |query| {
+            query.model_id = None;
+        })
+        .await?;
+
+    let mut total_builder =
+        QueryBuilder::<sqlx::Sqlite>::new("SELECT COUNT(*) FROM generation_tasks");
+    push_history_filters(&mut total_builder, &normalized, true);
+    let total: i64 = total_builder
+        .build_query_scalar()
+        .fetch_one(database.pool())
+        .await?;
+
+    let mut id_builder = QueryBuilder::<sqlx::Sqlite>::new("SELECT id FROM generation_tasks");
+    push_history_filters(&mut id_builder, &normalized, true);
+    id_builder.push(" ORDER BY created_at DESC, id DESC LIMIT ");
+    id_builder.push_bind(normalized.limit);
+    id_builder.push(" OFFSET ");
+    id_builder.push_bind(normalized.offset);
+    let task_ids: Vec<String> = id_builder
+        .build_query_scalar()
+        .fetch_all(database.pool())
+        .await?;
+
+    let items = list_generation_task_details_by_ids(database, paths, task_ids).await?;
+    Ok(GenerationTaskHistoryPage {
+        items,
+        total,
+        limit: normalized.limit,
+        offset: normalized.offset,
+        stats,
+        providers,
+        model_ids,
+    })
 }
 
 pub async fn open_generation_result_asset(
@@ -936,6 +1099,16 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     notify_generation_task_change(database, &task.id, observer).await?;
     ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
         .await?;
+    let prompt_json = serde_json::to_value(&plan.provider_input.prompt)
+        .map_err(|err| AppError::InvalidInput(format!("prompt payload is invalid: {err}")))?;
+    start_generation_task_execution_log(
+        database,
+        &task.id,
+        &plan.provider_input.provider,
+        &plan.provider_input.model_id,
+        &prompt_json,
+    )
+    .await?;
     update_generation_task_status(
         database,
         &task.id,
@@ -945,10 +1118,40 @@ async fn execute_generation_task<P: ImageGenerationProvider>(
     )
     .await?;
     notify_generation_task_change(database, &task.id, observer).await?;
-    let result = provider
-        .generate(plan.provider_input, api_key)
-        .await
-        .map_err(provider_error_to_app_error)?;
+    let provider_call = provider.generate(plan.provider_input, api_key);
+    tokio::pin!(provider_call);
+    let provider_result = loop {
+        tokio::select! {
+            result = &mut provider_call => {
+                break result;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                ensure_generation_task_not_cancelled(
+                    database,
+                    &task.id,
+                    observer,
+                    cancellation_checker,
+                )
+                .await?;
+            }
+        }
+    };
+    let result = match provider_result {
+        Ok(result) => {
+            finish_generation_task_execution_log_success(
+                database,
+                &task.id,
+                &result.response_summary_json,
+            )
+            .await?;
+            result
+        }
+        Err(err) => {
+            let error_json = provider_error_response_json(&err);
+            finish_generation_task_execution_log_error(database, &task.id, &error_json).await?;
+            return Err(provider_error_to_app_error(err));
+        }
+    };
 
     ensure_generation_task_not_cancelled(database, &task.id, observer, cancellation_checker)
         .await?;
@@ -1048,6 +1251,81 @@ async fn list_generation_task_details_by_ids(
     Ok(details)
 }
 
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn push_history_filters(
+    builder: &mut QueryBuilder<'_, sqlx::Sqlite>,
+    query: &NormalizedHistoryQuery,
+    include_status: bool,
+) {
+    builder.push(" WHERE 1 = 1");
+    if include_status {
+        if let Some(status) = &query.status {
+            builder.push(" AND status = ");
+            builder.push_bind(status.clone());
+        }
+    }
+    if let Some(provider) = &query.provider {
+        builder.push(" AND provider = ");
+        builder.push_bind(provider.clone());
+    }
+    if let Some(model_id) = &query.model_id {
+        builder.push(" AND model_id = ");
+        builder.push_bind(model_id.clone());
+    }
+    if let Some(created_from) = &query.created_from {
+        builder.push(" AND created_at >= ");
+        builder.push_bind(created_from.clone());
+    }
+    if let Some(created_to) = &query.created_to {
+        builder.push(" AND created_at <= ");
+        builder.push_bind(created_to.clone());
+    }
+    if let Some(search) = &query.search {
+        let like = format!("%{search}%");
+        builder.push(
+            " AND (
+                id LIKE ",
+        );
+        builder.push_bind(like.clone());
+        builder.push(" OR provider LIKE ");
+        builder.push_bind(like.clone());
+        builder.push(" OR model_id LIKE ");
+        builder.push_bind(like.clone());
+        builder.push(" OR input_snapshot_json LIKE ");
+        builder.push_bind(like.clone());
+        builder.push(" OR final_prompt_snapshot_json LIKE ");
+        builder.push_bind(like);
+        builder.push(")");
+    }
+}
+
+async fn list_generation_task_history_distinct_values(
+    database: &WorkspaceDatabase,
+    column: &'static str,
+    query: &NormalizedHistoryQuery,
+    clear_self_filter: impl FnOnce(&mut NormalizedHistoryQuery),
+) -> AppResult<Vec<String>> {
+    let mut query = query.clone();
+    clear_self_filter(&mut query);
+    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(format!(
+        "SELECT DISTINCT {column} FROM generation_tasks"
+    ));
+    push_history_filters(&mut builder, &query, true);
+    builder.push(format!(" ORDER BY {column} ASC"));
+    Ok(builder
+        .build_query_scalar()
+        .fetch_all(database.pool())
+        .await?)
+}
+
 pub fn sanitize_source_url(source_url: &str) -> Option<String> {
     let lower = source_url.to_ascii_lowercase();
     if !(lower.starts_with("https://") || lower.starts_with("http://")) {
@@ -1120,6 +1398,87 @@ async fn update_generation_task_status(
     .bind(status)
     .bind(progress)
     .bind(message)
+    .bind(task_id)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn start_generation_task_execution_log(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    provider: &str,
+    model_id: &str,
+    prompt_json: &Value,
+) -> AppResult<()> {
+    let id = format!("generation_task_execution_log_{}", Ulid::new());
+    sqlx::query(
+        "INSERT INTO generation_task_execution_logs (
+            id,
+            task_id,
+            provider,
+            model_id,
+            started_at,
+            prompt_json,
+            created_at,
+            updated_at
+         ) VALUES (?, ?, ?, ?, datetime('now'), ?, datetime('now'), datetime('now'))
+         ON CONFLICT(task_id) DO UPDATE SET
+            provider = excluded.provider,
+            model_id = excluded.model_id,
+            started_at = excluded.started_at,
+            finished_at = NULL,
+            prompt_json = excluded.prompt_json,
+            success_response_json = NULL,
+            error_response_json = NULL,
+            updated_at = datetime('now')",
+    )
+    .bind(id)
+    .bind(task_id)
+    .bind(provider)
+    .bind(model_id)
+    .bind(prompt_json.to_string())
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn finish_generation_task_execution_log_success(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    response_json: &Value,
+) -> AppResult<()> {
+    validate_safe_summary(Some(response_json))?;
+    sqlx::query(
+        "UPDATE generation_task_execution_logs
+         SET finished_at = datetime('now'),
+             success_response_json = ?,
+             error_response_json = NULL,
+             updated_at = datetime('now')
+         WHERE task_id = ?",
+    )
+    .bind(response_json.to_string())
+    .bind(task_id)
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn finish_generation_task_execution_log_error(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    error_json: &Value,
+) -> AppResult<()> {
+    validate_safe_summary(Some(error_json))?;
+    sqlx::query(
+        "UPDATE generation_task_execution_logs
+         SET finished_at = datetime('now'),
+             success_response_json = NULL,
+             error_response_json = ?,
+             updated_at = datetime('now')
+         WHERE task_id = ?",
+    )
+    .bind(error_json.to_string())
     .bind(task_id)
     .execute(database.pool())
     .await?;
@@ -1205,6 +1564,12 @@ async fn mark_generation_task_cancelled(
     .bind(message)
     .bind(task_id)
     .execute(database.pool())
+    .await?;
+    finish_generation_task_execution_log_error(
+        database,
+        task_id,
+        &generation_cancelled_error_json(task_id),
+    )
     .await?;
     Ok(())
 }
@@ -1301,7 +1666,25 @@ fn calculate_bytes_sha256(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn provider_error_to_app_error(err: crate::providers::provider_trait::ProviderError) -> AppError {
+fn provider_error_response_json(err: &ProviderError) -> Value {
+    json!({
+        "provider": err.provider,
+        "modelId": err.model_id,
+        "code": err.code,
+        "message": err.message,
+        "statusCode": err.status_code,
+        "retryable": err.retryable,
+    })
+}
+
+fn generation_cancelled_error_json(task_id: &str) -> Value {
+    json!({
+        "code": "GENERATION_CANCELLED",
+        "message": format!("generation task {task_id} was cancelled"),
+    })
+}
+
+fn provider_error_to_app_error(err: ProviderError) -> AppError {
     AppError::InvalidInput(format!("{:?}: {}", err.code, err.message))
 }
 
@@ -1398,12 +1781,36 @@ fn row_to_generation_task(row: sqlx::sqlite::SqliteRow) -> AppResult<LocalGenera
         progress: row.get("progress"),
         message: row.get("message"),
         request_summary_json: parse_optional_json(row.get("request_summary_json"))?,
+        response_summary_json: parse_optional_json(row.get("response_summary_json"))?,
         input_snapshot_json: parse_required_json(row.get("input_snapshot_json"))?,
         final_prompt_snapshot_json: parse_required_json(row.get("final_prompt_snapshot_json"))?,
         model_config_snapshot_json: parse_required_json(row.get("model_config_snapshot_json"))?,
         asset_snapshot_json: parse_required_json(row.get("asset_snapshot_json"))?,
         output_count: row.get("output_count"),
         cancel_mode: row.get("cancel_mode"),
+        error_code: row.get("error_code"),
+        error_message: row.get("error_message"),
+        error_detail: row.get("error_detail"),
+        created_at: row.get("created_at"),
+        started_at: row.get("started_at"),
+        finished_at: row.get("finished_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn row_to_generation_task_execution_log(
+    row: sqlx::sqlite::SqliteRow,
+) -> AppResult<GenerationTaskExecutionLog> {
+    Ok(GenerationTaskExecutionLog {
+        id: row.get("id"),
+        task_id: row.get("task_id"),
+        provider: row.get("provider"),
+        model_id: row.get("model_id"),
+        started_at: row.get("started_at"),
+        finished_at: row.get("finished_at"),
+        prompt_json: parse_required_json(row.get("prompt_json"))?,
+        success_response_json: parse_optional_json(row.get("success_response_json"))?,
+        error_response_json: parse_optional_json(row.get("error_response_json"))?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -1418,6 +1825,36 @@ fn row_to_generation_task_result(row: sqlx::sqlite::SqliteRow) -> GenerationTask
         source_url: row.get("source_url"),
         created_at: row.get("created_at"),
     }
+}
+
+async fn list_generation_task_execution_logs(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+) -> AppResult<Vec<GenerationTaskExecutionLog>> {
+    let rows = sqlx::query(
+        "SELECT
+            id,
+            task_id,
+            provider,
+            model_id,
+            started_at,
+            finished_at,
+            prompt_json,
+            success_response_json,
+            error_response_json,
+            created_at,
+            updated_at
+         FROM generation_task_execution_logs
+         WHERE task_id = ?
+         ORDER BY started_at ASC, id ASC",
+    )
+    .bind(task_id)
+    .fetch_all(database.pool())
+    .await?;
+
+    rows.into_iter()
+        .map(row_to_generation_task_execution_log)
+        .collect()
 }
 
 async fn list_generation_task_result_assets(
@@ -1517,41 +1954,50 @@ mod tests {
     use crate::storage::migrations::run_workspace_migrations;
 
     #[tokio::test]
-    async fn recover_interrupted_tasks_fails_only_running_tasks() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let database = WorkspaceDatabase::connect(&temp_dir.path().join("workspace.db"))
-            .await
-            .expect("connect");
-
-        let mut writer = database.writer().await;
-        sqlx::query(
-            "CREATE TABLE generation_tasks (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                error_code TEXT,
-                finished_at TEXT
-            )",
-        )
-        .execute(&mut *writer)
-        .await
-        .expect("create table");
+    async fn recover_interrupted_tasks_fails_running_task_and_closes_execution_log() {
+        let (_temp_dir, database) = test_database().await;
 
         for (id, status) in [
-            ("task-queued", "queued"),
             ("task-calling", "calling_model"),
             ("task-succeeded", "succeeded"),
         ] {
-            sqlx::query("INSERT INTO generation_tasks (id, status) VALUES (?, ?)")
-                .bind(id)
-                .bind(status)
-                .execute(&mut *writer)
-                .await
-                .expect("insert task");
+            sqlx::query(
+                "INSERT INTO generation_tasks (
+                    id,
+                    status,
+                    combination_snapshot_json,
+                    prompt_snapshot_json,
+                    model_snapshot_json,
+                    input_assets_snapshot_json
+                ) VALUES (?, ?, '{}', '{}', '{}', '[]')",
+            )
+            .bind(id)
+            .bind(status)
+            .execute(database.pool())
+            .await
+            .expect("insert task");
         }
-        drop(writer);
+        start_generation_task_execution_log(
+            &database,
+            "task-calling",
+            "openai",
+            "gpt-image-1",
+            &json!({ "user": "prompt before crash" }),
+        )
+        .await
+        .expect("start calling log");
+        start_generation_task_execution_log(
+            &database,
+            "task-succeeded",
+            "openai",
+            "gpt-image-1",
+            &json!({ "user": "already done" }),
+        )
+        .await
+        .expect("start succeeded log");
 
         let recovered = recover_interrupted_tasks(&database).await.expect("recover");
-        assert_eq!(recovered, 2);
+        assert_eq!(recovered, 1);
 
         let rows = sqlx::query("SELECT id, status, error_code FROM generation_tasks ORDER BY id")
             .fetch_all(database.pool())
@@ -1571,14 +2017,39 @@ mod tests {
                     "failed".to_string(),
                     Some(APP_UNEXPECTED_SHUTDOWN.to_string())
                 ),
-                (
-                    "task-queued".to_string(),
-                    "failed".to_string(),
-                    Some(APP_UNEXPECTED_SHUTDOWN.to_string())
-                ),
                 ("task-succeeded".to_string(), "succeeded".to_string(), None),
             ]
         );
+
+        let logs = sqlx::query(
+            "SELECT task_id, finished_at, error_response_json
+             FROM generation_task_execution_logs
+             ORDER BY task_id",
+        )
+        .fetch_all(database.pool())
+        .await
+        .expect("fetch logs");
+        let log_states: Vec<(String, Option<String>, Option<String>)> = logs
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("task_id"),
+                    row.get("finished_at"),
+                    row.get("error_response_json"),
+                )
+            })
+            .collect();
+
+        assert_eq!(log_states.len(), 2);
+        assert_eq!(log_states[0].0, "task-calling");
+        assert!(log_states[0].1.is_some());
+        assert_eq!(
+            log_states[0].2,
+            Some(json!({ "code": APP_UNEXPECTED_SHUTDOWN }).to_string())
+        );
+        assert_eq!(log_states[1].0, "task-succeeded");
+        assert!(log_states[1].1.is_none());
+        assert!(log_states[1].2.is_none());
     }
 
     #[tokio::test]
@@ -1991,6 +2462,28 @@ mod tests {
                 .await
                 .expect("result count");
         assert_eq!(result_count, 0);
+        let log_row = sqlx::query(
+            "SELECT finished_at, error_response_json
+             FROM generation_task_execution_logs
+             WHERE task_id = ?",
+        )
+        .bind("task_cancelled_during_flow")
+        .fetch_one(database.pool())
+        .await
+        .expect("execution log");
+        let finished_at: Option<String> = log_row.get("finished_at");
+        let error_response_json: Option<String> = log_row.get("error_response_json");
+        assert!(finished_at.is_some());
+        assert_eq!(
+            error_response_json,
+            Some(
+                json!({
+                    "code": "GENERATION_CANCELLED",
+                    "message": "generation task task_cancelled_during_flow was cancelled"
+                })
+                .to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -2092,6 +2585,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_generation_flow_persists_success_execution_log() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+
+        let task = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_success_execution_log".to_string()),
+        )
+        .await
+        .expect("run generation");
+
+        let detail = get_generation_task_detail_by_id(&database, &paths, &task.id)
+            .await
+            .expect("task detail")
+            .expect("task detail");
+        assert_eq!(detail.execution_logs.len(), 1);
+        let log = &detail.execution_logs[0];
+        assert_eq!(log.task_id, task.id);
+        assert_eq!(log.provider, "openai");
+        assert_eq!(log.model_id, "gpt-image-1");
+        assert_eq!(log.prompt_json["user"], "wear linen dress");
+        assert_eq!(
+            log.success_response_json
+                .as_ref()
+                .expect("success response")["statusCode"],
+            200
+        );
+        assert!(log.error_response_json.is_none());
+        assert!(log.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_generation_task_history_returns_stats_and_execution_logs() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+
+        let task = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_history_page".to_string()),
+        )
+        .await
+        .expect("run generation");
+
+        let page = list_generation_task_history_details(
+            &database,
+            &paths,
+            GenerationTaskHistoryQuery {
+                search: Some("look".to_string()),
+                status: Some("succeeded".to_string()),
+                provider: Some("openai".to_string()),
+                model_id: Some("gpt-image-1".to_string()),
+                created_from: None,
+                created_to: None,
+                limit: Some(20),
+                offset: Some(0),
+            },
+        )
+        .await
+        .expect("history page");
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.stats.total, 1);
+        assert_eq!(page.stats.succeeded, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].task.id, task.id);
+        assert_eq!(page.items[0].execution_logs.len(), 1);
+        assert_eq!(page.items[0].execution_logs[0].provider, "openai");
+    }
+
+    #[tokio::test]
+    async fn list_generation_task_history_returns_filter_options_beyond_current_page() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        seed_assets(&database).await;
+
+        create_generation_task_snapshot(
+            &database,
+            CreateGenerationTaskSnapshotRequest {
+                id: Some("task_legacy_history".to_string()),
+                combination_id: None,
+                provider: "legacy-provider".to_string(),
+                model_id: "legacy-model".to_string(),
+                request_summary_json: Some(json!({"provider": "legacy-provider"})),
+                input_snapshot_json: json!({}),
+                final_prompt_snapshot_json: json!({"user": "legacy prompt"}),
+                model_config_snapshot_json: json!({"modelId": "legacy-model"}),
+                asset_snapshot_json: json!([]),
+                input_assets: vec![],
+                output_count: 1,
+            },
+        )
+        .await
+        .expect("legacy task");
+        mark_generation_task_succeeded(&database, "task_legacy_history")
+            .await
+            .expect("legacy done");
+        create_generation_task_snapshot(
+            &database,
+            CreateGenerationTaskSnapshotRequest {
+                id: Some("task_openai_history".to_string()),
+                combination_id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-1".to_string(),
+                request_summary_json: Some(json!({"provider": "openai"})),
+                input_snapshot_json: json!({}),
+                final_prompt_snapshot_json: json!({"user": "openai prompt"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                asset_snapshot_json: json!([]),
+                input_assets: vec![],
+                output_count: 1,
+            },
+        )
+        .await
+        .expect("openai task");
+        mark_generation_task_succeeded(&database, "task_openai_history")
+            .await
+            .expect("openai done");
+
+        let page = list_generation_task_history_details(
+            &database,
+            &paths,
+            GenerationTaskHistoryQuery {
+                search: None,
+                status: None,
+                provider: None,
+                model_id: None,
+                created_from: None,
+                created_to: None,
+                limit: Some(1),
+                offset: Some(0),
+            },
+        )
+        .await
+        .expect("history page");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.providers, vec!["legacy-provider", "openai"]);
+        assert_eq!(page.model_ids, vec!["gpt-image-1", "legacy-model"]);
+    }
+
+    #[tokio::test]
     async fn run_generation_flow_saves_failure_reason() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let combination_id = seed_generation_inputs(&database, &paths).await;
@@ -2134,6 +2796,49 @@ mod tests {
             .get::<Option<String>, _>("error_message")
             .expect("error message")
             .contains("provider unavailable"));
+    }
+
+    #[tokio::test]
+    async fn run_generation_flow_persists_failed_execution_log() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+
+        let result = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &FailingProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_failed_execution_log".to_string()),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        let detail =
+            get_generation_task_detail_by_id(&database, &paths, "task_failed_execution_log")
+                .await
+                .expect("task detail")
+                .expect("task detail");
+        assert_eq!(detail.execution_logs.len(), 1);
+        let log = &detail.execution_logs[0];
+        assert_eq!(log.provider, "openai");
+        assert_eq!(log.model_id, "gpt-image-1");
+        assert_eq!(log.prompt_json["user"], "wear linen dress");
+        assert!(log.success_response_json.is_none());
+        let error_response = log.error_response_json.as_ref().expect("error response");
+        assert_eq!(error_response["code"], "REMOTE_ERROR");
+        assert_eq!(error_response["message"], "provider unavailable");
+        assert!(log.finished_at.is_some());
     }
 
     #[tokio::test]
@@ -2191,6 +2896,8 @@ mod tests {
             "placeholder-api-key",
             &original.id,
             Some("task_retry_new".to_string()),
+            None,
+            None,
         )
         .await
         .expect("retry generation");
@@ -2249,6 +2956,8 @@ mod tests {
             "placeholder-api-key",
             &original.id,
             Some("task_retry_missing_new".to_string()),
+            None,
+            None,
         )
         .await;
 
@@ -2260,6 +2969,71 @@ mod tests {
         assert!(message.contains("role=garment"));
         assert!(message.contains("assetId="));
         assert!(message.contains("fileName="));
+    }
+
+    #[tokio::test]
+    async fn retry_generation_task_uses_observer_and_cancellation_checker() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let original = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                revision: Some(7),
+            },
+            Some("task_retry_cancel_source".to_string()),
+        )
+        .await
+        .expect("original generation");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_for_provider = Arc::clone(&cancelled);
+        let cancellation_checker = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_callback = Arc::clone(&observed);
+        let observer = move |task: LocalGenerationTask| {
+            observed_for_callback
+                .lock()
+                .expect("observed")
+                .push(task.status);
+        };
+
+        let result = retry_generation_task_with_provider(
+            &database,
+            &paths,
+            &CancellingProvider {
+                cancelled: cancelled_for_provider,
+            },
+            "placeholder-api-key",
+            &original.id,
+            Some("task_retry_cancelled".to_string()),
+            Some(&observer),
+            Some(&cancellation_checker),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::GenerationCancelled(task_id)) if task_id == "task_retry_cancelled")
+        );
+        let task = get_generation_task_by_id(&database, "task_retry_cancelled")
+            .await
+            .expect("task")
+            .expect("task");
+        assert_eq!(task.status, "cancelled");
+        assert!(observed
+            .lock()
+            .expect("observed")
+            .iter()
+            .any(|status| status == "cancelled"));
     }
 
     #[tokio::test]
@@ -2322,6 +3096,8 @@ mod tests {
                 params_json: json!({"outputCount": 1, "size": "1024x1024"}),
             },
             Some("task_rerun_current".to_string()),
+            None,
+            None,
         )
         .await
         .expect("rerun generation");
@@ -2332,6 +3108,57 @@ mod tests {
             rerun.request_summary_json.expect("summary")["source"],
             "rerun"
         );
+    }
+
+    #[tokio::test]
+    async fn rerun_generation_task_uses_observer_and_cancellation_checker() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_for_provider = Arc::clone(&cancelled);
+        let cancellation_checker = || cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_callback = Arc::clone(&observed);
+        let observer = move |task: LocalGenerationTask| {
+            observed_for_callback
+                .lock()
+                .expect("observed")
+                .push(task.status);
+        };
+
+        let result = rerun_generation_from_current_combination_with_provider(
+            &database,
+            &paths,
+            &CancellingProvider {
+                cancelled: cancelled_for_provider,
+            },
+            "placeholder-api-key",
+            &combination_id,
+            SaveModelConfigRequest {
+                id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-1".to_string(),
+                params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+            },
+            Some("task_rerun_cancelled".to_string()),
+            Some(&observer),
+            Some(&cancellation_checker),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::GenerationCancelled(task_id)) if task_id == "task_rerun_cancelled")
+        );
+        let task = get_generation_task_by_id(&database, "task_rerun_cancelled")
+            .await
+            .expect("task")
+            .expect("task");
+        assert_eq!(task.status, "cancelled");
+        assert!(observed
+            .lock()
+            .expect("observed")
+            .iter()
+            .any(|status| status == "cancelled"));
     }
 
     #[test]

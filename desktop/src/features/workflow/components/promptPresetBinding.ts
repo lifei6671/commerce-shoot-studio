@@ -90,6 +90,25 @@ export const DEFAULT_PROMPT_WORKBENCH_STATE: PromptWorkbenchState = {
   additionalInstructions: "",
   advanced: null,
 };
+const PROMPT_OUTPUT_COUNT_MIN = 1;
+const PROMPT_OUTPUT_COUNT_MAX = 4;
+
+export function buildPromptWorkbenchDefaultsForPreset(
+  preset: PromptPresetOption | null | undefined,
+): PromptWorkbenchState {
+  if (!preset) {
+    return {
+      ...DEFAULT_PROMPT_WORKBENCH_STATE,
+      variables: { ...DEFAULT_PROMPT_WORKBENCH_STATE.variables },
+    };
+  }
+  return {
+    presetId: preset.id,
+    variables: { ...preset.variables },
+    additionalInstructions: "",
+    advanced: null,
+  };
+}
 
 export function buildPromptPresetOptions(presets: PromptPreset[]): PromptPresetOption[] {
   return presets.map((preset) => ({
@@ -197,6 +216,76 @@ export function buildOutputPlanPreviewClipboardText({
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+export function renderPromptTemplatePreview(
+  body: string,
+  values: Record<string, string>,
+): string {
+  return body.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, name: string) => {
+    const key = name.trim();
+    return values[key] ?? `{{${key}}}`;
+  });
+}
+
+export function renderPromptSectionPreview(
+  section: PromptBindingSection,
+  templates: Array<{ id: string; body: string }>,
+  values: Record<string, string>,
+): string {
+  const templateBody =
+    templates.find((template) => template.id === section.baseTemplateId)?.body ?? "";
+  const renderedTemplate = renderPromptTemplatePreview(templateBody, values);
+  if (section.mode === "override") {
+    return renderPromptTemplatePreview(section.overrideText, values) || "未配置";
+  }
+  if (section.mode === "append") {
+    const base = renderedTemplate.trim();
+    const appendText = renderPromptTemplatePreview(section.appendText.trim(), values);
+    if (!base) {
+      return appendText || "未配置";
+    }
+    if (!appendText) {
+      return renderedTemplate || "未配置";
+    }
+    return `${base}\n\n${appendText}`;
+  }
+  return renderedTemplate || "未配置";
+}
+
+export function getOutputCountFromPromptWorkbench(
+  variables: PromptWorkbenchVariables,
+  fallback: number,
+): number {
+  const parsed = Number.parseInt(variables.outputCount, 10);
+  if (!Number.isInteger(parsed)) {
+    return clampPromptOutputCount(fallback);
+  }
+  return clampPromptOutputCount(parsed);
+}
+
+export function normalizePromptWorkbenchOutputCount(
+  workbench: PromptWorkbenchState,
+  fallback: number,
+): { workbench: PromptWorkbenchState; outputCount: number } {
+  const outputCount = getOutputCountFromPromptWorkbench(workbench.variables, fallback);
+  return {
+    workbench: {
+      ...workbench,
+      variables: {
+        ...workbench.variables,
+        outputCount: String(outputCount),
+      } as PromptWorkbenchVariables,
+    },
+    outputCount,
+  };
+}
+
+function clampPromptOutputCount(value: number): number {
+  if (!Number.isInteger(value)) {
+    return PROMPT_OUTPUT_COUNT_MIN;
+  }
+  return Math.min(Math.max(value, PROMPT_OUTPUT_COUNT_MIN), PROMPT_OUTPUT_COUNT_MAX);
 }
 
 export function findPromptPresetOption(

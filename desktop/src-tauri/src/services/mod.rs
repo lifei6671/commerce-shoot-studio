@@ -5,4 +5,5 @@ pub mod model_validator;
 pub mod prompt_presets;
 pub mod prompt_resolver;
 pub mod prompt_templates;
+pub mod system_settings;
 pub mod task_runner;

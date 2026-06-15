@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use base64::Engine;
 use reqwest::multipart;
@@ -12,6 +13,9 @@ use crate::providers::provider_trait::{
 
 const OPENAI_IMAGES_EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
 const OPENAI_PROVIDER: &str = "openai";
+const DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS: u64 = 120;
+const MIN_OPENAI_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+const MAX_OPENAI_REQUEST_TIMEOUT_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone)]
 pub struct OpenAiImageProvider {
@@ -23,6 +27,10 @@ impl OpenAiImageProvider {
         Self {
             client: reqwest::Client::new(),
         }
+    }
+
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
     }
 
     pub fn provider_name(&self) -> &'static str {
@@ -92,6 +100,7 @@ impl OpenAiImageProvider {
             .post(OPENAI_IMAGES_EDITS_URL)
             .bearer_auth(api_key)
             .multipart(form)
+            .timeout(openai_request_timeout(&input.params))
             .send()
             .await
             .map_err(|err| map_request_error(&input.model_id, err))?;
@@ -243,6 +252,18 @@ fn normalized_image_count(params: &Value) -> u32 {
         .unwrap_or(1)
 }
 
+fn openai_request_timeout(params: &Value) -> Duration {
+    let seconds = params
+        .get("timeoutSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS)
+        .clamp(
+            MIN_OPENAI_REQUEST_TIMEOUT_SECONDS,
+            MAX_OPENAI_REQUEST_TIMEOUT_SECONDS,
+        );
+    Duration::from_secs(seconds)
+}
+
 fn compose_openai_prompt(prompt: &PromptPayload) -> String {
     [
         prompt
@@ -371,5 +392,61 @@ mod tests {
             prompt,
             "系统规则:\nkeep ecommerce composition\n\n细节描述:\nrender linen dress\n\n避坑描述:\nblur, watermark"
         );
+    }
+
+    #[test]
+    fn openai_request_timeout_uses_configured_bounds() {
+        assert_eq!(
+            openai_request_timeout(&json!({"timeoutSeconds": 480})),
+            Duration::from_secs(480)
+        );
+        assert_eq!(
+            openai_request_timeout(&json!({"timeoutSeconds": 12})),
+            Duration::from_secs(MIN_OPENAI_REQUEST_TIMEOUT_SECONDS)
+        );
+        assert_eq!(
+            openai_request_timeout(&json!({"timeoutSeconds": 900})),
+            Duration::from_secs(MAX_OPENAI_REQUEST_TIMEOUT_SECONDS)
+        );
+        assert_eq!(
+            openai_request_timeout(&json!({})),
+            Duration::from_secs(DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn visible_openai_model_definitions_are_supported_by_adapter() {
+        for definition in crate::services::model_validator::list_model_definitions(false)
+            .into_iter()
+            .filter(|definition| definition.provider == OPENAI_PROVIDER)
+        {
+            let result = OpenAiImageProvider::new().validate_input(
+                &GenerateInput {
+                    task_id: "task_visible_model".to_string(),
+                    provider: OPENAI_PROVIDER.to_string(),
+                    model_id: definition.model_id.clone(),
+                    images: Vec::new(),
+                    prompt: PromptPayload {
+                        system: None,
+                        user: "render garment".to_string(),
+                        negative: None,
+                    },
+                    params: json!({}),
+                },
+                "placeholder-api-key",
+            );
+
+            assert!(
+                !matches!(
+                    result,
+                    Err(ProviderError {
+                        code: ProviderErrorCode::UnsupportedModel,
+                        ..
+                    })
+                ),
+                "{} is listed but not supported by OpenAI adapter",
+                definition.model_id
+            );
+        }
     }
 }

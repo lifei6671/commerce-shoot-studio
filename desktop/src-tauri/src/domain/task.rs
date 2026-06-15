@@ -90,13 +90,19 @@ pub struct LocalGenerationTask {
     pub progress: i64,
     pub message: Option<String>,
     pub request_summary_json: Option<Value>,
+    pub response_summary_json: Option<Value>,
     pub input_snapshot_json: Value,
     pub final_prompt_snapshot_json: Value,
     pub model_config_snapshot_json: Value,
     pub asset_snapshot_json: Value,
     pub output_count: i64,
     pub cancel_mode: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub error_detail: Option<String>,
     pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -131,7 +137,58 @@ pub struct GenerationTaskResultAsset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GenerationTaskExecutionLog {
+    pub id: String,
+    pub task_id: String,
+    pub provider: String,
+    pub model_id: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub prompt_json: Value,
+    pub success_response_json: Option<Value>,
+    pub error_response_json: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerationTaskDetail {
     pub task: LocalGenerationTask,
     pub results: Vec<GenerationTaskResultAsset>,
+    pub execution_logs: Vec<GenerationTaskExecutionLog>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskHistoryQuery {
+    pub search: Option<String>,
+    pub status: Option<String>,
+    pub provider: Option<String>,
+    pub model_id: Option<String>,
+    pub created_from: Option<String>,
+    pub created_to: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskHistoryStats {
+    pub total: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskHistoryPage {
+    pub items: Vec<GenerationTaskDetail>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub stats: GenerationTaskHistoryStats,
+    pub providers: Vec<String>,
+    pub model_ids: Vec<String>,
 }

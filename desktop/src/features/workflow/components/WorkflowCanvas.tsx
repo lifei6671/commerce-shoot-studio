@@ -46,22 +46,14 @@ import {
   type ReactNode,
 } from "react";
 import {
-  Group,
-  Panel,
-  Separator,
-  type PanelImperativeHandle,
-} from "react-resizable-panels";
-import {
   Archive,
   Box,
   BriefcaseBusiness,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   CircleAlert,
   CircleCheck,
-  CircleX,
   Clock3,
   Code2,
   Copy,
@@ -142,19 +134,44 @@ import {
 } from "../../prompt/services/promptService";
 import type {
   GenerationTaskDetail,
+  GenerationTaskHistoryPage,
+  GenerationTaskStatus,
   GenerationTaskResultAsset,
 } from "../../generation-task/model/taskTypes";
+import {
+  buildTaskHistoryDateRange,
+  buildTaskHistoryModelOptions,
+  buildTaskHistoryProviderOptions,
+  canRetryTaskHistoryItem,
+  type TaskHistoryDatePreset,
+} from "../../generation-task/model/taskHistoryFilters";
 import { listenGenerationTaskUpdates } from "../../generation-task/services/taskEventService";
 import {
-  cancelGenerationTask,
   getGenerationTaskDetail,
   getLatestGenerationTaskByCombination,
+  listGenerationTaskHistory,
   listRecentGenerationTasks,
   listRunningGenerationTasks,
   openGenerationResult,
+  retryGenerationTask,
   startGeneration,
 } from "../../generation-task/services/taskService";
 import { useGenerationTaskStore } from "../../generation-task/store/taskStore";
+import type {
+  CacheStats,
+  ClearCacheResult,
+  ProxyMode,
+  ProxyProtocol,
+  SystemSettings,
+  SystemSettingsView,
+} from "../../system-settings/model/systemSettingsTypes";
+import {
+  clearWorkspaceCache,
+  getCacheStats,
+  getSystemSettings,
+  saveSystemSettings,
+  testProxyConnection,
+} from "../../system-settings/services/systemSettingsService";
 import { Badge } from "../../../shared/ui/badge";
 import { Button } from "../../../shared/ui/button";
 import { Card } from "../../../shared/ui/card";
@@ -219,9 +236,13 @@ import {
   buildOutputPlanPreviewClipboardText,
   buildPromptBindingFromWorkbench,
   buildPromptBindingSaveRequest,
+  buildPromptWorkbenchDefaultsForPreset,
   buildPromptPresetOptions,
   buildPromptWorkbenchFromBinding,
   findPromptPresetOption,
+  normalizePromptWorkbenchOutputCount,
+  renderPromptSectionPreview,
+  renderPromptTemplatePreview,
   type AdvancedPromptSections,
   type PromptPresetOption,
   type PromptWorkbenchState,
@@ -253,7 +274,6 @@ type SelectableAsset = {
 type CanvasTool = "hand" | "select";
 type CanvasPanelCollapseState = {
   assetLibrary: boolean;
-  bottomDashboard: boolean;
   inspector: boolean;
 };
 type PromptWorkbenchData = {
@@ -337,13 +357,45 @@ const DEFAULT_PROMPT_TEMPLATE_VARIABLES: PromptTemplateVariable[] = [
     name: "outputCount",
     displayName: "生成数量",
     description: "生成数量",
-    exampleValue: "1、2、3、4、6、8",
+    exampleValue: "1、2、3、4",
     required: true,
     defaultValue: "3",
     controlType: "combobox",
-    options: ["1", "2", "3", "4", "6", "8"],
+    options: ["1", "2", "3", "4"],
   },
 ];
+const EMPTY_CACHE_STATS: CacheStats = {
+  totalBytes: 0,
+  thumbnailCacheBytes: 0,
+  temporaryFilesBytes: 0,
+  modelResponseCacheBytes: 0,
+  otherCacheBytes: 0,
+};
+const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
+  launchAtLogin: false,
+  closeToTray: true,
+  notifyOnTaskSuccess: true,
+  notifyOnTaskFailure: true,
+  notificationDurationSeconds: 5,
+  workspaceRoot: "",
+  defaultSaveLocation: "workspace",
+  autoBackupEnabled: true,
+  backupFrequency: "daily",
+  backupRetentionCount: 7,
+  autoCacheCleanupEnabled: true,
+  cacheCleanupThresholdGb: 10,
+  proxy: {
+    mode: "none",
+    protocol: "http",
+    host: "",
+    port: null,
+    username: "",
+    password: "",
+  },
+  uiLanguage: "follow_system",
+  themeMode: "follow_system",
+  logLevel: "info",
+};
 const PROVIDER_OPTIONS = [
   { id: "openai", label: "OpenAI", icon: <OpenAIProviderIcon />, enabled: true },
   { id: GOOGLE_PROVIDER, label: "Google", icon: <GoogleProviderIcon />, enabled: false },
@@ -354,7 +406,8 @@ const PROVIDER_OPTIONS = [
 ] as const;
 const DEFAULT_VISIBLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter((provider) => provider.enabled);
 type ProviderId = (typeof PROVIDER_OPTIONS)[number]["id"];
-type SettingsPage = "model" | "prompt";
+type SettingsPage = "model" | "prompt" | "system";
+type TaskHistoryFilterKey = "provider" | "model" | "date";
 type PromptTemplateDraft = SavePromptTemplateRequest;
 type PromptPresetDraft = SavePromptPresetRequest;
 type PromptTemplatePreviewValues = Record<string, string>;
@@ -412,25 +465,6 @@ function GoogleProviderIcon() {
   );
 }
 
-const ASSET_LIBRARY_PANEL_SIZE = {
-  collapsed: 40,
-  default: 308,
-  max: 420,
-  min: 260,
-};
-const INSPECTOR_PANEL_SIZE = {
-  collapsed: 40,
-  default: 318,
-  max: 430,
-  min: 280,
-};
-const BOTTOM_DASHBOARD_PANEL_SIZE = {
-  collapsed: 0,
-  default: 264,
-  max: 420,
-  min: 248,
-};
-
 // Backwards-compatible export for the node wrapper files.
 export function WorkflowNode() {
   return null;
@@ -486,7 +520,20 @@ export function WorkflowCanvas() {
   const [validationResult, setValidationResult] =
     useState<ValidateCombinationResponse | null>(null);
   const [isSettingsCenterOpen, setIsSettingsCenterOpen] = useState(false);
+  const [isTaskHistoryOpen, setIsTaskHistoryOpen] = useState(false);
   const [isPromptPresetCenterOpen, setIsPromptPresetCenterOpen] = useState(false);
+  const [systemSettingsView, setSystemSettingsView] = useState<SystemSettingsView>(() => ({
+    settings: DEFAULT_SYSTEM_SETTINGS,
+    currentWorkspaceRoot: DEFAULT_SYSTEM_SETTINGS.workspaceRoot,
+    workspaceChangeRequiresRestart: false,
+  }));
+  const [cacheStats, setCacheStats] = useState<CacheStats>(EMPTY_CACHE_STATS);
+  const [isSystemSettingsLoading, setIsSystemSettingsLoading] = useState(false);
+  const [isSavingSystemSettings, setIsSavingSystemSettings] = useState(false);
+  const [isTestingProxy, setIsTestingProxy] = useState(false);
+  const [proxyTestSettings, setProxyTestSettings] = useState<SystemSettings | null>(null);
+  const [proxyTestDomainDraft, setProxyTestDomainDraft] = useState("google.com");
+  const [isClearingCache, setIsClearingCache] = useState(false);
   const [sidePanelMode, setSidePanelMode] = useState<SidePanelMode>("details");
   const [selectedFlowNode, setSelectedFlowNode] = useState<FlowNodeId>("person");
   const [canvasTool, setCanvasTool] = useState<CanvasTool>("select");
@@ -494,11 +541,7 @@ export function WorkflowCanvas() {
   const [canvasResetRevision, setCanvasResetRevision] = useState(0);
   const [isAssetLibraryCollapsed, setIsAssetLibraryCollapsed] = useState(false);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState(false);
-  const [isBottomDashboardCollapsed, setIsBottomDashboardCollapsed] = useState(false);
   const [isCanvasMaximized, setIsCanvasMaximized] = useState(false);
-  const assetLibraryPanelRef = useRef<PanelImperativeHandle>(null);
-  const inspectorPanelRef = useRef<PanelImperativeHandle>(null);
-  const bottomDashboardPanelRef = useRef<PanelImperativeHandle>(null);
   const canvasPanelRestoreStateRef = useRef<CanvasPanelCollapseState | null>(null);
   const workbenchAutoSaveSignatureRef = useRef<string | null>(null);
   const [newCombinationForm, setNewCombinationForm] =
@@ -532,7 +575,6 @@ export function WorkflowCanvas() {
   const modelConfig = useMemo<SaveModelConfigRequest>(
     () => {
       const isCustomProvider = selectedProvider === CUSTOM_PROVIDER;
-      const useCustomEndpoint = isCustomProvider || isCustomEndpointEnabled;
       return {
         provider: selectedProvider,
         modelId: isCustomProvider
@@ -543,7 +585,7 @@ export function WorkflowCanvas() {
           concurrency,
           format: imageFormat,
           outputCount,
-          providerBaseUrl: useCustomEndpoint ? customBaseUrl.trim() : undefined,
+          providerBaseUrl: isCustomProvider || isCustomEndpointEnabled ? customBaseUrl.trim() : undefined,
           seed,
           size: modelSize,
           timeoutSeconds,
@@ -671,8 +713,142 @@ export function WorkflowCanvas() {
     setRecentTasks(recentTasks);
   }
 
+  async function refreshSystemSettings() {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    setIsSystemSettingsLoading(true);
+    try {
+      const [settingsView, stats] = await Promise.all([
+        getSystemSettings(),
+        getCacheStats(),
+      ]);
+      setSystemSettingsView(settingsView);
+      setCacheStats(stats);
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "加载系统设置失败");
+    } finally {
+      setIsSystemSettingsLoading(false);
+    }
+  }
+
+  async function handleSaveSystemSettings(settings: SystemSettings) {
+    setIsSavingSystemSettings(true);
+    try {
+      const settingsView = isTauriRuntime()
+        ? await saveSystemSettings(settings)
+        : {
+            settings,
+            currentWorkspaceRoot: settings.workspaceRoot,
+            workspaceChangeRequiresRestart: false,
+          };
+      setSystemSettingsView(settingsView);
+      setActionError(null);
+      setActionMessage(
+        settingsView.workspaceChangeRequiresRestart
+          ? "系统设置已保存，工作区路径将在重启后生效"
+          : "系统设置已保存",
+      );
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "保存系统设置失败");
+    } finally {
+      setIsSavingSystemSettings(false);
+    }
+  }
+
+  async function handleTestProxy(settings: SystemSettings, testDomain: string) {
+    const normalizedDomain = testDomain.trim();
+    if (!normalizedDomain) {
+      setActionMessage(null);
+      setActionError("请输入代理测试域名");
+      return;
+    }
+    setIsTestingProxy(true);
+    try {
+      const result = isTauriRuntime()
+        ? await testProxyConnection(settings, normalizedDomain)
+        : { testUrl: `https://${normalizedDomain}`, statusCode: 200, elapsedMs: 0 };
+      setActionError(null);
+      setActionMessage(
+        `代理测试通过：${result.testUrl}，状态 ${result.statusCode}，耗时 ${result.elapsedMs}ms`,
+      );
+      setProxyTestSettings(null);
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "代理测试失败");
+    } finally {
+      setIsTestingProxy(false);
+    }
+  }
+
+  function openProxyTestDialog(settings: SystemSettings) {
+    setActionError(null);
+    setProxyTestDomainDraft("google.com");
+    setProxyTestSettings(settings);
+  }
+
+  async function handleClearCache() {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    setIsClearingCache(true);
+    try {
+      const result: ClearCacheResult = await clearWorkspaceCache();
+      setCacheStats(result.stats);
+      setActionError(null);
+      setActionMessage(`已清理 ${formatStorageSize(result.removedBytes)} 缓存`);
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "清理缓存失败");
+    } finally {
+      setIsClearingCache(false);
+    }
+  }
+
   function markWorkbenchAutoSaveSnapshot(input: WorkbenchAutoSaveInput) {
     workbenchAutoSaveSignatureRef.current = buildWorkbenchAutoSaveSignature(input);
+  }
+
+  async function flushWorkbenchAutoSave(input: WorkbenchAutoSaveInput = workbenchAutoSaveInput) {
+    const plan = buildWorkbenchAutoSavePlan(input);
+    if (!plan) {
+      return;
+    }
+    const signature = buildWorkbenchAutoSaveSignature(input);
+    if (signature === workbenchAutoSaveSignatureRef.current) {
+      return;
+    }
+
+    const [savedCombination, _savedPromptBinding, savedModelConfig] = await Promise.all([
+      saveImageCombination(plan.combination),
+      savePromptBinding(plan.promptBinding),
+      saveModelConfig(plan.modelConfig),
+    ]);
+    setCurrentCombination(savedCombination);
+    setCurrentPersonAssetIds(savedCombination.personAssetIds);
+    setCombinationSummaries((summaries) =>
+      upsertCombinationSummary(summaries, savedCombination),
+    );
+    setDraftCombinationName(null);
+    storeModelConfigId(savedModelConfig.id);
+    setStoredModelConfigId(savedModelConfig.id);
+    markWorkbenchAutoSaveSnapshot({
+      ...input,
+      combinationId: savedCombination.id,
+      combinationName: savedCombination.name,
+      modelConfig: {
+        ...plan.modelConfig,
+        id: savedModelConfig.id,
+      },
+    });
+  }
+
+  function applyPromptWorkbenchState(nextWorkbench: PromptWorkbenchState) {
+    const normalized = normalizePromptWorkbenchOutputCount(nextWorkbench, outputCount);
+    setPromptWorkbench(normalized.workbench);
+    setOutputCount(normalized.outputCount);
   }
 
   function buildAutoSaveInputForCombination(
@@ -869,6 +1045,7 @@ export function WorkflowCanvas() {
     setActionError(null);
     setActionMessage(null);
     try {
+      await flushWorkbenchAutoSave();
       const [combination, personAssets, garmentAssets, promptBinding] = await Promise.all([
         getImageCombination(combinationId),
         listAssets("person"),
@@ -942,6 +1119,20 @@ export function WorkflowCanvas() {
   }, [actionError]);
 
   useEffect(() => {
+    if (!loadingError) {
+      return undefined;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setLoadingError((currentError) =>
+        currentError === loadingError ? null : currentError,
+      );
+    }, ACTION_MESSAGE_AUTO_DISMISS_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [loadingError]);
+
+  useEffect(() => {
     const selectedDefinition = modelDefinitions.find(
       (definition) =>
         definition.provider === selectedProvider && definition.modelId === selectedModelId,
@@ -966,6 +1157,7 @@ export function WorkflowCanvas() {
 
     let canceled = false;
     setLoadingError(null);
+    refreshSystemSettings().catch(() => undefined);
     refreshWorkbenchData().catch((error) => {
       if (!canceled) {
         setLoadingError(error instanceof Error ? error.message : "加载工作台失败");
@@ -1242,7 +1434,7 @@ export function WorkflowCanvas() {
 
       setActionMessage(buildImportSuccessMessage(views.length, duplicateCount));
     } catch (error) {
-      setNewCombinationError(error instanceof Error ? error.message : "导入图片失败");
+      setActionError(error instanceof Error ? error.message : "导入图片失败");
     } finally {
       setImportingType(null);
     }
@@ -1282,7 +1474,7 @@ export function WorkflowCanvas() {
         draftModelConfig: modelConfig,
       });
       const detail = await getGenerationTaskDetail(task.id);
-      setLatestTask(detail ?? { task, results: [] });
+      setLatestTask(detail ?? { task, results: [], executionLogs: [] });
       await refreshTaskLists();
       setActionMessage("生成任务已提交");
     } catch (error) {
@@ -1492,7 +1684,20 @@ export function WorkflowCanvas() {
     }
     setPromptPresetCenterError(null);
     setIsSettingsCenterOpen(false);
+    setIsTaskHistoryOpen(false);
     setIsPromptPresetCenterOpen(true);
+  }
+
+  function openSettingsCenter() {
+    setIsTaskHistoryOpen(false);
+    setIsPromptPresetCenterOpen(false);
+    setIsSettingsCenterOpen(true);
+  }
+
+  function openTaskHistory() {
+    setIsSettingsCenterOpen(false);
+    setIsPromptPresetCenterOpen(false);
+    setIsTaskHistoryOpen(true);
   }
 
   function handleSelectPromptPresetForCenter(presetId: string) {
@@ -1511,7 +1716,7 @@ export function WorkflowCanvas() {
       setPromptPresetCenterError("请选择一个组合方案");
       return;
     }
-    setPromptWorkbench({
+    applyPromptWorkbenchState({
       presetId: preset.id,
       variables: preset.variables,
       additionalInstructions: "",
@@ -1552,7 +1757,7 @@ export function WorkflowCanvas() {
         setPromptPresetCenterDraft(buildPromptPresetDraftFromOption(nextOption));
       }
       if (shouldApplyNewPromptPreset) {
-        setPromptWorkbench({
+        applyPromptWorkbenchState({
           presetId: saved.id,
           variables: nextOption?.variables ?? DEFAULT_PROMPT_WORKBENCH_STATE.variables,
           additionalInstructions: "",
@@ -1562,7 +1767,7 @@ export function WorkflowCanvas() {
       setIsPromptPresetModalOpen(false);
       setActionMessage("组合方案已创建");
     } catch (error) {
-      setNewPromptPresetError(error instanceof Error ? error.message : "创建组合方案失败");
+      setActionError(error instanceof Error ? error.message : "创建组合方案失败");
     } finally {
       setIsSavingPromptPreset(false);
     }
@@ -1615,7 +1820,7 @@ export function WorkflowCanvas() {
       }
       setActionMessage("组合方案已保存");
     } catch (error) {
-      setPromptPresetCenterError(error instanceof Error ? error.message : "保存组合方案失败");
+      setActionError(error instanceof Error ? error.message : "保存组合方案失败");
     } finally {
       setIsSavingPromptPreset(false);
     }
@@ -1689,7 +1894,7 @@ export function WorkflowCanvas() {
       setSidePanelMode("details");
       setActionMessage("组合已创建");
     } catch (error) {
-      setNewCombinationError(error instanceof Error ? error.message : "创建组合失败");
+      setActionError(error instanceof Error ? error.message : "创建组合失败");
     } finally {
       setIsSaving(false);
     }
@@ -1733,7 +1938,12 @@ export function WorkflowCanvas() {
   function handleRefreshAll() {
     setActionError(null);
     setActionMessage(null);
-    Promise.all([refreshAssets(), refreshTaskLists(), refreshCredentialStatus()])
+    Promise.all([
+      refreshAssets(),
+      refreshTaskLists(),
+      refreshCredentialStatus(),
+      refreshSystemSettings(),
+    ])
       .then(() => setActionMessage("工作台已刷新"))
       .catch((error) =>
         setActionError(error instanceof Error ? error.message : "刷新工作台失败"),
@@ -1744,84 +1954,33 @@ export function WorkflowCanvas() {
     if (!isCanvasMaximized) {
       canvasPanelRestoreStateRef.current = {
         assetLibrary: isAssetLibraryCollapsed,
-        bottomDashboard: isBottomDashboardCollapsed,
         inspector: isInspectorCollapsed,
       };
       setIsAssetLibraryCollapsed(true);
       setIsInspectorCollapsed(true);
-      setIsBottomDashboardCollapsed(true);
       setIsCanvasMaximized(true);
       return;
     }
 
     const restoreState = canvasPanelRestoreStateRef.current ?? {
       assetLibrary: false,
-      bottomDashboard: false,
       inspector: false,
     };
     setIsAssetLibraryCollapsed(restoreState.assetLibrary);
     setIsInspectorCollapsed(restoreState.inspector);
-    setIsBottomDashboardCollapsed(restoreState.bottomDashboard);
     setIsCanvasMaximized(false);
     canvasPanelRestoreStateRef.current = null;
   }
 
-  function updatePanelCollapsedState(
-    sizeInPixels: number,
-    collapsedSize: number,
-    updateState: (collapsed: boolean) => void,
-  ) {
-    updateState(sizeInPixels <= collapsedSize + 2);
-  }
-
   useEffect(() => {
-    if (isAssetLibraryCollapsed) {
-      assetLibraryPanelRef.current?.collapse();
-    } else {
-      assetLibraryPanelRef.current?.expand();
-    }
-  }, [isAssetLibraryCollapsed]);
-
-  useEffect(() => {
-    if (isInspectorCollapsed) {
-      inspectorPanelRef.current?.collapse();
-    } else {
-      inspectorPanelRef.current?.expand();
-    }
-  }, [isInspectorCollapsed]);
-
-  useEffect(() => {
-    if (isBottomDashboardCollapsed) {
-      bottomDashboardPanelRef.current?.collapse();
-    } else {
-      bottomDashboardPanelRef.current?.expand();
-    }
-  }, [isBottomDashboardCollapsed]);
-
-  useEffect(() => {
-    if (
-      isCanvasMaximized &&
-      (!isAssetLibraryCollapsed || !isInspectorCollapsed || !isBottomDashboardCollapsed)
-    ) {
+    if (isCanvasMaximized && (!isAssetLibraryCollapsed || !isInspectorCollapsed)) {
       setIsCanvasMaximized(false);
       canvasPanelRestoreStateRef.current = null;
     }
-  }, [
-    isAssetLibraryCollapsed,
-    isBottomDashboardCollapsed,
-    isCanvasMaximized,
-    isInspectorCollapsed,
-  ]);
+  }, [isAssetLibraryCollapsed, isCanvasMaximized, isInspectorCollapsed]);
 
   const showWindowChrome = isWindowsPlatform();
-  const workbenchBodyClassName = [
-    "workbench__body",
-    "workbench__body--app",
-    isAssetLibraryCollapsed ? "workbench__body--left-collapsed" : "",
-    isInspectorCollapsed ? "workbench__body--right-collapsed" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const workbenchBodyClassName = "workbench__body workbench__body--app";
 
   return (
     <div className={`desktop-frame${showWindowChrome ? "" : " desktop-frame--native-titlebar"}`}>
@@ -1840,16 +1999,25 @@ export function WorkflowCanvas() {
             isCustomEndpointEnabled={isCustomEndpointEnabled}
             isSaving={isSavingModelSettings}
             isTesting={isTestingProviderConnection}
+            isTestingProxy={isTestingProxy}
             modelDefinitions={modelDefinitions}
             modelSize={modelSize}
             outputCount={outputCount}
             seed={seed}
             selectedModelId={selectedModelId}
             selectedProvider={selectedProvider}
+            systemSettingsView={systemSettingsView}
+            cacheStats={cacheStats}
             timeoutSeconds={timeoutSeconds}
+            isClearingCache={isClearingCache}
+            isSavingSystemSettings={isSavingSystemSettings}
+            isSystemSettingsLoading={isSystemSettingsLoading}
             onApiKeyDraftChange={setApiKeyDraft}
             onAutoSaveResultChange={setAutoSaveResult}
             onBack={() => setIsSettingsCenterOpen(false)}
+            onClearCache={() => {
+              void handleClearCache();
+            }}
             onConcurrencyChange={setConcurrency}
             onCustomBaseUrlChange={setCustomBaseUrl}
             onCustomModelIdChange={setCustomModelId}
@@ -1871,13 +2039,49 @@ export function WorkflowCanvas() {
             onSave={() => {
               void handleSaveModelSettings();
             }}
+            onRefreshSystemSettings={() => {
+              void refreshSystemSettings();
+            }}
+            onSaveSystemSettings={(settings) => {
+              void handleSaveSystemSettings(settings);
+            }}
             onSeedChange={setSeed}
             onSelectedModelIdChange={setSelectedModelId}
             onTest={() => {
               void handleTestProviderConnection();
             }}
+            onTestProxy={(settings) => {
+              openProxyTestDialog(settings);
+            }}
             onTimeoutSecondsChange={setTimeoutSeconds}
           />
+        ) : isTaskHistoryOpen ? (
+          <section className="settings-center task-history-center">
+            <header className="settings-center__header">
+              <Button
+                className="settings-back-button"
+                onClick={() => setIsTaskHistoryOpen(false)}
+                type="button"
+                variant="default"
+              >
+                <ChevronLeft size={16} />
+                返回工作台
+              </Button>
+            </header>
+            <div className="settings-center__body">
+              <TaskHistorySettingsPage
+                modelDefinitions={modelDefinitions}
+                onNotifyError={(message) => {
+                  setActionMessage(null);
+                  setActionError(message);
+                }}
+                onNotifyMessage={(message) => {
+                  setActionError(null);
+                  setActionMessage(message);
+                }}
+              />
+            </div>
+          </section>
         ) : isPromptPresetCenterOpen ? (
           <PromptPresetCenterPage
             draft={promptPresetCenterDraft}
@@ -1919,12 +2123,9 @@ export function WorkflowCanvas() {
               canRun={canRun}
               isSaving={isSaving}
               isStarting={isStarting}
-              onHistory={() => {
-                setSelectedFlowNode("result");
-                setSidePanelMode("details");
-              }}
+              onHistory={openTaskHistory}
               onPromptPresetCenter={openPromptPresetCenter}
-              onModelSettings={() => setIsSettingsCenterOpen(true)}
+              onModelSettings={openSettingsCenter}
               onNew={openNewCombinationModal}
               onSelectCombination={(combinationId) => {
                 void handleSelectCombination(combinationId);
@@ -1936,51 +2137,33 @@ export function WorkflowCanvas() {
                 void handleStartGeneration();
               }}
             />
-        <Group className={workbenchBodyClassName} orientation="horizontal">
-          <Panel
-            className={`side-panel-slot side-panel-slot--left${isAssetLibraryCollapsed ? " is-collapsed" : ""}`}
-            collapsible
-            collapsedSize={ASSET_LIBRARY_PANEL_SIZE.collapsed}
-            defaultSize={ASSET_LIBRARY_PANEL_SIZE.default}
-            groupResizeBehavior="preserve-pixel-size"
-            maxSize={ASSET_LIBRARY_PANEL_SIZE.max}
-            minSize={ASSET_LIBRARY_PANEL_SIZE.min}
-            onResize={(size) =>
-              updatePanelCollapsedState(
-                size.inPixels,
-                ASSET_LIBRARY_PANEL_SIZE.collapsed,
-                setIsAssetLibraryCollapsed,
-              )
-            }
-            panelRef={assetLibraryPanelRef}
-          >
-            <AssetLibrary
-              people={currentCombinationAssetView.people}
-              garments={currentCombinationAssetView.garments}
-              results={currentCombinationAssetView.results}
-              selectedPersonId={selectedPersonId}
-              selectedGarmentIds={selectedGarmentIds}
-              importingType={importingType}
-              onCollapse={() => setIsAssetLibraryCollapsed(true)}
-              onImport={(assetType) => {
-                void handleImport(assetType);
-              }}
-              onRefresh={handleRefreshAll}
-              onSelectPerson={selectPersonForCurrentCombination}
-              onToggleGarment={toggleGarment}
-              onReorder={reorderAssetLibraryItems}
-            />
-            <PanelRestoreButton
-              label="展开资源库"
-              side="left"
-              onClick={() => setIsAssetLibraryCollapsed(false)}
-            />
-          </Panel>
-          <Separator className="layout-resize-handle layout-resize-handle--vertical" />
-          <Panel className="workbench-center-panel" minSize={640}>
-            <main className={`canvas-column${isBottomDashboardCollapsed ? " canvas-column--bottom-collapsed" : ""}`}>
-            <Group className="canvas-panel-group" orientation="vertical">
-              <Panel className="canvas-flow-panel" minSize={260}>
+            <div className={`${workbenchBodyClassName} workbench-floating-stage`}>
+              <div
+                className={`floating-panel-slot floating-panel-slot--left${isAssetLibraryCollapsed ? " is-collapsed" : ""}`}
+              >
+                <AssetLibrary
+                  people={currentCombinationAssetView.people}
+                  garments={currentCombinationAssetView.garments}
+                  results={currentCombinationAssetView.results}
+                  selectedPersonId={selectedPersonId}
+                  selectedGarmentIds={selectedGarmentIds}
+                  importingType={importingType}
+                  onCollapse={() => setIsAssetLibraryCollapsed(true)}
+                  onImport={(assetType) => {
+                    void handleImport(assetType);
+                  }}
+                  onRefresh={handleRefreshAll}
+                  onSelectPerson={selectPersonForCurrentCombination}
+                  onToggleGarment={toggleGarment}
+                  onReorder={reorderAssetLibraryItems}
+                />
+                <PanelRestoreButton
+                  label="展开资源库"
+                  side="left"
+                  onClick={() => setIsAssetLibraryCollapsed(false)}
+                />
+              </div>
+              <main className="canvas-column">
                 <FlowWorkbench
                   canRun={canRun}
                   canvasTool={canvasTool}
@@ -2010,111 +2193,56 @@ export function WorkflowCanvas() {
                   }}
                   onZoomChange={setZoom}
                 />
-              </Panel>
-              <Separator className="layout-resize-handle layout-resize-handle--horizontal">
-                <Button
-                  aria-label={isBottomDashboardCollapsed ? "展开任务面板" : "折叠任务面板"}
-                  className="bottom-panel-resize-toggle"
-                  onClick={() => setIsBottomDashboardCollapsed((collapsed) => !collapsed)}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  title={isBottomDashboardCollapsed ? "展开任务面板" : "折叠任务面板"}
-                  type="button"
-                >
-                  {isBottomDashboardCollapsed ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                </Button>
-              </Separator>
-              <Panel
-                className={`bottom-panel-slot${isBottomDashboardCollapsed ? " is-collapsed" : ""}`}
-                collapsible
-                collapsedSize={BOTTOM_DASHBOARD_PANEL_SIZE.collapsed}
-                defaultSize={BOTTOM_DASHBOARD_PANEL_SIZE.default}
-                groupResizeBehavior="preserve-pixel-size"
-                maxSize={BOTTOM_DASHBOARD_PANEL_SIZE.max}
-                minSize={BOTTOM_DASHBOARD_PANEL_SIZE.min}
-                onResize={(size) =>
-                  updatePanelCollapsedState(
-                    size.inPixels,
-                    BOTTOM_DASHBOARD_PANEL_SIZE.collapsed,
-                    setIsBottomDashboardCollapsed,
-                  )
-                }
-                panelRef={bottomDashboardPanelRef}
+              </main>
+              <div
+                className={`floating-panel-slot floating-panel-slot--right${isInspectorCollapsed ? " is-collapsed" : ""}`}
               >
-                <BottomDashboard
+                <InspectorPanel
+                  apiKeyDraft={apiKeyDraft}
+                  credentialStatus={credentialStatus}
                   currentCombination={currentCombination}
                   latestTask={latestTask}
+                  mode={sidePanelMode}
+                  modelId={effectiveModelId}
+                  modelProvider={selectedProvider}
+                  modelSize={modelSize}
+                  outputCount={outputCount}
+                  promptPresetOptions={promptPresetOptions}
+                  promptSummaryText={promptSummaryText}
+                  promptTemplates={workbenchPromptTemplates}
+                  promptWorkbench={promptWorkbench}
+                  results={resultAssets}
+                  selectedFlowNode={selectedFlowNode}
+                  selectedGarments={selectedGarments}
+                  selectedPerson={selectedPerson}
+                  validationResult={validationResult}
+                  onApiKeyDraftChange={setApiKeyDraft}
+                  onCollapse={() => setIsInspectorCollapsed(true)}
+                  onImport={(assetType) => {
+                    void handleImport(assetType);
+                  }}
+                  onModelSizeChange={setModelSize}
+                  onModeChange={setSidePanelMode}
+                  onOutputCountChange={setOutputCount}
+                  onPromptWorkbenchChange={(nextPromptWorkbench) => {
+                    applyPromptWorkbenchState(nextPromptWorkbench);
+                  }}
+                  onOpenResultError={(message) => setActionError(message)}
+                  onSaveApiKey={() => {
+                    void handleSaveApiKey();
+                  }}
                 />
-              </Panel>
-            </Group>
-          </main>
-          </Panel>
-          <Separator className="layout-resize-handle layout-resize-handle--vertical" />
-          <Panel
-            className={`side-panel-slot side-panel-slot--right${isInspectorCollapsed ? " is-collapsed" : ""}`}
-            collapsible
-            collapsedSize={INSPECTOR_PANEL_SIZE.collapsed}
-            defaultSize={INSPECTOR_PANEL_SIZE.default}
-            groupResizeBehavior="preserve-pixel-size"
-            maxSize={INSPECTOR_PANEL_SIZE.max}
-            minSize={INSPECTOR_PANEL_SIZE.min}
-            onResize={(size) =>
-              updatePanelCollapsedState(
-                size.inPixels,
-                INSPECTOR_PANEL_SIZE.collapsed,
-                setIsInspectorCollapsed,
-              )
-            }
-            panelRef={inspectorPanelRef}
-          >
-            <InspectorPanel
-              apiKeyDraft={apiKeyDraft}
-              credentialStatus={credentialStatus}
-              currentCombination={currentCombination}
-              latestTask={latestTask}
-              mode={sidePanelMode}
-              modelId={effectiveModelId}
-              modelProvider={selectedProvider}
-              modelSize={modelSize}
-              outputCount={outputCount}
-              promptPresetOptions={promptPresetOptions}
-              promptSummaryText={promptSummaryText}
-              promptTemplates={workbenchPromptTemplates}
-              promptWorkbench={promptWorkbench}
-              results={resultAssets}
-              selectedFlowNode={selectedFlowNode}
-              selectedGarments={selectedGarments}
-              selectedPerson={selectedPerson}
-              validationResult={validationResult}
-              onApiKeyDraftChange={setApiKeyDraft}
-              onCollapse={() => setIsInspectorCollapsed(true)}
-              onImport={(assetType) => {
-                void handleImport(assetType);
-              }}
-              onModelSizeChange={setModelSize}
-              onModeChange={setSidePanelMode}
-              onOutputCountChange={setOutputCount}
-              onPromptWorkbenchChange={(nextPromptWorkbench) => {
-                setPromptWorkbench(nextPromptWorkbench);
-                const nextOutputCount = Number(nextPromptWorkbench.variables.outputCount);
-                if (Number.isFinite(nextOutputCount)) {
-                  setOutputCount(normalizeIntegerParam(nextOutputCount, 1, 8, outputCount));
-                }
-              }}
-              onSaveApiKey={() => {
-                void handleSaveApiKey();
-              }}
-            />
-            <PanelRestoreButton
-              label="展开属性面板"
-              side="right"
-              onClick={() => setIsInspectorCollapsed(false)}
-            />
-          </Panel>
-        </Group>
+                <PanelRestoreButton
+                  label="展开属性面板"
+                  side="right"
+                  onClick={() => setIsInspectorCollapsed(false)}
+                />
+              </div>
+            </div>
           </>
         )}
       </div>
-      <WorkbenchMessages
+      <WorkbenchToasts
         loadingError={loadingError}
         actionError={actionError}
         actionMessage={actionMessage}
@@ -2175,7 +2303,22 @@ export function WorkflowCanvas() {
           }}
         />
       ) : null}
-      <StatusBar />
+      {proxyTestSettings ? (
+        <ProxyTestDomainDialog
+          domain={proxyTestDomainDraft}
+          isTesting={isTestingProxy}
+          onCancel={() => {
+            if (!isTestingProxy) {
+              setProxyTestSettings(null);
+            }
+          }}
+          onChange={setProxyTestDomainDraft}
+          onConfirm={() => {
+            void handleTestProxy(proxyTestSettings, proxyTestDomainDraft);
+          }}
+        />
+      ) : null}
+      <StatusBar workspaceRoot={systemSettingsView.currentWorkspaceRoot} />
     </div>
   );
 }
@@ -2506,16 +2649,23 @@ function ModelSettingsCenter({
   isCustomEndpointEnabled,
   isSaving,
   isTesting,
+  isTestingProxy,
   modelDefinitions,
   modelSize,
   outputCount,
   seed,
   selectedModelId,
   selectedProvider,
+  systemSettingsView,
+  cacheStats,
   timeoutSeconds,
+  isClearingCache,
+  isSavingSystemSettings,
+  isSystemSettingsLoading,
   onApiKeyDraftChange,
   onAutoSaveResultChange,
   onBack,
+  onClearCache,
   onConcurrencyChange,
   onCustomBaseUrlChange,
   onCustomEndpointEnabledChange,
@@ -2527,11 +2677,14 @@ function ModelSettingsCenter({
   onOutputCountChange,
   onPromptTemplatesChange,
   onProviderChange,
+  onRefreshSystemSettings,
   onReset,
   onSave,
+  onSaveSystemSettings,
   onSeedChange,
   onSelectedModelIdChange,
   onTest,
+  onTestProxy,
   onTimeoutSecondsChange,
 }: {
   actionError: string | null;
@@ -2545,16 +2698,23 @@ function ModelSettingsCenter({
   isCustomEndpointEnabled: boolean;
   isSaving: boolean;
   isTesting: boolean;
+  isTestingProxy: boolean;
   modelDefinitions: ModelDefinition[];
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
   seed: number;
   selectedModelId: string;
   selectedProvider: ProviderId;
+  systemSettingsView: SystemSettingsView;
+  cacheStats: CacheStats;
   timeoutSeconds: number;
+  isClearingCache: boolean;
+  isSavingSystemSettings: boolean;
+  isSystemSettingsLoading: boolean;
   onApiKeyDraftChange: (value: string) => void;
   onAutoSaveResultChange: (value: boolean) => void;
   onBack: () => void;
+  onClearCache: () => void;
   onConcurrencyChange: (value: number) => void;
   onCustomBaseUrlChange: (value: string) => void;
   onCustomEndpointEnabledChange: (value: boolean) => void;
@@ -2566,11 +2726,14 @@ function ModelSettingsCenter({
   onOutputCountChange: (value: number) => void;
   onPromptTemplatesChange: (templates: PromptTemplate[]) => void;
   onProviderChange: (provider: ProviderId) => void;
+  onRefreshSystemSettings: () => void;
   onReset: () => void;
   onSave: () => void;
+  onSaveSystemSettings: (settings: SystemSettings) => void;
   onSeedChange: (value: number) => void;
   onSelectedModelIdChange: (value: string) => void;
   onTest: () => void;
+  onTestProxy: (settings: SystemSettings) => void;
   onTimeoutSecondsChange: (value: number) => void;
 }) {
   const selectedProviderOption =
@@ -2613,6 +2776,9 @@ function ModelSettingsCenter({
   );
   const [newPromptDraft, setNewPromptDraft] = useState<PromptTemplateDraft>(() =>
     buildEmptyPromptTemplateDraft("system"),
+  );
+  const [systemSettingsDraft, setSystemSettingsDraft] = useState<SystemSettings>(
+    systemSettingsView.settings,
   );
   const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
   const [isPromptLoading, setIsPromptLoading] = useState(false);
@@ -2660,6 +2826,10 @@ function ModelSettingsCenter({
     !isPromptTemplateReadOnly &&
     Boolean(selectedPromptTemplate) &&
     isPromptTemplateDirty;
+
+  useEffect(() => {
+    setSystemSettingsDraft(systemSettingsView.settings);
+  }, [systemSettingsView.settings]);
 
   useEffect(() => {
     if (activeSettingsPage !== "prompt" || promptTemplates.length > 0) {
@@ -2846,7 +3016,7 @@ function ModelSettingsCenter({
           返回工作台
         </Button>
         <div className="settings-header-actions">
-          {activeSettingsPage === "prompt" ? (
+          {activeSettingsPage === "system" ? null : activeSettingsPage === "prompt" ? (
             <>
               <Button
                 className="settings-header-action settings-header-action--create"
@@ -2904,7 +3074,7 @@ function ModelSettingsCenter({
             onClick={() => setActiveSettingsPage("model")}
             type="button"
           >
-            <KeyRound size={18} />
+            <KeyRound size={16} />
             模型与 API Key
           </Button>
           <Button
@@ -2912,19 +3082,35 @@ function ModelSettingsCenter({
             onClick={() => setActiveSettingsPage("prompt")}
             type="button"
           >
-            <FileText size={18} />
+            <FileText size={16} />
             Prompt 模板配置
           </Button>
-          <Button disabled type="button">
-            <BriefcaseBusiness size={18} />
-            工作区设置
-          </Button>
-          <Button disabled type="button">
-            <SlidersHorizontal size={18} />
-            高级设置
+          <Button
+            className={activeSettingsPage === "system" ? "is-active" : ""}
+            onClick={() => setActiveSettingsPage("system")}
+            type="button"
+          >
+            <Settings size={16} />
+            系统设置
           </Button>
         </aside>
-        {activeSettingsPage === "prompt" ? (
+        {activeSettingsPage === "system" ? (
+          <SystemSettingsPage
+            cacheStats={cacheStats}
+            currentWorkspaceRoot={systemSettingsView.currentWorkspaceRoot}
+            draft={systemSettingsDraft}
+            isClearingCache={isClearingCache}
+            isLoading={isSystemSettingsLoading}
+            isSaving={isSavingSystemSettings}
+            isTestingProxy={isTestingProxy}
+            workspaceChangeRequiresRestart={systemSettingsView.workspaceChangeRequiresRestart}
+            onChange={setSystemSettingsDraft}
+            onClearCache={onClearCache}
+            onRefresh={onRefreshSystemSettings}
+            onSave={() => onSaveSystemSettings(systemSettingsDraft)}
+            onTestProxy={() => onTestProxy(systemSettingsDraft)}
+          />
+        ) : activeSettingsPage === "prompt" ? (
           <PromptTemplateSettingsPage
             draft={promptDraft}
             error={promptTemplateError}
@@ -3012,10 +3198,16 @@ function ModelSettingsCenter({
                   )}
                 </label>
                 <Button
+                  disabled={selectedProvider !== CUSTOM_PROVIDER}
                   onClick={() =>
                     onCustomEndpointEnabledChange(
                       selectedProvider === CUSTOM_PROVIDER ? true : !isCustomEndpointEnabled,
                     )
+                  }
+                  title={
+                    selectedProvider === CUSTOM_PROVIDER
+                      ? "配置自定义接入点"
+                      : "当前 Provider 暂不支持自定义接入点"
                   }
                   type="button"
                 >
@@ -3306,6 +3498,1011 @@ function ModelSettingsCenter({
   );
 }
 
+function SystemSettingsPage({
+  cacheStats,
+  currentWorkspaceRoot,
+  draft,
+  isClearingCache,
+  isLoading,
+  isSaving,
+  isTestingProxy,
+  workspaceChangeRequiresRestart,
+  onChange,
+  onClearCache,
+  onRefresh,
+  onSave,
+  onTestProxy,
+}: {
+  cacheStats: CacheStats;
+  currentWorkspaceRoot: string;
+  draft: SystemSettings;
+  isClearingCache: boolean;
+  isLoading: boolean;
+  isSaving: boolean;
+  isTestingProxy: boolean;
+  workspaceChangeRequiresRestart: boolean;
+  onChange: (settings: SystemSettings) => void;
+  onClearCache: () => void;
+  onRefresh: () => void;
+  onSave: () => void;
+  onTestProxy: () => void;
+}) {
+  function update(patch: Partial<SystemSettings>) {
+    onChange({ ...draft, ...patch });
+  }
+
+  function updateProxy(patch: Partial<SystemSettings["proxy"]>) {
+    update({ proxy: { ...draft.proxy, ...patch } });
+  }
+
+  async function chooseWorkspaceRoot() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "选择本地工作区",
+    });
+    if (typeof selected !== "string") {
+      return;
+    }
+    update({ workspaceRoot: selected });
+  }
+
+  const manualProxyIncomplete =
+    draft.proxy.mode === "manual" &&
+    (draft.proxy.host.trim() === "" || draft.proxy.port == null || draft.proxy.port <= 0);
+  const proxyTestDisabled = isSaving || isTestingProxy || manualProxyIncomplete;
+
+  return (
+    <main className="settings-main system-settings-main">
+      <div className="system-settings-header">
+        <div>
+          <h2>系统设置</h2>
+          <p>保存后立即应用通知、托盘、代理和缓存策略；工作区路径重启后生效。</p>
+        </div>
+        <div className="system-settings-header-actions">
+          <Button disabled={isSaving} onClick={onSave} type="button">
+            <Save size={15} />
+            {isSaving ? "保存中" : "保存设置"}
+          </Button>
+        </div>
+      </div>
+      <section className="system-settings-grid">
+        <SystemSettingsCard title="启动与通知">
+          <SystemToggleRow
+            checked={draft.launchAtLogin}
+            description="系统启动时自动运行应用"
+            label="开机自启"
+            onChange={(checked) => update({ launchAtLogin: checked })}
+          />
+          <SystemToggleRow
+            checked={draft.closeToTray}
+            description="点击关闭按钮时，最小化到系统托盘"
+            label="关闭最小化到托盘"
+            onChange={(checked) => update({ closeToTray: checked })}
+          />
+          <div className="system-settings-divider" />
+          <SystemToggleRow
+            checked={draft.notifyOnTaskSuccess}
+            description="任务完成时显示系统通知"
+            label="任务成功通知"
+            onChange={(checked) => update({ notifyOnTaskSuccess: checked })}
+          />
+          <SystemToggleRow
+            checked={draft.notifyOnTaskFailure}
+            description="任务失败时显示系统通知"
+            label="任务失败通知"
+            onChange={(checked) => update({ notifyOnTaskFailure: checked })}
+          />
+          <SystemSelectField
+            label="通知显示时长"
+            value={String(draft.notificationDurationSeconds)}
+            onChange={(value) =>
+              update({ notificationDurationSeconds: Number.parseInt(value, 10) })
+            }
+            options={[
+              ["3", "3 秒"],
+              ["5", "5 秒"],
+              ["10", "10 秒"],
+              ["30", "30 秒"],
+            ]}
+          />
+        </SystemSettingsCard>
+
+        <SystemSettingsCard title="工作区设置">
+          <label className="system-field">
+            <span>工作区路径</span>
+            <div className="system-inline-field">
+              <Input
+                className="system-path-input"
+                value={draft.workspaceRoot}
+                onChange={(event) => update({ workspaceRoot: event.target.value })}
+              />
+              <Button
+                className="system-change-button"
+                onClick={() => void chooseWorkspaceRoot()}
+                type="button"
+              >
+                更改
+              </Button>
+            </div>
+          </label>
+          <p className="system-settings-note">
+            当前运行工作区：{currentWorkspaceRoot || "未加载"}
+          </p>
+          {workspaceChangeRequiresRestart ? (
+            <p className="system-settings-warning">工作区路径将在重启应用后生效。</p>
+          ) : null}
+          <SystemSelectField
+            label="默认保存目录"
+            value={draft.defaultSaveLocation}
+            onChange={(value) =>
+              update({ defaultSaveLocation: value as SystemSettings["defaultSaveLocation"] })
+            }
+            options={[
+              ["workspace", "工作区内（推荐）"],
+            ]}
+          />
+          <SystemToggleRow
+            checked={draft.autoBackupEnabled}
+            description="定期备份数据库（workspace.db）"
+            label="自动备份"
+            onChange={(checked) => update({ autoBackupEnabled: checked })}
+          />
+          <div className="system-two-fields">
+            <SystemSelectField
+              label="备份频率"
+              value={draft.backupFrequency}
+              onChange={(value) => update({ backupFrequency: value as SystemSettings["backupFrequency"] })}
+              options={[
+                ["daily", "每天"],
+                ["weekly", "每周"],
+              ]}
+            />
+            <label className="system-field">
+              <span>保留备份数量</span>
+              <Input
+                min={1}
+                max={30}
+                type="number"
+                value={draft.backupRetentionCount}
+                onChange={(event) =>
+                  update({ backupRetentionCount: Number.parseInt(event.target.value, 10) || 1 })
+                }
+              />
+            </label>
+          </div>
+        </SystemSettingsCard>
+
+        <SystemSettingsCard className="system-settings-card--cache" title="缓存管理">
+          <div className="cache-summary">
+            <div className="cache-ring" style={buildCacheRingStyle(cacheStats)} />
+            <div>
+              <strong>{formatStorageSize(cacheStats.totalBytes)}</strong>
+              <span>总缓存大小</span>
+            </div>
+          </div>
+          <dl className="cache-breakdown">
+            <div><dt>缩略图缓存</dt><dd>{formatStorageSize(cacheStats.thumbnailCacheBytes)}</dd></div>
+            <div><dt>临时文件</dt><dd>{formatStorageSize(cacheStats.temporaryFilesBytes)}</dd></div>
+            <div><dt>模型响应缓存</dt><dd>{formatStorageSize(cacheStats.modelResponseCacheBytes)}</dd></div>
+            <div><dt>其它缓存</dt><dd>{formatStorageSize(cacheStats.otherCacheBytes)}</dd></div>
+          </dl>
+          <div className="system-card-actions">
+            <Button disabled={isLoading} onClick={onRefresh} type="button">
+              <RefreshCw size={15} />
+              刷新
+            </Button>
+            <Button
+              className="danger-button"
+              disabled={isClearingCache}
+              onClick={onClearCache}
+              type="button"
+            >
+              <Trash2 size={15} />
+              {isClearingCache ? "清理中" : "清理缓存"}
+            </Button>
+          </div>
+          <div className="system-settings-divider" />
+          <SystemToggleRow
+            checked={draft.autoCacheCleanupEnabled}
+            description={`当缓存超过 ${draft.cacheCleanupThresholdGb} GB 时自动清理可安全移除的缓存`}
+            label="自动清理"
+            onChange={(checked) => update({ autoCacheCleanupEnabled: checked })}
+          />
+          <label className="system-field">
+            <span>缓存大小超过</span>
+            <div className="system-number-suffix">
+              <Input
+                min={1}
+                type="number"
+                value={draft.cacheCleanupThresholdGb}
+                onChange={(event) =>
+                  update({ cacheCleanupThresholdGb: Number.parseInt(event.target.value, 10) || 1 })
+                }
+              />
+              <span>GB</span>
+            </div>
+          </label>
+        </SystemSettingsCard>
+
+        <SystemSettingsCard className="system-settings-card--wide system-settings-card--proxy" title="代理设置">
+          <RadioGroup
+            className="proxy-mode-row"
+            value={draft.proxy.mode}
+            onValueChange={(value) => updateProxy({ mode: value as ProxyMode })}
+          >
+            <label><RadioGroupItem value="none" /> 不使用代理</label>
+            <label><RadioGroupItem value="system" /> 使用系统代理</label>
+            <label><RadioGroupItem value="manual" /> 手动设置代理</label>
+          </RadioGroup>
+          <div className="proxy-grid">
+            <SystemSelectField
+              label="协议"
+              value={draft.proxy.protocol}
+              onChange={(value) => updateProxy({ protocol: value as ProxyProtocol })}
+              options={[
+                ["http", "HTTP"],
+                ["https", "HTTPS"],
+              ]}
+            />
+            <label className="system-field">
+              <span>主机</span>
+              <Input
+                className="system-proxy-input"
+                disabled={draft.proxy.mode !== "manual"}
+                placeholder="例如：127.0.0.1"
+                value={draft.proxy.host}
+                onChange={(event) => updateProxy({ host: event.target.value })}
+              />
+            </label>
+            <label className="system-field">
+              <span>端口</span>
+              <Input
+                className="system-proxy-input"
+                disabled={draft.proxy.mode !== "manual"}
+                placeholder="例如：7890"
+                type="number"
+                value={draft.proxy.port ?? ""}
+                onChange={(event) =>
+                  updateProxy({
+                    port: event.target.value ? Number.parseInt(event.target.value, 10) : null,
+                  })
+                }
+              />
+            </label>
+            <label className="system-field">
+              <span>用户名（可选）</span>
+              <Input
+                className="system-proxy-input"
+                disabled={draft.proxy.mode !== "manual"}
+                value={draft.proxy.username}
+                onChange={(event) => updateProxy({ username: event.target.value })}
+              />
+            </label>
+            <label className="system-field">
+              <span>密码（可选）</span>
+              <Input
+                className="system-proxy-input"
+                disabled={draft.proxy.mode !== "manual"}
+                type="password"
+                value={draft.proxy.password}
+                onChange={(event) => updateProxy({ password: event.target.value })}
+              />
+            </label>
+          </div>
+          <div className="system-card-actions system-card-actions--end">
+            <Button
+              className="system-secondary-action"
+              disabled={proxyTestDisabled}
+              onClick={onTestProxy}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              {isTestingProxy ? "测试中" : "测试代理"}
+            </Button>
+          </div>
+        </SystemSettingsCard>
+
+      </section>
+    </main>
+  );
+}
+
+function SystemSettingsCard({
+  children,
+  className = "",
+  title,
+}: {
+  children: ReactNode;
+  className?: string;
+  title: string;
+}) {
+  return (
+    <section className={`settings-card system-settings-card ${className}`}>
+      <div className="settings-card__title-row">
+        <h3>{title}</h3>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function ProxyTestDomainDialog({
+  domain,
+  isTesting,
+  onCancel,
+  onChange,
+  onConfirm,
+}: {
+  domain: string;
+  isTesting: boolean;
+  onCancel: () => void;
+  onChange: (value: string) => void;
+  onConfirm: () => void;
+}) {
+  const normalizedDomain = domain.trim();
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="proxy-test-modal" aria-modal="true" role="dialog">
+        <header className="modal-header">
+          <div>
+            <h2>测试代理</h2>
+            <p>选择一个域名，用当前代理设置发起连通性测试。</p>
+          </div>
+          <Button disabled={isTesting} onClick={onCancel} type="button">
+            <X size={16} />
+          </Button>
+        </header>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onConfirm();
+          }}
+        >
+          <label className="modal-field-block">
+            测试域名
+            <div className="modal-input-wrap">
+              <Input
+                autoFocus
+                disabled={isTesting}
+                placeholder="google.com"
+                value={domain}
+                onChange={(event) => onChange(event.target.value)}
+              />
+              <small>默认使用 google.com，也可以输入完整 URL。</small>
+            </div>
+          </label>
+          <footer className="modal-footer proxy-test-modal__footer">
+            <div>
+              <Button disabled={isTesting} onClick={onCancel} type="button" variant="default">
+                取消
+              </Button>
+              <Button disabled={isTesting || !normalizedDomain} type="submit">
+                <RefreshCw size={15} />
+                {isTesting ? "测试中" : "开始测试"}
+              </Button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function SystemToggleRow({
+  checked,
+  description,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  description: string;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="system-toggle-row">
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+      <Switch className="system-switch" checked={checked} onCheckedChange={onChange} />
+    </label>
+  );
+}
+
+function SystemSelectField({
+  label,
+  onChange,
+  options,
+  value,
+}: {
+  label: string;
+  onChange: (value: string) => void;
+  options: Array<[string, string]>;
+  value: string;
+}) {
+  return (
+    <label className="system-field">
+      <span>{label}</span>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="system-select-trigger">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className="system-select-content">
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem className="system-select-item" key={optionValue} value={optionValue}>
+              {optionLabel}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
+  );
+}
+
+function TaskHistorySettingsPage({
+  modelDefinitions,
+  onNotifyError,
+  onNotifyMessage,
+}: {
+  modelDefinitions: ModelDefinition[];
+  onNotifyError: (message: string) => void;
+  onNotifyMessage: (message: string) => void;
+}) {
+  const PAGE_SIZE = 20;
+  const EXPORT_PAGE_SIZE = 100;
+  const [historyPage, setHistoryPage] = useState<GenerationTaskHistoryPage | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<GenerationTaskStatus | "all">("all");
+  const [provider, setProvider] = useState("all");
+  const [modelId, setModelId] = useState("all");
+  const [datePreset, setDatePreset] = useState<TaskHistoryDatePreset>("all");
+  const [openFilterMenu, setOpenFilterMenu] = useState<TaskHistoryFilterKey | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [previewAssets, setPreviewAssets] = useState<AssetFileView[]>([]);
+  const selectedDetail =
+    historyPage?.items.find((detail) => detail.task.id === selectedTaskId) ??
+    historyPage?.items[0] ??
+    null;
+  const selectedLog = selectedDetail?.executionLogs[0] ?? null;
+  const providerOptions = useMemo(() => {
+    return buildTaskHistoryProviderOptions(
+      historyPage?.providers ?? [],
+      DEFAULT_VISIBLE_PROVIDER_OPTIONS.map((providerOption) => providerOption.id),
+    );
+  }, [historyPage]);
+  const modelOptions = useMemo(() => {
+    return buildTaskHistoryModelOptions(
+      historyPage?.modelIds ?? [],
+      modelDefinitions.map((definition) => definition.modelId),
+    );
+  }, [historyPage, modelDefinitions]);
+  const pageCount = Math.max(1, Math.ceil((historyPage?.total ?? 0) / PAGE_SIZE));
+  const canRetrySelected = selectedDetail
+    ? canRetryTaskHistoryItem(selectedDetail.task)
+    : false;
+
+  const loadHistory = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const dateRange = buildTaskHistoryDateRange(datePreset);
+      if (!isTauriRuntime()) {
+        setHistoryPage({
+          items: [],
+          total: 0,
+          limit: PAGE_SIZE,
+          offset: pageIndex * PAGE_SIZE,
+          stats: {
+            total: 0,
+            succeeded: 0,
+            failed: 0,
+            cancelled: 0,
+          },
+          providers: [],
+          modelIds: [],
+        });
+        setSelectedTaskId(null);
+        return;
+      }
+      const page = await listGenerationTaskHistory({
+        search,
+        status: status === "all" ? null : status,
+        provider: provider === "all" ? null : provider,
+        modelId: modelId === "all" ? null : modelId,
+        createdFrom: dateRange.createdFrom,
+        createdTo: dateRange.createdTo,
+        limit: PAGE_SIZE,
+        offset: pageIndex * PAGE_SIZE,
+      });
+      setHistoryPage(page);
+      setSelectedTaskId((current) => {
+        if (current && page.items.some((detail) => detail.task.id === current)) {
+          return current;
+        }
+        return page.items[0]?.task.id ?? null;
+      });
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "加载任务历史失败");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [datePreset, modelId, onNotifyError, pageIndex, provider, search, status]);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      setPreviewAssets([]);
+      return;
+    }
+    const snapshot = selectedDetail?.task.inputSnapshotJson ?? {};
+    const assetIds = [
+      typeof snapshot.personAssetId === "string" ? snapshot.personAssetId : null,
+      ...(Array.isArray(snapshot.garmentAssetIds)
+        ? snapshot.garmentAssetIds.filter((value): value is string => typeof value === "string")
+        : []),
+    ].filter((value): value is string => Boolean(value));
+    if (!assetIds.length) {
+      setPreviewAssets([]);
+      return;
+    }
+    let alive = true;
+    Promise.all(assetIds.map((assetId) => getAsset(assetId)))
+      .then((assets) => {
+        if (alive) {
+          setPreviewAssets(assets.filter((asset): asset is AssetFileView => Boolean(asset)));
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setPreviewAssets([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedDetail]);
+
+  function resetPageAndSetSearch(value: string) {
+    setSearch(value);
+    setPageIndex(0);
+    setOpenFilterMenu(null);
+  }
+
+  async function exportExecutionLogs() {
+    try {
+      const exportDateRange = buildTaskHistoryDateRange(datePreset);
+      const exportItems: GenerationTaskDetail[] = [];
+      let exportTotal = historyPage?.total ?? 0;
+      do {
+        const exportPage = await listGenerationTaskHistory({
+          search,
+          status: status === "all" ? null : status,
+          provider: provider === "all" ? null : provider,
+          modelId: modelId === "all" ? null : modelId,
+          createdFrom: exportDateRange.createdFrom,
+          createdTo: exportDateRange.createdTo,
+          limit: EXPORT_PAGE_SIZE,
+          offset: exportItems.length,
+        });
+        exportItems.push(...exportPage.items);
+        exportTotal = exportPage.total;
+        if (!exportPage.items.length) {
+          break;
+        }
+      } while (exportItems.length < exportTotal);
+      const payload = exportItems.map((detail) => ({
+        task: detail.task,
+        executionLogs: detail.executionLogs,
+        results: detail.results,
+      }));
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `generation-task-execution-logs-${Date.now()}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      onNotifyMessage("执行日志已导出");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "导出执行日志失败");
+    }
+  }
+
+  async function retrySelectedTask() {
+    if (!selectedDetail || !canRetrySelected) {
+      return;
+    }
+    try {
+      await retryGenerationTask(selectedDetail.task.id);
+      onNotifyMessage("任务已重新提交");
+      void loadHistory();
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "重试任务失败");
+    }
+  }
+
+  async function copyErrorResponse() {
+    const value =
+      selectedLog?.errorResponseJson ??
+      (selectedDetail?.task.errorMessage ? { message: selectedDetail.task.errorMessage } : null);
+    if (!value) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(value, null, 2));
+      onNotifyMessage("错误返回已复制");
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "复制错误返回失败");
+    }
+  }
+
+  return (
+    <main className="settings-main task-history-main">
+      <div className="task-history-layout">
+        <section className="task-history-board">
+          <div className="task-history-toolbar">
+            <label className="task-history-search">
+              <Search size={14} />
+              <input
+                className="task-history-search-input"
+                value={search}
+                onChange={(event) => resetPageAndSetSearch(event.target.value)}
+                placeholder="搜索组合名称 / 任务 ID / Prompt"
+              />
+            </label>
+            <div className="task-history-tabs">
+              {(["all", "succeeded", "failed", "cancelled"] as const).map((item) => (
+                <Button
+                  className={status === item ? "is-active" : ""}
+                  key={item}
+                  onClick={() => {
+                    setStatus(item);
+                    setPageIndex(0);
+                    setOpenFilterMenu(null);
+                  }}
+                  type="button"
+                >
+                  {item === "all" ? "全部" : getGenerationTaskStatusLabel(item)}
+                </Button>
+              ))}
+            </div>
+            <TaskHistoryFilterMenu
+              isOpen={openFilterMenu === "provider"}
+              label={provider === "all" ? "全部 Provider" : provider}
+              options={[
+                { value: "all", label: "全部 Provider" },
+                ...providerOptions.map((value) => ({ value, label: value })),
+              ]}
+              value={provider}
+              onOpenChange={(nextOpen) =>
+                setOpenFilterMenu(nextOpen ? "provider" : null)
+              }
+              onChange={(value) => {
+                setProvider(value);
+                setPageIndex(0);
+                setOpenFilterMenu(null);
+              }}
+            />
+            <TaskHistoryFilterMenu
+              isOpen={openFilterMenu === "model"}
+              label={modelId === "all" ? "全部模型" : modelId}
+              options={[
+                { value: "all", label: "全部模型" },
+                ...modelOptions.map((value) => ({ value, label: value })),
+              ]}
+              value={modelId}
+              onOpenChange={(nextOpen) =>
+                setOpenFilterMenu(nextOpen ? "model" : null)
+              }
+              onChange={(value) => {
+                setModelId(value);
+                setPageIndex(0);
+                setOpenFilterMenu(null);
+              }}
+            />
+            <TaskHistoryFilterMenu
+              isOpen={openFilterMenu === "date"}
+              label={getTaskHistoryDatePresetLabel(datePreset)}
+              options={[
+                { value: "all", label: "全部日期" },
+                { value: "today", label: "今天" },
+                { value: "7d", label: "近 7 天" },
+                { value: "30d", label: "近 30 天" },
+              ]}
+              value={datePreset}
+              onOpenChange={(nextOpen) =>
+                setOpenFilterMenu(nextOpen ? "date" : null)
+              }
+              onChange={(value) => {
+                setDatePreset(value as TaskHistoryDatePreset);
+                setPageIndex(0);
+                setOpenFilterMenu(null);
+              }}
+            />
+            <Button
+              disabled={isLoading}
+              onClick={() => {
+                setOpenFilterMenu(null);
+                void loadHistory();
+              }}
+              type="button"
+            >
+              <RefreshCw size={14} />
+              刷新
+            </Button>
+            <Button
+              disabled={!historyPage?.items.length}
+              onClick={() => {
+                setOpenFilterMenu(null);
+                void exportExecutionLogs();
+              }}
+              type="button"
+            >
+              <Archive size={14} />
+              导出日志
+            </Button>
+          </div>
+          <div className="task-history-stats">
+            <TaskHistoryStat label="总任务" value={historyPage?.stats.total ?? 0} />
+            <TaskHistoryStat label="成功" value={historyPage?.stats.succeeded ?? 0} />
+            <TaskHistoryStat label="失败" value={historyPage?.stats.failed ?? 0} />
+            <TaskHistoryStat label="已取消" value={historyPage?.stats.cancelled ?? 0} />
+          </div>
+          <div className="task-history-table">
+            <div className="task-history-row task-history-row--head">
+              <span>缩略图</span>
+              <span>组合名称</span>
+              <span>模型</span>
+              <span>状态</span>
+              <span>耗时</span>
+              <span>错误原因</span>
+              <span>创建时间</span>
+              <span>操作</span>
+            </div>
+            {(historyPage?.items ?? []).map((detail) => (
+              <button
+                className={`task-history-row${selectedDetail?.task.id === detail.task.id ? " is-selected" : ""}`}
+                key={detail.task.id}
+                onClick={() => setSelectedTaskId(detail.task.id)}
+                type="button"
+              >
+                <span className="task-history-thumb-strip">
+                  {detail.results.slice(0, 3).map((result) => (
+                    <img
+                      alt="任务结果缩略图"
+                      key={result.assetId}
+                      src={convertFileSrc(result.thumbFilePath)}
+                    />
+                  ))}
+                  {!detail.results.length ? (
+                    <i>
+                      <ImageIcon size={15} />
+                    </i>
+                  ) : null}
+                </span>
+                <span>{getTaskCombinationName(detail)}</span>
+                <span>{detail.task.provider} / {detail.task.modelId}</span>
+                <span>
+                  <Badge className={`task-status-badge is-${detail.task.status}`}>
+                    {getGenerationTaskStatusLabel(detail.task.status)}
+                  </Badge>
+                </span>
+                <span>{formatTaskDuration(detail.task.startedAt, detail.task.finishedAt)}</span>
+                <span>{detail.task.errorCode ?? detail.task.errorMessage ?? "--"}</span>
+                <span>{formatTaskTime(detail.task.createdAt)}</span>
+                <span className="task-history-actions">
+                  {detail.task.status === "succeeded" ? "查看结果" : "查看详情"}
+                </span>
+              </button>
+            ))}
+            {!historyPage?.items.length ? (
+              <div className="task-history-empty">{isLoading ? "加载中" : "暂无任务历史"}</div>
+            ) : null}
+          </div>
+          <footer className="task-history-pagination">
+            <span>共 {historyPage?.total ?? 0} 条</span>
+            <Button
+              disabled={pageIndex <= 0 || isLoading}
+              onClick={() => setPageIndex((value) => Math.max(0, value - 1))}
+              type="button"
+            >
+              <ChevronLeft size={15} />
+            </Button>
+            <strong>{pageIndex + 1} / {pageCount}</strong>
+            <Button
+              disabled={pageIndex + 1 >= pageCount || isLoading}
+              onClick={() => setPageIndex((value) => value + 1)}
+              type="button"
+            >
+              <ChevronRight size={15} />
+            </Button>
+          </footer>
+        </section>
+        <aside className="task-history-detail">
+          <div className="task-history-detail__header">
+            <h3>任务详情</h3>
+            <Badge className={`task-status-badge is-${selectedDetail?.task.status ?? "queued"}`}>
+              {getGenerationTaskStatusLabel(selectedDetail?.task.status)}
+            </Badge>
+          </div>
+          {selectedDetail ? (
+            <>
+              <dl className="task-history-meta">
+                <div><dt>任务 ID</dt><dd>{selectedDetail.task.id}</dd></div>
+                <div><dt>组合名称</dt><dd>{getTaskCombinationName(selectedDetail)}</dd></div>
+                <div><dt>Provider</dt><dd>{selectedDetail.task.provider}</dd></div>
+                <div><dt>模型</dt><dd>{selectedDetail.task.modelId}</dd></div>
+                <div><dt>开始时间</dt><dd>{formatTaskTime(selectedDetail.task.startedAt ?? undefined)}</dd></div>
+                <div><dt>结束时间</dt><dd>{formatTaskTime(selectedDetail.task.finishedAt ?? undefined)}</dd></div>
+                <div><dt>输出数量</dt><dd>{selectedDetail.results.length} / {selectedDetail.task.outputCount}</dd></div>
+              </dl>
+              <h4>预览</h4>
+              <div className="task-history-preview-grid">
+                {previewAssets.slice(0, 3).map((asset) => (
+                  <TaskHistoryPreview
+                    key={asset.asset.id}
+                    label={asset.asset.assetType === "person" ? "人物图" : "服装图"}
+                    src={convertFileSrc(asset.thumbFilePath)}
+                  />
+                ))}
+                {selectedDetail.results[0] ? (
+                  <TaskHistoryPreview
+                    label="结果图"
+                    src={convertFileSrc(selectedDetail.results[0].thumbFilePath)}
+                  />
+                ) : (
+                  <TaskHistoryPreview label="结果图" />
+                )}
+              </div>
+              <h4>请求 Prompt</h4>
+              <pre className="task-history-json">{formatJsonForDisplay(selectedLog?.promptJson)}</pre>
+              <h4>{selectedLog?.errorResponseJson ? "错误返回" : "成功返回"}</h4>
+              <pre className="task-history-json">
+                {formatJsonForDisplay(selectedLog?.errorResponseJson ?? selectedLog?.successResponseJson)}
+              </pre>
+              <div className="task-history-detail-actions">
+                <Button disabled={!canRetrySelected} onClick={() => void retrySelectedTask()} type="button">
+                  <RefreshCw size={16} />
+                  重试任务
+                </Button>
+                <Button disabled={!selectedLog?.errorResponseJson && !selectedDetail.task.errorMessage} onClick={() => void copyErrorResponse()} type="button">
+                  <Copy size={16} />
+                  复制错误
+                </Button>
+                <Button
+                  disabled={!selectedDetail.results[0]}
+                  onClick={() => {
+                    const first = selectedDetail.results[0];
+                    if (first) {
+                      void openGenerationResult(first.assetId).catch((error) => {
+                        onNotifyError(error instanceof Error ? error.message : "打开结果文件失败");
+                      });
+                    }
+                  }}
+                  type="button"
+                >
+                  <FolderOpen size={16} />
+                  打开文件
+                </Button>
+              </div>
+            </>
+          ) : (
+            <div className="task-history-empty">选择任务查看详情</div>
+          )}
+        </aside>
+      </div>
+    </main>
+  );
+}
+
+function TaskHistoryStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="task-history-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function TaskHistoryFilterMenu({
+  isOpen,
+  label,
+  options,
+  value,
+  onChange,
+  onOpenChange,
+}: {
+  isOpen: boolean;
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  value: string;
+  onChange: (value: string) => void;
+  onOpenChange: (isOpen: boolean) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (target instanceof globalThis.Node && !rootRef.current?.contains(target)) {
+        onOpenChange(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onOpenChange(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen, onOpenChange]);
+
+  return (
+    <div
+      className={`task-history-filter-menu${isOpen ? " is-open" : ""}`}
+      ref={rootRef}
+    >
+      <button
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        className="task-history-filter-trigger"
+        onClick={() => onOpenChange(!isOpen)}
+        type="button"
+      >
+        <span>{label}</span>
+        <ChevronDown size={14} />
+      </button>
+      {isOpen ? (
+        <div className="task-history-filter-list" role="menu">
+          {options.map((option) => (
+            <button
+              aria-checked={option.value === value}
+              className={option.value === value ? "is-active" : ""}
+              key={option.value}
+              onClick={() => {
+                onChange(option.value);
+                onOpenChange(false);
+              }}
+              role="menuitemradio"
+              type="button"
+            >
+              <span>{option.label}</span>
+              {option.value === value ? <CircleCheck size={14} /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TaskHistoryPreview({ label, src }: { label: string; src?: string }) {
+  return (
+    <figure className="task-history-preview">
+      {src ? <img alt={label} src={src} /> : <ImageIcon size={28} />}
+      <figcaption>{label}</figcaption>
+    </figure>
+  );
+}
+
 function PromptTemplateSettingsPage({
   draft,
   error,
@@ -3368,7 +4565,7 @@ function PromptTemplateSettingsPage({
                 placeholder="搜索模板名称"
               />
             </label>
-            <Button className="prompt-search-filter-button" title="筛选" type="button">
+            <Button className="prompt-search-filter-button" disabled title="筛选暂未开放" type="button">
               <Filter size={16} />
             </Button>
           </div>
@@ -4311,41 +5508,6 @@ function buildPreviewValues(variables: PromptTemplateVariable[]): PromptTemplate
   );
 }
 
-function renderPromptTemplatePreview(
-  body: string,
-  values: PromptTemplatePreviewValues,
-): string {
-  return body.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, name: string) => {
-    const key = name.trim();
-    return values[key] ?? `{{${key}}}`;
-  });
-}
-
-function renderPromptSectionPreview(
-  section: PromptBindingSection,
-  templates: PromptTemplate[],
-  values: PromptWorkbenchVariables,
-): string {
-  const templateBody =
-    templates.find((template) => template.id === section.baseTemplateId)?.body ?? "";
-  const renderedTemplate = renderPromptTemplatePreview(templateBody, values);
-  if (section.mode === "override") {
-    return section.overrideText || "未配置";
-  }
-  if (section.mode === "append") {
-    const base = renderedTemplate.trim();
-    const appendText = section.appendText.trim();
-    if (!base) {
-      return appendText || "未配置";
-    }
-    if (!appendText) {
-      return renderedTemplate || "未配置";
-    }
-    return `${base}\n\n${appendText}`;
-  }
-  return renderedTemplate || "未配置";
-}
-
 function validatePromptTemplateCreateDraft(draft: PromptTemplateDraft): string | null {
   if (!draft.name.trim()) {
     return "请填写模板名称";
@@ -4927,7 +6089,15 @@ function PromptPresetCenterPage({
             <RotateCcw size={16} />
             恢复默认
           </Button>
-          <Button className="icon-button" type="button" aria-label="更多" size="icon" variant="default">
+          <Button
+            aria-label="更多"
+            className="icon-button"
+            disabled
+            size="icon"
+            title="更多操作暂未开放"
+            type="button"
+            variant="default"
+          >
             <MoreHorizontal size={17} />
           </Button>
         </div>
@@ -7083,7 +8253,7 @@ function ValidationSummary({
   );
 }
 
-function WorkbenchMessages({
+function WorkbenchToasts({
   loadingError,
   actionError,
   actionMessage,
@@ -7097,7 +8267,7 @@ function WorkbenchMessages({
     return null;
   }
   return (
-    <div className={`workbench-message ${actionError || loadingError ? "is-error" : "is-success"}`}>
+    <div className={`workbench-toast ${actionError || loadingError ? "is-error" : "is-success"}`}>
       {actionError || loadingError ? <CircleAlert size={15} /> : <CircleCheck size={15} />}
       {message}
     </div>
@@ -7154,6 +8324,7 @@ function InspectorPanel({
   onModelSizeChange,
   onModeChange,
   onOutputCountChange,
+  onOpenResultError,
   onPromptWorkbenchChange,
   onSaveApiKey,
 }: {
@@ -7181,6 +8352,7 @@ function InspectorPanel({
   onModelSizeChange: (value: (typeof MODEL_SIZES)[number]) => void;
   onModeChange: (mode: SidePanelMode) => void;
   onOutputCountChange: (value: number) => void;
+  onOpenResultError: (message: string) => void;
   onPromptWorkbenchChange: (value: PromptWorkbenchState) => void;
   onSaveApiKey: () => void;
 }) {
@@ -7234,6 +8406,7 @@ function InspectorPanel({
           selectedPerson={selectedPerson}
           validationResult={validationResult}
           onImport={onImport}
+          onOpenResultError={onOpenResultError}
         />
       ) : null}
       {activeMode === "edit" ? (
@@ -7274,6 +8447,7 @@ function NodeDetails({
   selectedPerson,
   validationResult,
   onImport,
+  onOpenResultError,
 }: {
   currentCombination: ImageCombination | null;
   latestTask: GenerationTaskDetail | null;
@@ -7289,6 +8463,7 @@ function NodeDetails({
   selectedPerson: AssetFileView | null;
   validationResult: ValidateCombinationResponse | null;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+  onOpenResultError: (message: string) => void;
 }) {
   if (selectedFlowNode === "person") {
     return (
@@ -7363,7 +8538,9 @@ function NodeDetails({
             <Button
               key={result.id}
               onClick={() => {
-                openGenerationResult(result.assetId).catch(() => undefined);
+                openGenerationResult(result.assetId).catch((error) => {
+                  onOpenResultError(error instanceof Error ? error.message : "打开结果失败");
+                });
               }}
               type="button"
             >
@@ -7652,7 +8829,11 @@ function PromptWorkbenchEditor({
         ))}
       </div>
       <div className="prompt-workbench-actions">
-        <Button className="ghost-wide" onClick={() => onChange(DEFAULT_PROMPT_WORKBENCH_STATE)} type="button">
+        <Button
+          className="ghost-wide"
+          onClick={() => onChange(buildPromptWorkbenchDefaultsForPreset(selectedPreset))}
+          type="button"
+        >
           <RefreshCw size={15} />
           恢复默认
         </Button>
@@ -7936,151 +9117,6 @@ function ApiKeyDetailBlock({
   );
 }
 
-function BottomDashboard({
-  currentCombination,
-  latestTask,
-}: {
-  currentCombination: ImageCombination | null;
-  latestTask: GenerationTaskDetail | null;
-}) {
-  const [isCancelling, setIsCancelling] = useState(false);
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
-  const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
-  const setRecentTasks = useGenerationTaskStore((state) => state.setRecentTasks);
-  const task = latestTask?.task ?? null;
-  const results = latestTask?.results ?? [];
-  const progress = Math.max(0, Math.min(100, task?.progress ?? 0));
-  const ringStyle = {
-    "--progress-offset": 302 - (302 * progress) / 100,
-  } as CSSProperties;
-  const taskStatus = getGenerationTaskStatusLabel(task?.status);
-  const taskSteps = buildTaskProgressSteps(task?.status);
-  const canCancel = Boolean(task && isRunningTaskStatus(task.status) && !isCancelling);
-  const cancellationNotice =
-    cancelError ?? getCancellationNotice(task?.status, task?.cancelMode);
-
-  async function handleCancelTask() {
-    if (!task || !canCancel) {
-      return;
-    }
-    setIsCancelling(true);
-    setCancelError(null);
-    try {
-      const cancelledTask = await cancelGenerationTask(task.id);
-      setLatestTask(latestTask ? { ...latestTask, task: cancelledTask } : null);
-      const [runningTasks, recentTasks] = await Promise.all([
-        listRunningGenerationTasks(),
-        listRecentGenerationTasks(),
-      ]);
-      setRunningTasks(runningTasks);
-      setRecentTasks(recentTasks);
-    } catch (error) {
-      setCancelError(error instanceof Error ? error.message : "取消任务失败");
-    } finally {
-      setIsCancelling(false);
-    }
-  }
-
-  return (
-    <section className="bottom-dashboard">
-      <div className="task-status">
-        <h2>任务状态</h2>
-        <div className="progress-layout">
-          <div className="progress-ring">
-            <svg viewBox="0 0 120 120">
-              <circle cx="60" cy="60" r="48" />
-              <circle
-                cx="60"
-                cy="60"
-                r="48"
-                className="progress-ring__value"
-                style={ringStyle}
-              />
-            </svg>
-            <strong>{progress}%</strong>
-            <span>{taskStatus}</span>
-          </div>
-          <div className="progress-steps">
-            {taskSteps.map((step) => (
-              <div
-                className={`progress-step ${step.state === "active" ? "is-active" : ""} ${step.state === "done" ? "is-done" : ""}`}
-                key={step.label}
-              >
-                <span />
-                <strong>{step.state === "active" ? "当前阶段：" : ""}{step.label}</strong>
-                <time>{step.state === "done" ? "完成" : "--"}</time>
-                {step.state === "done" ? (
-                  <CircleCheck size={14} fill="currentColor" />
-                ) : (
-                  <Clock3 size={14} />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="task-actions">
-          <Button
-            className="danger-button"
-            disabled={!canCancel}
-            onClick={() => {
-              void handleCancelTask();
-            }}
-            type="button"
-          >
-            <CircleX size={15} />
-            {isCancelling ? "取消中" : "取消任务"}
-          </Button>
-        </div>
-        {cancellationNotice ? <p className="task-cancel-notice">{cancellationNotice}</p> : null}
-      </div>
-      <ResultPreview results={results} />
-      <div className="task-info">
-        <h2>任务信息</h2>
-        <dl>
-          <dt>组合名称</dt>
-          <dd>{currentCombination?.name ?? "未选择组合"}</dd>
-          <dt>模型</dt>
-          <dd>{task?.modelId ?? "--"}</dd>
-          <dt>尺寸</dt>
-          <dd>{formatResultSize(results)}</dd>
-          <dt>生成数量</dt>
-          <dd>{task?.outputCount ?? "--"}</dd>
-          <dt>创建时间</dt>
-          <dd>{formatTaskTime(task?.createdAt)}</dd>
-          <dt>任务 ID</dt>
-          <dd>{task?.id ?? "暂无任务"}</dd>
-        </dl>
-      </div>
-    </section>
-  );
-}
-
-type ProgressStepState = "done" | "active" | "pending";
-
-const taskProgressStages: Array<{ status: string; label: string }> = [
-  { status: "queued", label: "创建任务" },
-  { status: "preparing", label: "准备请求" },
-  { status: "calling_model", label: "调用模型" },
-  { status: "waiting_result", label: "等待结果" },
-  { status: "saving_result", label: "保存结果" },
-];
-
-function buildTaskProgressSteps(status: string | undefined) {
-  const activeIndex = taskProgressStages.findIndex((step) => step.status === status);
-  return taskProgressStages.map((step, index) => {
-    let state: ProgressStepState = "pending";
-    if (status === "succeeded") {
-      state = "done";
-    } else if (activeIndex >= 0 && index < activeIndex) {
-      state = "done";
-    } else if (activeIndex === index) {
-      state = "active";
-    }
-    return { ...step, state };
-  });
-}
-
 function getGenerationTaskStatusLabel(status: string | undefined) {
   switch (status) {
     case "queued":
@@ -8104,35 +9140,70 @@ function getGenerationTaskStatusLabel(status: string | undefined) {
   }
 }
 
-function isRunningTaskStatus(status: string) {
-  return [
-    "queued",
-    "preparing",
-    "calling_model",
-    "waiting_result",
-    "saving_result",
-  ].includes(status);
+function getTaskCombinationName(detail: GenerationTaskDetail) {
+  const value = detail.task.inputSnapshotJson.combinationName;
+  return typeof value === "string" && value.trim() ? value : "未命名组合";
 }
 
-function getCancellationNotice(status: string | undefined, cancelMode: string | null | undefined) {
-  if (status && isRunningTaskStatus(status)) {
-    return "取消会停止本地等待；如 Provider 不支持远端取消，可能仍继续处理或计费。";
+function getTaskHistoryDatePresetLabel(preset: TaskHistoryDatePreset) {
+  switch (preset) {
+    case "today":
+      return "今天";
+    case "7d":
+      return "近 7 天";
+    case "30d":
+      return "近 30 天";
+    default:
+      return "全部日期";
   }
-  if (cancelMode === "remote_not_supported") {
-    return "已停止本地等待；Provider 不支持远端取消，可能仍继续处理或计费。";
-  }
-  if (cancelMode === "remote_failed") {
-    return "已停止本地等待；远端取消失败，Provider 可能仍继续处理或计费。";
-  }
-  if (cancelMode === "remote_confirmed") {
-    return "远端取消已确认。";
-  }
-  return null;
 }
 
-function formatResultSize(results: GenerationTaskResultAsset[]) {
-  const first = results[0];
-  return first ? `${first.width} × ${first.height}` : "--";
+function formatTaskDuration(startedAt: string | null | undefined, finishedAt: string | null | undefined) {
+  if (!startedAt || !finishedAt) {
+    return "--";
+  }
+  const start = new Date(startedAt).getTime();
+  const finish = new Date(finishedAt).getTime();
+  if (Number.isNaN(start) || Number.isNaN(finish) || finish < start) {
+    return "--";
+  }
+  const seconds = Math.round((finish - start) / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+function formatJsonForDisplay(value: unknown) {
+  if (!value) {
+    return "--";
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function formatStorageSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function buildCacheRingStyle(stats: CacheStats) {
+  const total = Math.max(1, stats.totalBytes);
+  const thumbnail = Math.round((stats.thumbnailCacheBytes / total) * 100);
+  const temporary = Math.round((stats.temporaryFilesBytes / total) * 100);
+  const model = Math.round((stats.modelResponseCacheBytes / total) * 100);
+  return {
+    "--cache-thumb": `${thumbnail}%`,
+    "--cache-temp": `${thumbnail + temporary}%`,
+    "--cache-model": `${thumbnail + temporary + model}%`,
+  } as CSSProperties;
 }
 
 function formatDimensions(width: number | undefined, height: number | undefined) {
@@ -8180,57 +9251,10 @@ function AssetImage({ asset }: { asset: SelectableAsset }) {
   return <img alt={asset.label} src={asset.imageSrc} />;
 }
 
-function ResultPreview({ results }: { results: GenerationTaskResultAsset[] }) {
-  if (!results.length) {
-    return (
-      <section className="result-preview">
-        <h2>
-          结果预览
-          <span>等待生成</span>
-        </h2>
-        <div className="preview-results">
-          {[0, 1, 2].map((item) => (
-            <div className="generating-card" key={item}>
-              <span className="loader-ring" />
-              <strong>暂无结果</strong>
-              <small>--</small>
-            </div>
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="result-preview">
-      <h2>
-        结果预览
-        <span>{results.length} 张</span>
-      </h2>
-      <div className="preview-results">
-        {results.slice(0, 3).map((result) => (
-          <Button
-            className="result-card"
-            key={result.id}
-            onClick={() => {
-              openGenerationResult(result.assetId).catch(() => undefined);
-            }}
-            type="button"
-          >
-            <img alt="生成结果" src={convertFileSrc(result.thumbFilePath)} />
-            <strong>{result.width} × {result.height}</strong>
-            <small>打开大图</small>
-          </Button>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function StatusBar() {
+function StatusBar({ workspaceRoot }: { workspaceRoot: string }) {
   return (
     <footer className="status-bar">
-      <span>工作区：本地 Commerce Shoot Studio 工作区</span>
+      <span>工作区：{workspaceRoot || "本地 Commerce Shoot Studio 工作区"}</span>
       <FolderOpen size={15} />
       <div className="status-bar__right">
         <span className="service-dot" />

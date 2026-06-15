@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   GenerationTaskDetail,
+  GenerationTaskHistoryPage,
+  GenerationTaskHistoryQuery,
   LocalGenerationTask,
   StartGenerationRequest,
 } from "../model/taskTypes";
@@ -44,6 +46,12 @@ export async function listRecentGenerationTasks(
   return invoke<GenerationTaskDetail[]>("list_recent_generation_tasks", {
     limit,
   });
+}
+
+export async function listGenerationTaskHistory(
+  query: GenerationTaskHistoryQuery,
+): Promise<GenerationTaskHistoryPage> {
+  return invoke<GenerationTaskHistoryPage>("list_generation_task_history", { query });
 }
 
 export async function openGenerationResult(assetId: string): Promise<void> {

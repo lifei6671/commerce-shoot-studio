@@ -3,10 +3,14 @@ import { test } from "node:test";
 
 import {
   buildPromptBindingSaveRequest,
+  buildPromptWorkbenchDefaultsForPreset,
   buildOutputPlanPreviewClipboardText,
   buildPromptBindingFromWorkbench,
   buildPromptPresetOptions,
   buildPromptWorkbenchFromBinding,
+  getOutputCountFromPromptWorkbench,
+  normalizePromptWorkbenchOutputCount,
+  renderPromptSectionPreview,
 } from "../src/features/workflow/components/promptPresetBinding.ts";
 
 const templates = [
@@ -198,6 +202,74 @@ test("buildPromptPresetOptions preserves custom prompt variable defaults", () =>
   assert.equal(options[0].variables.detail, "突出袖口");
 });
 
+test("buildPromptWorkbenchDefaultsForPreset restores the selected output plan defaults", () => {
+  const customPreset = buildPromptPresetOptions([
+    {
+      ...presets[1],
+      variables: [
+        {
+          name: "style",
+          description: "服装风格",
+          exampleValue: "写实电商展示",
+          required: true,
+          defaultValue: "法式优雅",
+          controlType: "combobox",
+          options: ["写实电商展示", "法式优雅"],
+        },
+        {
+          name: "aspectRatio",
+          description: "画幅比例",
+          exampleValue: "3:4",
+          required: true,
+          defaultValue: "1:1",
+          controlType: "combobox",
+          options: ["1:1", "3:4"],
+        },
+        {
+          name: "background",
+          description: "背景",
+          exampleValue: "纯白背景",
+          required: true,
+          defaultValue: "棚拍灰背景",
+          controlType: "combobox",
+          options: ["纯白背景", "棚拍灰背景"],
+        },
+        {
+          name: "garmentCategory",
+          description: "服装类别",
+          exampleValue: "连衣裙",
+          required: true,
+          defaultValue: "外套",
+          controlType: "combobox",
+          options: ["连衣裙", "外套"],
+        },
+        {
+          name: "outputCount",
+          description: "生成数量",
+          exampleValue: "1",
+          required: true,
+          defaultValue: "2",
+          controlType: "select",
+          options: ["1", "2"],
+        },
+      ],
+    },
+  ])[0];
+
+  const restored = buildPromptWorkbenchDefaultsForPreset(customPreset);
+
+  assert.equal(restored.presetId, "prompt_preset_custom");
+  assert.deepEqual(restored.variables, {
+    style: "法式优雅",
+    aspectRatio: "1:1",
+    background: "棚拍灰背景",
+    garmentCategory: "外套",
+    outputCount: "2",
+  });
+  assert.equal(restored.additionalInstructions, "");
+  assert.equal(restored.advanced, null);
+});
+
 test("buildPromptBindingFromWorkbench binds preset templates, variables, and additional user instructions", () => {
   const customPreset = buildPromptPresetOptions(presets).find(
     (option) => option.id === "prompt_preset_custom",
@@ -382,4 +454,92 @@ test("buildOutputPlanPreviewClipboardText uses output-plan labels instead of pro
   assert.doesNotMatch(text, /System/);
   assert.doesNotMatch(text, /User/);
   assert.doesNotMatch(text, /Negative/);
+});
+
+test("renderPromptSectionPreview resolves variables in append and override text", () => {
+  const values = {
+    style: "写实电商展示",
+    background: "纯白背景",
+    aspectRatio: "3:4",
+    garmentCategory: "连衣裙",
+    outputCount: "2",
+  };
+
+  assert.equal(
+    renderPromptSectionPreview(
+      {
+        mode: "append",
+        baseTemplateId: "builtin_user_tryon_general",
+        appendText: "追加背景 {{ background }}",
+        overrideText: "",
+      },
+      templates,
+      values,
+    ),
+    "user 纯白背景\n\n追加背景 纯白背景",
+  );
+  assert.equal(
+    renderPromptSectionPreview(
+      {
+        mode: "override",
+        baseTemplateId: "builtin_user_tryon_general",
+        appendText: "",
+        overrideText: "替换生成 {{outputCount}} 张",
+      },
+      templates,
+      values,
+    ),
+    "替换生成 2 张",
+  );
+});
+
+test("getOutputCountFromPromptWorkbench normalizes output scheme variable count", () => {
+  assert.equal(
+    getOutputCountFromPromptWorkbench(
+      {
+        style: "写实电商展示",
+        background: "纯白背景",
+        aspectRatio: "3:4",
+        garmentCategory: "连衣裙",
+        outputCount: "3",
+      },
+      1,
+    ),
+    3,
+  );
+  assert.equal(
+    getOutputCountFromPromptWorkbench(
+      {
+        style: "写实电商展示",
+        background: "纯白背景",
+        aspectRatio: "3:4",
+        garmentCategory: "连衣裙",
+        outputCount: "9",
+      },
+      2,
+    ),
+    4,
+  );
+});
+
+test("normalizePromptWorkbenchOutputCount keeps prompt variables and model count aligned", () => {
+  const normalized = normalizePromptWorkbenchOutputCount(
+    {
+      presetId: "prompt_preset_custom",
+      variables: {
+        style: "写实电商展示",
+        background: "纯白背景",
+        aspectRatio: "3:4",
+        garmentCategory: "连衣裙",
+        outputCount: "8",
+      },
+      additionalInstructions: "追加一组侧面图",
+      advanced: null,
+    },
+    2,
+  );
+
+  assert.equal(normalized.outputCount, 4);
+  assert.equal(normalized.workbench.variables.outputCount, "4");
+  assert.equal(normalized.workbench.additionalInstructions, "追加一组侧面图");
 });

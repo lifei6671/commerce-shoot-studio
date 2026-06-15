@@ -65,13 +65,19 @@ export type LocalGenerationTask = {
   progress: number;
   message?: string | null;
   requestSummaryJson?: GenerationTaskRequestSummary | null;
+  responseSummaryJson?: Record<string, unknown> | null;
   inputSnapshotJson: Record<string, unknown>;
   finalPromptSnapshotJson: Record<string, unknown>;
   modelConfigSnapshotJson: Record<string, unknown>;
   assetSnapshotJson: Record<string, unknown>;
   outputCount: number;
   cancelMode?: GenerationTaskCancelMode | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  errorDetail?: string | null;
   createdAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
   updatedAt: string;
 };
 
@@ -94,7 +100,50 @@ export type GenerationTaskResultAsset = GenerationTaskResult & {
   height: number;
 };
 
+export type GenerationTaskExecutionLog = {
+  id: string;
+  taskId: string;
+  provider: string;
+  modelId: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  promptJson: Record<string, unknown>;
+  successResponseJson?: Record<string, unknown> | null;
+  errorResponseJson?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GenerationTaskDetail = {
   task: LocalGenerationTask;
   results: GenerationTaskResultAsset[];
+  executionLogs: GenerationTaskExecutionLog[];
+};
+
+export type GenerationTaskHistoryQuery = {
+  search?: string | null;
+  status?: GenerationTaskStatus | null;
+  provider?: string | null;
+  modelId?: string | null;
+  createdFrom?: string | null;
+  createdTo?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+};
+
+export type GenerationTaskHistoryStats = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+};
+
+export type GenerationTaskHistoryPage = {
+  items: GenerationTaskDetail[];
+  total: number;
+  limit: number;
+  offset: number;
+  stats: GenerationTaskHistoryStats;
+  providers: string[];
+  modelIds: string[];
 };
