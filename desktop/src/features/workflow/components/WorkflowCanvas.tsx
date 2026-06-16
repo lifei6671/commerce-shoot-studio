@@ -162,6 +162,7 @@ import {
   listRecentGenerationTasks,
   listRunningGenerationTasks,
   openGenerationResult,
+  rerunGenerationFromCurrentCombination,
   retryGenerationTask,
   startGeneration,
 } from "../../generation-task/services/taskService";
@@ -178,6 +179,7 @@ import {
   clearWorkspaceCache,
   getCacheStats,
   getSystemSettings,
+  openCurrentWorkspaceDirectory,
   saveSystemSettings,
   testProxyConnection,
 } from "../../system-settings/services/systemSettingsService";
@@ -863,6 +865,22 @@ export function WorkflowCanvas() {
     }
   }
 
+  async function handleOpenWorkspaceDirectory() {
+    if (!isTauriRuntime()) {
+      setActionMessage(null);
+      setActionError("仅桌面端支持打开工作区目录");
+      return;
+    }
+    try {
+      await openCurrentWorkspaceDirectory();
+      setActionError(null);
+      setActionMessage("已打开工作区目录");
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "打开工作区失败");
+    }
+  }
+
   function markWorkbenchAutoSaveSnapshot(input: WorkbenchAutoSaveInput) {
     workbenchAutoSaveSignatureRef.current = buildWorkbenchAutoSaveSignature(input);
   }
@@ -1262,6 +1280,7 @@ export function WorkflowCanvas() {
     let canceled = false;
     setLoadingError(null);
     refreshSystemSettings().catch(() => undefined);
+    refreshTaskLists().catch(() => undefined);
     refreshWorkbenchData().catch((error) => {
       if (!canceled) {
         setLoadingError(error instanceof Error ? error.message : "加载工作台失败");
@@ -2366,6 +2385,8 @@ export function WorkflowCanvas() {
             </header>
             <div className="settings-center__body">
               <TaskHistorySettingsPage
+                currentCombinationId={currentCombination?.id ?? null}
+                modelConfig={modelConfig}
                 modelDefinitions={modelDefinitions}
                 onNotifyError={(message) => {
                   setActionMessage(null);
@@ -2630,7 +2651,12 @@ export function WorkflowCanvas() {
           }}
         />
       ) : null}
-      <StatusBar workspaceRoot={systemSettingsView.currentWorkspaceRoot} />
+      <StatusBar
+        workspaceRoot={systemSettingsView.currentWorkspaceRoot}
+        onOpenWorkspace={() => {
+          void handleOpenWorkspaceDirectory();
+        }}
+      />
     </div>
   );
 }
@@ -4373,10 +4399,14 @@ function SystemSelectField({
 }
 
 function TaskHistorySettingsPage({
+  currentCombinationId,
+  modelConfig,
   modelDefinitions,
   onNotifyError,
   onNotifyMessage,
 }: {
+  currentCombinationId: string | null;
+  modelConfig: SaveModelConfigRequest;
   modelDefinitions: ModelDefinition[];
   onNotifyError: (message: string) => void;
   onNotifyMessage: (message: string) => void;
@@ -4395,6 +4425,7 @@ function TaskHistorySettingsPage({
   const [pageIndex, setPageIndex] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [previewAssets, setPreviewAssets] = useState<AssetFileView[]>([]);
+  const [isRerunning, setIsRerunning] = useState(false);
   const selectedDetail =
     historyPage?.items.find((detail) => detail.task.id === selectedTaskId) ??
     historyPage?.items[0] ??
@@ -4564,6 +4595,22 @@ function TaskHistorySettingsPage({
       void loadHistory();
     } catch (error) {
       onNotifyError(error instanceof Error ? error.message : "重试任务失败");
+    }
+  }
+
+  async function rerunCurrentCombination() {
+    if (!currentCombinationId || isRerunning) {
+      return;
+    }
+    setIsRerunning(true);
+    try {
+      await rerunGenerationFromCurrentCombination(currentCombinationId, modelConfig);
+      onNotifyMessage("已按当前配置重新提交任务");
+      void loadHistory();
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "按当前配置重跑失败");
+    } finally {
+      setIsRerunning(false);
     }
   }
 
@@ -4815,8 +4862,12 @@ function TaskHistorySettingsPage({
                   <TaskHistoryPreview label="结果图" />
                 )}
               </div>
-              <h4>请求 Prompt</h4>
-              <pre className="task-history-json">{formatJsonForDisplay(selectedLog?.promptJson)}</pre>
+              <h4>输入快照</h4>
+              <pre className="task-history-json">{formatJsonForDisplay(selectedDetail.task.assetSnapshotJson)}</pre>
+              <h4>最终 Prompt</h4>
+              <pre className="task-history-json">{formatJsonForDisplay(selectedDetail.task.finalPromptSnapshotJson)}</pre>
+              <h4>模型参数</h4>
+              <pre className="task-history-json">{formatJsonForDisplay(selectedDetail.task.modelConfigSnapshotJson)}</pre>
               <h4>{selectedLog?.errorResponseJson ? "错误返回" : "成功返回"}</h4>
               <pre className="task-history-json">
                 {formatJsonForDisplay(selectedLog?.errorResponseJson ?? selectedLog?.successResponseJson)}
@@ -4825,6 +4876,14 @@ function TaskHistorySettingsPage({
                 <Button disabled={!canRetrySelected} onClick={() => void retrySelectedTask()} type="button">
                   <RefreshCw size={16} />
                   重试任务
+                </Button>
+                <Button
+                  disabled={!currentCombinationId || isRerunning}
+                  onClick={() => void rerunCurrentCombination()}
+                  type="button"
+                >
+                  <Play size={16} />
+                  按当前配置重跑
                 </Button>
                 <Button disabled={!selectedLog?.errorResponseJson && !selectedDetail.task.errorMessage} onClick={() => void copyErrorResponse()} type="button">
                   <Copy size={16} />
@@ -10105,11 +10164,27 @@ function AssetImage({ asset }: { asset: SelectableAsset }) {
   return <img alt={asset.label} src={asset.imageSrc} />;
 }
 
-function StatusBar({ workspaceRoot }: { workspaceRoot: string }) {
+function StatusBar({
+  workspaceRoot,
+  onOpenWorkspace,
+}: {
+  workspaceRoot: string;
+  onOpenWorkspace: () => void;
+}) {
   return (
     <footer className="status-bar">
-      <span>工作区：{workspaceRoot || "本地 Commerce Shoot Studio 工作区"}</span>
-      <FolderOpen size={15} />
+      <span className="status-bar__workspace">
+        工作区：{workspaceRoot || "本地 Commerce Shoot Studio 工作区"}
+        <button
+          aria-label="打开工作区目录"
+          className="status-bar__folder-button"
+          onClick={onOpenWorkspace}
+          title="打开工作区目录"
+          type="button"
+        >
+          <FolderOpen size={15} />
+        </button>
+      </span>
       <div className="status-bar__right">
         <span className="service-dot" />
         本地服务运行中

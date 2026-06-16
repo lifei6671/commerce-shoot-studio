@@ -21,6 +21,8 @@ pub enum AppError {
     TaskAlreadyRunning(String),
     #[error("generation task cancelled: {0}")]
     GenerationCancelled(String),
+    #[error("{message}")]
+    Provider { code: &'static str, message: String },
     #[error("{0}")]
     InvalidInput(String),
 }
@@ -47,6 +49,7 @@ impl serde::Serialize for AppError {
             AppError::ModelConfigInvalid(_) => "MODEL_CONFIG_INVALID",
             AppError::TaskAlreadyRunning(_) => "TASK_ALREADY_RUNNING",
             AppError::GenerationCancelled(_) => "GENERATION_CANCELLED",
+            AppError::Provider { code, .. } => code,
             AppError::InvalidInput(_) => "INVALID_INPUT",
         };
 

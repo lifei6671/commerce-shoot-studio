@@ -44,10 +44,6 @@ pub fn validate_model_config(input: ValidateModelConfigInput) -> AppResult<Valid
 }
 
 fn resolve_model_definition(request: &SaveModelConfigRequest) -> AppResult<ModelDefinition> {
-    if request.provider == "custom" {
-        return custom_model_definition(request);
-    }
-
     fixed_model_definitions()
         .into_iter()
         .find(|definition| {
@@ -543,68 +539,6 @@ fn fixed_model_definitions() -> Vec<ModelDefinition> {
     }]
 }
 
-fn custom_model_definition(request: &SaveModelConfigRequest) -> AppResult<ModelDefinition> {
-    let model_id = request.model_id.trim();
-    if model_id.is_empty() {
-        return Err(AppError::ModelConfigInvalid(
-            "custom model id is required".to_string(),
-        ));
-    }
-
-    let provider_base_url = request
-        .params_json
-        .get("providerBaseUrl")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            AppError::ModelConfigInvalid("custom provider base URL is required".to_string())
-        })?;
-
-    Ok(ModelDefinition {
-        provider: "custom".to_string(),
-        model_id: model_id.to_string(),
-        display_name: model_id.to_string(),
-        advanced: false,
-        input_limits: ModelInputLimits {
-            min_garments: 1,
-            max_garments: 8,
-        },
-        params_schema: custom_model_params_schema(),
-        output: ModelOutputSchema {
-            count_param_key: "outputCount".to_string(),
-            min_count: 1,
-            max_count: 8,
-        },
-        provider_base_url: Some(provider_base_url.to_string()),
-    })
-}
-
-fn custom_model_params_schema() -> Vec<ModelParamSchema> {
-    vec![
-        ModelParamSchema {
-            key: "outputCount".to_string(),
-            label: "Output count".to_string(),
-            kind: ModelParamKind::Integer,
-            required: true,
-            default_value: json!(1),
-            min: Some(1),
-            max: Some(8),
-            options: Vec::new(),
-        },
-        ModelParamSchema {
-            key: "providerBaseUrl".to_string(),
-            label: "Provider base URL".to_string(),
-            kind: ModelParamKind::Text,
-            required: true,
-            default_value: json!(""),
-            min: None,
-            max: None,
-            options: Vec::new(),
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -677,8 +611,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_model_config_accepts_custom_model_with_base_url() {
-        let validated = validate_model_config(ValidateModelConfigInput {
+    fn validate_model_config_rejects_custom_model_with_base_url() {
+        let result = validate_model_config(ValidateModelConfigInput {
             request: SaveModelConfigRequest {
                 id: None,
                 provider: "custom".to_string(),
@@ -689,16 +623,9 @@ mod tests {
                 }),
             },
             advanced_models: false,
-        })
-        .expect("validate model");
+        });
 
-        assert_eq!(validated.definition.provider, "custom");
-        assert_eq!(validated.definition.model_id, "my-image-model");
-        assert_eq!(validated.normalized_output_count, 5);
-        assert_eq!(
-            validated.definition.provider_base_url.as_deref(),
-            Some("https://example.test/v1")
-        );
+        assert!(matches!(result, Err(AppError::ModelConfigInvalid(_))));
     }
 
     #[test]

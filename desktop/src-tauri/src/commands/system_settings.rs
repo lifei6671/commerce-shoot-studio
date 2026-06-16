@@ -5,8 +5,8 @@ use crate::domain::system_settings::{
 };
 use crate::error::{AppError, AppResult};
 use crate::services::system_settings::{
-    clear_cache, collect_cache_stats, default_workspace_root, run_system_maintenance,
-    save_system_settings, system_settings_view,
+    clear_cache, collect_cache_stats, default_workspace_root, open_workspace_directory,
+    run_system_maintenance, save_system_settings, system_settings_view,
     test_proxy_connection as test_proxy_connection_with_settings,
 };
 use crate::state::AppState;
@@ -56,6 +56,11 @@ pub async fn get_cache_stats(state: State<'_, AppState>) -> AppResult<CacheStats
 #[tauri::command]
 pub async fn clear_workspace_cache(state: State<'_, AppState>) -> AppResult<ClearCacheResult> {
     clear_cache(state.database(), state.workspace_paths()).await
+}
+
+#[tauri::command]
+pub async fn open_current_workspace_directory(state: State<'_, AppState>) -> AppResult<()> {
+    open_workspace_directory(state.workspace_paths().root())
 }
 
 #[tauri::command]

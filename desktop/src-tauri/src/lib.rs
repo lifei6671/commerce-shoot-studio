@@ -37,6 +37,7 @@ const OPEN_MODEL_SETTINGS_EVENT: &str = "commerce-shoot-studio://open-model-sett
 #[cfg(target_os = "macos")]
 const OPEN_PROMPT_PRESET_CENTER_EVENT: &str = "commerce-shoot-studio://open-prompt-preset-center";
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -102,6 +103,7 @@ pub fn run() {
             commands::generation::cancel_generation_task,
             commands::generation::get_generation_task_detail,
             commands::generation::get_latest_generation_task_by_combination,
+            commands::generation::list_generation_tasks_by_combination,
             commands::generation::list_running_generation_tasks,
             commands::generation::list_recent_generation_tasks,
             commands::generation::list_generation_task_history,
@@ -126,6 +128,7 @@ pub fn run() {
             commands::system_settings::save_system_settings_command,
             commands::system_settings::get_cache_stats,
             commands::system_settings::clear_workspace_cache,
+            commands::system_settings::open_current_workspace_directory,
             commands::system_settings::test_proxy_connection
         ])
         .run(tauri::generate_context!())

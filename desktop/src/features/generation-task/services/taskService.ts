@@ -36,6 +36,16 @@ export async function getLatestGenerationTaskByCombination(
   );
 }
 
+export async function listGenerationTasksByCombination(
+  combinationId: string,
+  limit = 50,
+): Promise<GenerationTaskDetail[]> {
+  return invoke<GenerationTaskDetail[]>("list_generation_tasks_by_combination", {
+    combinationId,
+    limit,
+  });
+}
+
 export async function listRunningGenerationTasks(): Promise<GenerationTaskDetail[]> {
   return invoke<GenerationTaskDetail[]>("list_running_generation_tasks");
 }

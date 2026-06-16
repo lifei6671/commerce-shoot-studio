@@ -107,7 +107,7 @@ impl CredentialStore for SystemCredentialStore {
 }
 
 fn validate_fixed_provider(provider: &str) -> AppResult<()> {
-    if matches!(provider, "openai" | "google" | "custom") {
+    if matches!(provider, "openai" | "google") {
         return Ok(());
     }
     Err(AppError::InvalidInput(format!(
@@ -207,7 +207,7 @@ mod tests {
     async fn credential_status_accepts_supported_model_providers() {
         let service = ProviderCredentialService::new(InMemoryCredentialStore::default());
 
-        for provider in ["openai", "google", "custom"] {
+        for provider in ["openai", "google"] {
             service
                 .set_provider_api_key(provider, "provider-api-key-value")
                 .await
@@ -219,5 +219,16 @@ mod tests {
             assert_eq!(status.provider, provider);
             assert!(status.configured);
         }
+    }
+
+    #[tokio::test]
+    async fn credential_status_rejects_custom_provider() {
+        let service = ProviderCredentialService::new(InMemoryCredentialStore::default());
+
+        let result = service
+            .set_provider_api_key("custom", "provider-api-key-value")
+            .await;
+
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
     }
 }

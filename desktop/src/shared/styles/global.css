@@ -6157,6 +6157,38 @@ button {
   border-top: 1px solid #d8e0ec;
 }
 
+.status-bar__workspace {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-bar__folder-button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.status-bar__folder-button:hover {
+  color: #1d4ed8;
+  border-color: #cbd5e1;
+  background: #eff6ff;
+}
+
+.status-bar__folder-button:focus-visible {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
 .status-bar__right {
   margin-left: auto;
   display: flex;

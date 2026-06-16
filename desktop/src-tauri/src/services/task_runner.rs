@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use crate::domain::task::{
 use crate::error::{AppError, AppResult};
 use crate::providers::provider_trait::{
     GenerateInput, GenerateInputImage, GeneratedImage, ImageGenerationProvider, PromptPayload,
-    ProviderError, RemoteCancelResult,
+    ProviderError, ProviderErrorCode, RemoteCancelResult,
 };
 use crate::services::assets::get_asset_by_id;
 use crate::services::combinations::get_image_combination_by_id;
@@ -644,6 +645,26 @@ pub async fn get_latest_generation_task_detail_by_combination(
         Some(task_id) => get_generation_task_detail_by_id(database, paths, &task_id).await,
         None => Ok(None),
     }
+}
+
+pub async fn list_generation_task_details_by_combination(
+    database: &WorkspaceDatabase,
+    paths: &WorkspacePaths,
+    combination_id: &str,
+    limit: i64,
+) -> AppResult<Vec<GenerationTaskDetail>> {
+    let limit = limit.clamp(1, 100);
+    let task_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM generation_tasks
+         WHERE combination_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?",
+    )
+    .bind(combination_id)
+    .bind(limit)
+    .fetch_all(database.pool())
+    .await?;
+    list_generation_task_details_by_ids(database, paths, task_ids).await
 }
 
 pub async fn list_running_generation_task_details(
@@ -1364,6 +1385,9 @@ pub fn sanitize_source_url(source_url: &str) -> Option<String> {
     if !(lower.starts_with("https://") || lower.starts_with("http://")) {
         return None;
     }
+    if !is_public_http_url(&lower) {
+        return None;
+    }
     if let Some(query_start) = lower.find('?') {
         let query = &lower[query_start + 1..];
         if query.contains("token")
@@ -1382,6 +1406,52 @@ pub fn sanitize_source_url(source_url: &str) -> Option<String> {
         }
     }
     Some(source_url.to_string())
+}
+
+fn is_public_http_url(lower_url: &str) -> bool {
+    let Some(authority) = lower_url
+        .strip_prefix("https://")
+        .or_else(|| lower_url.strip_prefix("http://"))
+        .and_then(|value| value.split(['/', '?', '#']).next())
+    else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, _)) = rest.split_once(']') else {
+            return false;
+        };
+        host
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => is_public_ipv4(address),
+        Ok(IpAddr::V6(address)) => is_public_ipv6(address),
+        Err(_) => true,
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_unspecified())
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_unique_local()
+        || address.is_unicast_link_local())
 }
 
 async fn get_running_task_id_for_writer(
@@ -1718,7 +1788,24 @@ fn generation_cancelled_error_json(task_id: &str) -> Value {
 }
 
 fn provider_error_to_app_error(err: ProviderError) -> AppError {
-    AppError::InvalidInput(format!("{:?}: {}", err.code, err.message))
+    AppError::Provider {
+        code: provider_error_code(err.code),
+        message: format!("{:?}: {}", err.code, err.message),
+    }
+}
+
+fn provider_error_code(code: ProviderErrorCode) -> &'static str {
+    match code {
+        ProviderErrorCode::MissingCredential => "MISSING_CREDENTIAL",
+        ProviderErrorCode::UnsupportedProvider => "UNSUPPORTED_PROVIDER",
+        ProviderErrorCode::UnsupportedModel => "UNSUPPORTED_MODEL",
+        ProviderErrorCode::InvalidInput => "INVALID_INPUT",
+        ProviderErrorCode::RequestTimeout => "REQUEST_TIMEOUT",
+        ProviderErrorCode::Cancelled => "CANCELLED",
+        ProviderErrorCode::RateLimited => "RATE_LIMITED",
+        ProviderErrorCode::RemoteError => "REMOTE_ERROR",
+        ProviderErrorCode::ResponseInvalid => "RESPONSE_INVALID",
+    }
 }
 
 fn app_error_code(err: &AppError) -> &'static str {
@@ -1732,6 +1819,7 @@ fn app_error_code(err: &AppError) -> &'static str {
         AppError::ModelConfigInvalid(_) => "MODEL_CONFIG_INVALID",
         AppError::TaskAlreadyRunning(_) => "TASK_ALREADY_RUNNING",
         AppError::GenerationCancelled(_) => "GENERATION_CANCELLED",
+        AppError::Provider { code, .. } => code,
         AppError::InvalidInput(_) => "INVALID_INPUT",
     }
 }
@@ -1774,7 +1862,7 @@ fn validate_safe_json_value(value: &Value, path: &str) -> AppResult<()> {
                 || lower.contains("/users/")
             {
                 return Err(AppError::InvalidInput(format!(
-                    "request_summary_json contains sensitive value at {path}"
+                    "summary_json contains sensitive value at {path}"
                 )));
             }
         }
@@ -1793,7 +1881,7 @@ fn validate_safe_json_value(value: &Value, path: &str) -> AppResult<()> {
                     || lower_key.contains("base64")
                 {
                     return Err(AppError::InvalidInput(format!(
-                        "request_summary_json contains sensitive key at {path}.{key}"
+                        "summary_json contains sensitive key at {path}.{key}"
                     )));
                 }
                 validate_safe_json_value(value, &format!("{path}.{key}"))?;
@@ -2194,6 +2282,24 @@ mod tests {
             .await
             .expect("task count");
         assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn validate_safe_summary_rejects_sensitive_provider_payloads() {
+        let cases = [
+            json!({"rawResponse": {"id": "response-id"}}),
+            json!({"headers": {"Authorization": "Bearer placeholder-token"}}),
+            json!({"api_key": "placeholder-api-key"}),
+            json!({"image": "data:image/png;base64,AAAA"}),
+            json!({"path": "/Users/example/source.png"}),
+        ];
+
+        for summary in cases {
+            assert!(matches!(
+                validate_safe_summary(Some(&summary)),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
     }
 
     #[tokio::test]
@@ -2898,7 +3004,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Provider {
+                code: "REMOTE_ERROR",
+                ..
+            })
+        ));
         let row = sqlx::query(
             "SELECT status, error_code, error_message
              FROM generation_tasks
@@ -2910,12 +3022,41 @@ mod tests {
         assert_eq!(row.get::<String, _>("status"), "failed");
         assert_eq!(
             row.get::<Option<String>, _>("error_code").as_deref(),
-            Some("INVALID_INPUT")
+            Some("REMOTE_ERROR")
         );
         assert!(row
             .get::<Option<String>, _>("error_message")
             .expect("error message")
             .contains("provider unavailable"));
+    }
+
+    #[test]
+    fn provider_error_codes_map_to_task_error_codes() {
+        let cases = [
+            (ProviderErrorCode::MissingCredential, "MISSING_CREDENTIAL"),
+            (
+                ProviderErrorCode::UnsupportedProvider,
+                "UNSUPPORTED_PROVIDER",
+            ),
+            (ProviderErrorCode::UnsupportedModel, "UNSUPPORTED_MODEL"),
+            (ProviderErrorCode::InvalidInput, "INVALID_INPUT"),
+            (ProviderErrorCode::RequestTimeout, "REQUEST_TIMEOUT"),
+            (ProviderErrorCode::Cancelled, "CANCELLED"),
+            (ProviderErrorCode::RateLimited, "RATE_LIMITED"),
+            (ProviderErrorCode::RemoteError, "REMOTE_ERROR"),
+            (ProviderErrorCode::ResponseInvalid, "RESPONSE_INVALID"),
+        ];
+
+        for (provider_code, expected_task_code) in cases {
+            let err = provider_error_to_app_error(ProviderError::new(
+                "openai",
+                Some("gpt-image-1".to_string()),
+                provider_code,
+                "provider failed",
+            ));
+
+            assert_eq!(app_error_code(&err), expected_task_code);
+        }
     }
 
     #[tokio::test]
@@ -2944,7 +3085,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Provider {
+                code: "REMOTE_ERROR",
+                ..
+            })
+        ));
         let detail =
             get_generation_task_detail_by_id(&database, &paths, "task_failed_execution_log")
                 .await
@@ -3236,6 +3383,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_generation_task_details_by_combination_filters_and_orders_tasks() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        create_completed_task_for_combination(&database, "task_old", Some(&combination_id)).await;
+        create_completed_task_for_combination(&database, "task_new", Some(&combination_id)).await;
+        create_completed_task_for_combination(&database, "task_other", None).await;
+
+        let tasks =
+            list_generation_task_details_by_combination(&database, &paths, &combination_id, 10)
+                .await
+                .expect("tasks by combination");
+
+        let ids: Vec<String> = tasks.into_iter().map(|detail| detail.task.id).collect();
+        assert_eq!(ids, vec!["task_new".to_string(), "task_old".to_string()]);
+    }
+
+    #[tokio::test]
     async fn rerun_generation_task_uses_observer_and_cancellation_checker() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let combination_id = seed_generation_inputs(&database, &paths).await;
@@ -3305,6 +3469,13 @@ mod tests {
             None
         );
         assert_eq!(sanitize_source_url("file:///Users/me/result.png"), None);
+        assert_eq!(sanitize_source_url("https://localhost/result.png"), None);
+        assert_eq!(sanitize_source_url("http://127.0.0.1/result.png"), None);
+        assert_eq!(sanitize_source_url("http://10.0.0.2/result.png"), None);
+        assert_eq!(
+            sanitize_source_url("https://user:password@cdn.example.com/result.png"),
+            None
+        );
     }
 
     async fn test_database() -> (tempfile::TempDir, WorkspaceDatabase) {
@@ -3634,5 +3805,49 @@ mod tests {
         )
         .await
         .expect("create minimal task");
+    }
+
+    async fn create_completed_task_for_combination(
+        database: &WorkspaceDatabase,
+        id: &str,
+        combination_id: Option<&str>,
+    ) {
+        create_generation_task_snapshot(
+            database,
+            CreateGenerationTaskSnapshotRequest {
+                id: Some(id.to_string()),
+                combination_id: combination_id.map(str::to_string),
+                provider: "openai".to_string(),
+                model_id: "gpt-image-1".to_string(),
+                request_summary_json: Some(json!({"provider": "openai"})),
+                input_snapshot_json: json!({}),
+                final_prompt_snapshot_json: json!({"user": "prompt"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                asset_snapshot_json: json!([]),
+                input_assets: vec![],
+                output_count: 1,
+            },
+        )
+        .await
+        .expect("create task");
+        let offset = if id == "task_old" {
+            "-1 minute"
+        } else {
+            "+0 second"
+        };
+        sqlx::query(
+            "UPDATE generation_tasks
+             SET status = 'succeeded',
+                 progress = 100,
+                 created_at = datetime('now', ?),
+                 updated_at = datetime('now', ?)
+             WHERE id = ?",
+        )
+        .bind(offset)
+        .bind(offset)
+        .bind(id)
+        .execute(database.pool())
+        .await
+        .expect("complete task");
     }
 }

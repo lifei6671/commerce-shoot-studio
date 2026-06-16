@@ -976,7 +976,7 @@ R6 第二期授权与支付
 - [x] 实现至少一个固定 Provider。
 - [x] API Key 由 Rust 层从系统密钥库读取。
 - [x] 前端只展示是否已配置和脱敏状态。
-- [ ] Provider 超时、取消和错误返回可映射到统一任务错误。
+- [x] Provider 超时、取消和错误返回可映射到统一任务错误。
 - [x] 不实现自定义 base URL Provider。
 
 **验证清单**：
@@ -992,8 +992,10 @@ R6 第二期授权与支付
 
 **未完成备注**：
 
-- 当前 OpenAI Provider 已实现输入/输出、错误映射和脱敏单测，但还没有真实 Provider 成功调用验收记录。
-- 当前代码能映射 `reqwest` timeout error，但 OpenAI HTTP client 尚未配置明确请求超时，因此不能标记“Provider 超时”完成。
+- 当前 OpenAI Provider 已实现输入/输出、明确请求超时、错误映射和脱敏单测；任务层会把 `ProviderErrorCode`
+  映射为统一任务错误码（如 `REQUEST_TIMEOUT`、`REMOTE_ERROR`、`RATE_LIMITED`）。
+- 当前后端已拒绝 `custom` Provider 的凭据保存和模型配置保存，避免绕过 UI 写入自定义 base URL Provider。
+- 当前仍缺真实 Provider 成功调用验收记录，因此退出条件暂不勾选。
 
 ---
 
@@ -1075,13 +1077,19 @@ R6 第二期授权与支付
 
 **验证清单**：
 
-- [ ] 正常执行时 UI 实时更新状态。
-- [ ] 前端错过事件后，重新进入页面能恢复正确状态。
+- [x] 正常执行时 UI 实时更新状态。
+- [x] 前端错过事件后，重新进入页面能恢复正确状态。
 - [x] 启动恢复生成的 `APP_UNEXPECTED_SHUTDOWN` 任务能被 `list_recent_generation_tasks` 返回。
 
 **退出条件**：
 
-- [ ] 任务状态不依赖单一事件通道。
+- [x] 任务状态不依赖单一事件通道。
+
+**完成备注**：
+
+- 前端 `task-updated` 事件处理会读取任务详情并刷新 running/recent 列表。
+- 应用进入 Tauri 环境时会主动拉取 running/recent 任务列表，避免错过事件后只依赖实时通道。
+- 已通过 `task events combine realtime updates with startup polling fallback` 前端回归测试和 Rust 任务事件/启动恢复相关单测覆盖。
 
 ---
 
@@ -1164,7 +1172,7 @@ R6 第二期授权与支付
 
 **退出条件**：
 
-- [ ] 用户能明确选择“重试旧任务”或“按当前配置再跑一次”。
+- [x] 用户能明确选择“重试旧任务”或“按当前配置再跑一次”。
 
 ---
 
@@ -1187,25 +1195,25 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 实现 `list_recent_generation_tasks` UI。
-- [ ] 实现 `list_generation_tasks_by_combination`。
-- [ ] 展示任务状态、失败码和失败原因。
-- [ ] 展示输入 asset 快照。
-- [ ] 展示 final prompt 快照。
-- [ ] 展示模型参数快照。
-- [ ] 展示结果图和打开大图入口。
-- [ ] 提供 retry 和 rerun 入口。
+- [x] 实现 `list_recent_generation_tasks` UI。
+- [x] 实现 `list_generation_tasks_by_combination`。
+- [x] 展示任务状态、失败码和失败原因。
+- [x] 展示输入 asset 快照。
+- [x] 展示 final prompt 快照。
+- [x] 展示模型参数快照。
+- [x] 展示结果图和打开大图入口。
+- [x] 提供 retry 和 rerun 入口。
 
 **验证清单**：
 
-- [ ] 成功任务可查看结果。
-- [ ] 失败任务可查看失败原因。
-- [ ] 修改当前组合后，历史任务详情不变。
-- [ ] retry/rerun 入口调用正确 command。
+- [x] 成功任务可查看结果。
+- [x] 失败任务可查看失败原因。
+- [x] 修改当前组合后，历史任务详情不变。
+- [x] retry/rerun 入口调用正确 command。
 
 **退出条件**：
 
-- [ ] 用户可追溯每次生成的输入、Prompt、模型参数和结果。
+- [x] 用户可追溯每次生成的输入、Prompt、模型参数和结果。
 
 ---
 
@@ -1227,22 +1235,28 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 实现 `set_provider_api_key`。
-- [ ] 实现 `get_provider_credential_status`。
-- [ ] API Key 写入系统密钥库。
-- [ ] 前端只展示是否已配置和脱敏尾号。
-- [ ] 保存失败向用户展示明确错误。
+- [x] 实现 `set_provider_api_key`。
+- [x] 实现 `get_provider_credential_status`。
+- [x] API Key 写入系统密钥库。
+- [x] 前端只展示是否已配置和脱敏尾号。
+- [x] 保存失败向用户展示明确错误。
 
 **验证清单**：
 
-- [ ] API Key 不出现在 SQLite。
-- [ ] API Key 不出现在前端持久化状态。
-- [ ] API Key 不出现在日志。
-- [ ] Provider 调用由 Rust 层读取 key。
+- [x] API Key 不出现在 SQLite。
+- [x] API Key 不出现在前端持久化状态。
+- [x] API Key 不出现在日志。
+- [x] Provider 调用由 Rust 层读取 key。
 
 **退出条件**：
 
 - [ ] 用户可安全配置固定 Provider 凭据。
+
+**未完成备注**：
+
+- 已通过 `credential_status` 单测覆盖凭据状态、脱敏尾号和拒绝 `custom` Provider；已通过代码检索确认
+  `model_configs` 仅保存 provider、model_id、params_json，前端持久化只保存模型配置 id。
+- 仍缺真实 macOS Keychain 保存/读取和本地 App UI 级保存验收，因此退出条件暂不勾选。
 
 ---
 
@@ -1266,24 +1280,31 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] Tauri command capability 最小授权。
-- [ ] 文件系统 scope 限定工作区和用户选择文件。
-- [ ] 外部 URL 访问做协议和目标校验。
-- [ ] URL 下载禁止访问私有地址段。
-- [ ] 日志脱敏 API Key、Authorization 和 Provider 请求敏感信息。
-- [ ] 日志脱敏用户导入前完整本地路径。
-- [ ] 禁止持久化 Provider raw response。
+- [x] Tauri command capability 最小授权。
+- [x] 文件系统 scope 限定工作区和用户选择文件。
+- [x] 外部 URL 访问做协议和目标校验。
+- [x] URL 下载禁止访问私有地址段。
+- [x] 日志脱敏 API Key、Authorization 和 Provider 请求敏感信息。
+- [x] 日志脱敏用户导入前完整本地路径。
+- [x] 禁止持久化 Provider raw response。
 
 **验证清单**：
 
-- [ ] 日志中不出现 API Key、Authorization Header 和 Provider 原始响应。
-- [ ] `workspace.db` 不出现完整本地路径。
-- [ ] Tauri 文件访问不能越权读取工作区外非用户选择文件。
-- [ ] 外链和下载 URL 校验可拒绝不安全目标。
+- [x] 日志中不出现 API Key、Authorization Header 和 Provider 原始响应。
+- [x] `workspace.db` 不出现完整本地路径。
+- [x] Tauri 文件访问不能越权读取工作区外非用户选择文件。
+- [x] 外链和下载 URL 校验可拒绝不安全目标。
 
 **退出条件**：
 
-- [ ] 桌面端满足 v3.5 安全边界。
+- [x] 桌面端满足 v3.5 安全边界。
+
+**未完成备注**：
+
+- 已补 `source_url` 写库前校验：只允许 http/https，拒绝 localhost、私有网段、链路本地地址、URL 账号信息和带 token/signature/API key 等敏感 query 的地址。
+- 已补 Provider summary 安全校验：拒绝 `rawResponse`、API Key、Authorization、base64/data URL 和完整 macOS 用户路径进入任务摘要、执行日志成功/失败响应或 response summary。
+- 已将 `desktop/src-tauri/capabilities/default.json` 从 `core:default` 收紧到前端实际使用的 `core:event:allow-listen`、`core:event:allow-unlisten`、`core:path:allow-resolve-directory` 和 `dialog:allow-open`。
+- 当前未开放 URL 下载入口；资源导入仅走用户选择的本地文件，工作区文件读写由 Rust command 收敛到 workspace path。
 
 ---
 
@@ -1389,61 +1410,67 @@ R6 第二期授权与支付
 
 **执行清单**：
 
-- [ ] 执行 Prompt 一致性验收。
-- [ ] 执行 Prompt 模板变量验收。
-- [ ] 执行任务快照验收。
-- [ ] 执行 retry/rerun 验收。
-- [ ] 执行数据库脱敏验收。
-- [ ] 执行删除资源验收。
-- [ ] 执行图片去重验收。
-- [ ] 执行草稿校验验收。
-- [ ] 执行单任务并发验收。
-- [ ] 执行启动恢复验收。
-- [ ] 执行事件兜底验收。
-- [ ] 执行重试文件检查验收。
-- [ ] 执行路径脱敏验收。
-- [ ] 执行孤儿文件 GC 验收。
-- [ ] 执行取消任务验收。
+- [x] 执行 Prompt 一致性验收。
+- [x] 执行 Prompt 模板变量验收。
+- [x] 执行任务快照验收。
+- [x] 执行 retry/rerun 验收。
+- [x] 执行数据库脱敏验收。
+- [x] 执行删除资源验收。
+- [x] 执行图片去重验收。
+- [x] 执行草稿校验验收。
+- [x] 执行单任务并发验收。
+- [x] 执行启动恢复验收。
+- [x] 执行事件兜底验收。
+- [x] 执行重试文件检查验收。
+- [x] 执行路径脱敏验收。
+- [x] 执行孤儿文件 GC 验收。
+- [x] 执行取消任务验收。
 
 **验证清单**：
 
-- [ ] 每个验收项都有通过、失败或未执行记录。
-- [ ] 每个失败项都有复现步骤和修复任务编号。
-- [ ] 每个未执行项都有原因和风险说明。
-- [ ] 验收报告不包含密钥、token、激活码或用户隐私路径。
+- [x] 每个验收项都有通过、失败或未执行记录。
+- [x] 每个失败项都有复现步骤和修复任务编号。
+- [x] 每个未执行项都有原因和风险说明。
+- [x] 验收报告不包含密钥、token、激活码或用户隐私路径。
 
 **退出条件**：
 
 - [ ] P0/P1 验收项全部通过，或剩余风险被明确接受。
 
+**未完成备注**：
+
+- `docs/acceptance-report.md` 已记录所有可自动化验收项和未执行项。
+- 固定真实 Provider 成功调用、真实生图保存闭环和 macOS Keychain UI 级凭据验收仍未执行，需真实 API Key、可访问网络和本地 app 人工验收。
+- 因剩余风险尚未被明确接受，T30 退出条件暂不勾选。
+
 ---
 
 ## 3. 交付物清单
 
-- [ ] 桌面端 Tauri + React 应用。
-- [ ] 固定工作流画布。
-- [ ] 本地 SQLite migration 与工作区 assets 文件目录。
-- [ ] 图片导入、组合保存、Prompt 预览、模型配置。
-- [ ] 固定 Provider Adapter。
-- [ ] 本地任务状态机、事件推送、主动拉取兜底。
-- [ ] 取消、重试、重跑、历史和结果展示。
-- [ ] 日志脱敏、Tauri 安全配置。
-- [ ] MVP 验收报告。
+- [x] 桌面端 Tauri + React 应用。
+- [x] 固定工作流画布。
+- [x] 本地 SQLite migration 与工作区 assets 文件目录。
+- [x] 图片导入、组合保存、Prompt 预览、模型配置。
+- [x] 固定 Provider Adapter。
+- [x] 本地任务状态机、事件推送、主动拉取兜底。
+- [x] 取消、重试、重跑、历史和结果展示。
+- [x] 日志脱敏、Tauri 安全配置。
+- [x] MVP 验收报告。
 
 ---
 
 ## 4. 强制不做清单
 
-- [ ] 不做任意节点编排。
-- [ ] 不做自定义脚本节点。
-- [ ] 不做云端业务数据同步。
-- [ ] 不做多用户权限。
-- [ ] 本期不做授权、License Server、设备激活、套餐功能开关和支付 webhook。
-- [ ] 不做批量队列。
-- [ ] 不做自建模型。
-- [ ] 不开放通用 custom Provider。
-- [ ] 不做复杂图片编辑器。
-- [ ] 不把 API Key 写入日志或 SQLite。
+- [x] 不做任意节点编排。
+- [x] 不做自定义脚本节点。
+- [x] 不做云端业务数据同步。
+- [x] 不做多用户权限。
+- [x] 本期不做授权、License Server、设备激活、套餐功能开关和支付 webhook。
+- [x] 不做批量队列。
+- [x] 不做自建模型。
+- [x] 不开放通用 custom Provider。
+- [x] 不做复杂图片编辑器。
+- [x] 不把 API Key 写入日志或 SQLite。
 
 ---
 

@@ -218,6 +218,11 @@ pub async fn test_proxy_connection(
     })
 }
 
+pub fn open_workspace_directory(workspace_root: &Path) -> AppResult<()> {
+    validate_workspace_directory_for_open(workspace_root)?;
+    open_directory_with_system_file_manager(workspace_root)
+}
+
 pub fn notify_generation_finished(app_config_dir: &Path, status: &str, task_id: &str) {
     let fallback_root = app_config_dir.to_path_buf();
     let Ok(settings) = load_system_settings(app_config_dir, &fallback_root) else {
@@ -888,6 +893,55 @@ fn show_system_notification(title: &str, message: &str, duration_seconds: u32) -
     Ok(())
 }
 
+fn validate_workspace_directory_for_open(workspace_root: &Path) -> AppResult<()> {
+    if !workspace_root.exists() {
+        return Err(AppError::InvalidInput(format!(
+            "workspace directory {} was not found",
+            workspace_root.display()
+        )));
+    }
+    if !workspace_root.is_dir() {
+        return Err(AppError::InvalidInput(format!(
+            "workspace path {} is not a directory",
+            workspace_root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn open_directory_with_system_file_manager(path: &Path) -> AppResult<()> {
+    open_directory_command(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| {
+            AppError::InvalidInput(format!(
+                "failed to open workspace directory {}: {err}",
+                path.display()
+            ))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn open_directory_command(path: &Path) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command.arg(path);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn open_directory_command(path: &Path) -> Command {
+    let mut command = Command::new("explorer");
+    command.arg(path);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_directory_command(path: &Path) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(path);
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +985,18 @@ mod tests {
     }
 
     #[test]
+    fn workspace_directory_open_requires_existing_directory() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let missing_path = temp_dir.path().join("missing-workspace");
+        let file_path = temp_dir.path().join("workspace.txt");
+        fs::write(&file_path, "not a directory").expect("write file");
+
+        assert!(validate_workspace_directory_for_open(&missing_path).is_err());
+        assert!(validate_workspace_directory_for_open(&file_path).is_err());
+        assert!(validate_workspace_directory_for_open(temp_dir.path()).is_ok());
+    }
+
+    #[test]
     fn manual_proxy_validation_requires_host_and_positive_port() {
         let mut settings = SystemSettings::default();
         settings.proxy.mode = ProxyMode::Manual;
@@ -955,9 +1021,7 @@ mod tests {
         let error = save_system_settings(temp_dir.path(), settings)
             .expect_err("invalid proxy settings should not be saved");
 
-        assert!(error
-            .to_string()
-            .contains("manual proxy port is required"));
+        assert!(error.to_string().contains("manual proxy port is required"));
     }
 
     #[test]

@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default permissions for the main desktop window.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:path:allow-resolve-directory",
+    "dialog:allow-open"
+  ]
 }

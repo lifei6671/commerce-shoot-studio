@@ -8,8 +8,9 @@ use crate::domain::task::{
 use crate::error::AppResult;
 use crate::services::task_runner::{
     get_generation_task_detail_by_id, get_latest_generation_task_detail_by_combination,
-    list_generation_task_history_details, list_recent_generation_task_details,
-    list_running_generation_task_details, open_generation_result_asset,
+    list_generation_task_details_by_combination, list_generation_task_history_details,
+    list_recent_generation_task_details, list_running_generation_task_details,
+    open_generation_result_asset,
 };
 use crate::state::AppState;
 
@@ -47,6 +48,21 @@ pub async fn get_latest_generation_task_by_combination(
         state.database(),
         state.workspace_paths(),
         &combination_id,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_generation_tasks_by_combination(
+    state: State<'_, AppState>,
+    combination_id: String,
+    limit: Option<i64>,
+) -> AppResult<Vec<GenerationTaskDetail>> {
+    list_generation_task_details_by_combination(
+        state.database(),
+        state.workspace_paths(),
+        &combination_id,
+        limit.unwrap_or(50),
     )
     .await
 }

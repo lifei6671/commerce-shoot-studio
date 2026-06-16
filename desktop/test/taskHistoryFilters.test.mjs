@@ -126,6 +126,33 @@ test("task history retry is limited to failed openai tasks", () => {
   assert.equal(canRetryTaskHistoryItem({ status: "failed", provider: "legacy-provider" }), false);
 });
 
+test("task history exposes retry and rerun as separate actions", () => {
+  assert.match(workflowCanvasSource, /retryGenerationTask\(selectedDetail\.task\.id\)/);
+  assert.match(
+    workflowCanvasSource,
+    /rerunGenerationFromCurrentCombination\(currentCombinationId, modelConfig\)/,
+  );
+  assert.match(workflowCanvasSource, />\s*重试任务\s*<\/Button>/);
+  assert.match(workflowCanvasSource, />\s*按当前配置重跑\s*<\/Button>/);
+});
+
+test("task history detail displays immutable task snapshots", () => {
+  assert.match(workflowCanvasSource, /<h4>输入快照<\/h4>/);
+  assert.match(workflowCanvasSource, /selectedDetail\.task\.assetSnapshotJson/);
+  assert.match(workflowCanvasSource, /<h4>最终 Prompt<\/h4>/);
+  assert.match(workflowCanvasSource, /selectedDetail\.task\.finalPromptSnapshotJson/);
+  assert.match(workflowCanvasSource, /<h4>模型参数<\/h4>/);
+  assert.match(workflowCanvasSource, /selectedDetail\.task\.modelConfigSnapshotJson/);
+});
+
+test("task events combine realtime updates with startup polling fallback", () => {
+  assert.match(workflowCanvasSource, /refreshTaskLists\(\)\.catch\(\(\) => undefined\);/);
+  assert.match(
+    workflowCanvasSource,
+    /listenGenerationTaskUpdates\(\(task\) => \{[\s\S]*?getGenerationTaskDetail\(task\.id\)[\s\S]*?setLatestTask\(detail\);[\s\S]*?refreshTaskLists\(\)\.catch\(\(\) => undefined\);/,
+  );
+});
+
 test("task history error actions report failures through toast", () => {
   assert.match(
     workflowCanvasSource,

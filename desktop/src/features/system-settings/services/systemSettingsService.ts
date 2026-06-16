@@ -26,6 +26,10 @@ export async function clearWorkspaceCache(): Promise<ClearCacheResult> {
   return invoke<ClearCacheResult>("clear_workspace_cache");
 }
 
+export async function openCurrentWorkspaceDirectory(): Promise<void> {
+  return invoke<void>("open_current_workspace_directory");
+}
+
 export async function testProxyConnection(
   settings: SystemSettings,
   testDomain: string,
