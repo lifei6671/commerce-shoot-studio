@@ -39,6 +39,64 @@ test("task history filter menu closes after selecting an option", () => {
   );
 });
 
+test("task history page header places title after the back button", () => {
+  const headerStart = workflowCanvasSource.indexOf('className="settings-center__header"');
+  const backButton = workflowCanvasSource.indexOf('className="settings-back-button"', headerStart);
+  const title = workflowCanvasSource.indexOf('className="task-history-title"', headerStart);
+  const body = workflowCanvasSource.indexOf('className="settings-center__body"', headerStart);
+
+  assert.notEqual(headerStart, -1);
+  assert.ok(backButton > headerStart);
+  assert.ok(title > backButton);
+  assert.ok(body > title);
+  assert.match(workflowCanvasSource, /<h1>任务历史<\/h1>/);
+  assert.match(workflowCanvasSource, /追踪生成任务、执行日志与结果文件/);
+  assert.doesNotMatch(workflowCanvasSource, /className="task-history-header"/);
+});
+
+test("task history toolbar order matches the workbench layout", () => {
+  const toolbarStart = workflowCanvasSource.indexOf('className="task-history-toolbar"');
+  const tabs = workflowCanvasSource.indexOf('className="task-history-tabs"', toolbarStart);
+  const providerFilter = workflowCanvasSource.indexOf('openFilterMenu === "provider"', toolbarStart);
+  const modelFilter = workflowCanvasSource.indexOf('openFilterMenu === "model"', toolbarStart);
+  const dateFilter = workflowCanvasSource.indexOf('openFilterMenu === "date"', toolbarStart);
+  const search = workflowCanvasSource.indexOf('className="task-history-search"', toolbarStart);
+  const searchButton = workflowCanvasSource.indexOf(
+    'className="task-history-search-button"',
+    toolbarStart,
+  );
+  const refreshButton = workflowCanvasSource.indexOf(
+    'className="task-history-refresh-button"',
+    toolbarStart,
+  );
+
+  assert.notEqual(toolbarStart, -1);
+  assert.ok(tabs > toolbarStart);
+  assert.ok(providerFilter > tabs);
+  assert.ok(modelFilter > providerFilter);
+  assert.ok(dateFilter > modelFilter);
+  assert.ok(search > dateFilter);
+  assert.ok(searchButton > search);
+  assert.ok(refreshButton > searchButton);
+});
+
+test("task history search only reloads after search is submitted", () => {
+  assert.match(workflowCanvasSource, /const \[searchDraft, setSearchDraft\] = useState\(""\)/);
+  assert.match(
+    workflowCanvasSource,
+    /function runTaskHistorySearch\(\) \{[\s\S]*?setSearch\(searchDraft\);/,
+  );
+  assert.match(workflowCanvasSource, /value=\{searchDraft\}/);
+  assert.match(
+    workflowCanvasSource,
+    /onChange=\{\(event\) => setSearchDraft\(event\.target\.value\)\}/,
+  );
+  assert.doesNotMatch(
+    workflowCanvasSource,
+    /onChange=\{\(event\) => resetPageAndSetSearch\(event\.target\.value\)\}/,
+  );
+});
+
 test("task history log export reloads all rows that match the current filters", () => {
   assert.match(
     workflowCanvasSource,

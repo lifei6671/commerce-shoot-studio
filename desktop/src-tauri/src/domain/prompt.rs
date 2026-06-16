@@ -234,6 +234,24 @@ pub struct PromptPreset {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePromptPresetScenarioRequest {
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptPresetScenario {
+    pub id: String,
+    pub name: String,
+    pub source: PromptTemplateSource,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvePromptInput {
     pub system_template: Option<String>,

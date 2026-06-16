@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  buildNewCombinationPersonAssetIdsAfterImport,
   buildNewCombinationForm,
   filterNewCombinationPickerAssets,
 } from "../src/features/workflow/components/newCombinationForm.ts";
@@ -14,6 +15,7 @@ test("new combination form starts with no prefilled information", () => {
     code: "",
     description: "",
     personAssetId: null,
+    personAssetIds: [],
     garmentAssetIds: [],
   });
 });
@@ -22,6 +24,7 @@ test("new combination form accepts explicit draft overrides only", () => {
   const form = buildNewCombinationForm({
     name: "夏季上新",
     personAssetId: "person-1",
+    personAssetIds: ["person-1", "person-2"],
     garmentAssetIds: ["garment-1"],
   });
 
@@ -30,8 +33,28 @@ test("new combination form accepts explicit draft overrides only", () => {
     code: "",
     description: "",
     personAssetId: "person-1",
+    personAssetIds: ["person-1", "person-2"],
     garmentAssetIds: ["garment-1"],
   });
+});
+
+test("new combination person import keeps multiple selected people", () => {
+  assert.deepEqual(
+    buildNewCombinationPersonAssetIdsAfterImport({
+      currentPersonAssetId: "person-a",
+      currentPersonAssetIds: ["person-a"],
+      importedPersonAssetIds: ["person-b", "person-c"],
+    }),
+    ["person-b", "person-c", "person-a"],
+  );
+  assert.deepEqual(
+    buildNewCombinationPersonAssetIdsAfterImport({
+      currentPersonAssetId: "person-a",
+      currentPersonAssetIds: ["person-b", "person-a"],
+      importedPersonAssetIds: ["person-b", "person-c"],
+    }),
+    ["person-c", "person-b", "person-a"],
+  );
 });
 
 test("new combination picker does not show library assets before explicit selection", () => {

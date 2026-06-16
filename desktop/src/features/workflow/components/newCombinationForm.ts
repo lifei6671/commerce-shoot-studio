@@ -3,6 +3,7 @@ export type NewCombinationForm = {
   code: string;
   description: string;
   personAssetId: string | null;
+  personAssetIds: string[];
   garmentAssetIds: string[];
 };
 
@@ -14,9 +15,33 @@ export function buildNewCombinationForm(
     code: "",
     description: "",
     personAssetId: null,
+    personAssetIds: [],
     garmentAssetIds: [],
     ...override,
   };
+}
+
+export function buildNewCombinationPersonAssetIdsAfterImport({
+  currentPersonAssetId,
+  currentPersonAssetIds,
+  importedPersonAssetIds,
+}: {
+  currentPersonAssetId: string | null;
+  currentPersonAssetIds: string[];
+  importedPersonAssetIds: string[];
+}) {
+  const currentIds = normalizeNewCombinationPersonAssetIds({
+    currentPersonAssetId,
+    currentPersonAssetIds,
+  });
+  const currentIdSet = new Set(currentIds);
+  return normalizeNewCombinationPersonAssetIds({
+    currentPersonAssetId,
+    currentPersonAssetIds: [
+      ...importedPersonAssetIds.filter((id) => !currentIdSet.has(id.trim())),
+      ...currentIds,
+    ],
+  });
 }
 
 export function filterNewCombinationPickerAssets<T>(
@@ -32,4 +57,27 @@ export function filterNewCombinationPickerAssets<T>(
   return selectedIds
     .map((assetId) => assetsById.get(assetId))
     .filter((asset): asset is T => Boolean(asset));
+}
+
+function normalizeNewCombinationPersonAssetIds({
+  currentPersonAssetId,
+  currentPersonAssetIds,
+}: {
+  currentPersonAssetId: string | null;
+  currentPersonAssetIds: string[];
+}) {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const id of [
+    ...currentPersonAssetIds,
+    ...(currentPersonAssetId ? [currentPersonAssetId] : []),
+  ]) {
+    const value = id.trim();
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
 }

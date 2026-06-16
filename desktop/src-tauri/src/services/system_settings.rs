@@ -81,6 +81,7 @@ pub fn save_system_settings(
             "workspace root cannot be empty".to_string(),
         ));
     }
+    validate_proxy_settings(&settings)?;
     fs::create_dir_all(Path::new(&settings.workspace_root))?;
     apply_launch_at_login(settings.launch_at_login)?;
 
@@ -102,6 +103,7 @@ pub fn system_settings_view(
     Ok(SystemSettingsView {
         settings,
         current_workspace_root: current_workspace_root.to_string_lossy().to_string(),
+        system_proxy_detected: detect_system_proxy_url().is_some(),
         workspace_change_requires_restart,
     })
 }
@@ -164,6 +166,12 @@ pub fn build_proxy_client(settings: &SystemSettings) -> AppResult<reqwest::Clien
         if !settings.proxy.username.trim().is_empty() {
             proxy = proxy.basic_auth(&settings.proxy.username, &settings.proxy.password);
         }
+        builder = builder.proxy(proxy);
+    } else if settings.proxy.mode == ProxyMode::System {
+        let proxy_url = detect_system_proxy_url()
+            .ok_or_else(|| AppError::InvalidInput("system proxy was not detected".to_string()))?;
+        let proxy = reqwest::Proxy::all(&proxy_url)
+            .map_err(|err| AppError::InvalidInput(format!("system proxy config invalid: {err}")))?;
         builder = builder.proxy(proxy);
     } else if settings.proxy.mode == ProxyMode::None {
         builder = builder.no_proxy();
@@ -271,6 +279,11 @@ fn manual_proxy_url(proxy: &ProxySettings) -> AppResult<String> {
 }
 
 fn validate_proxy_settings(settings: &SystemSettings) -> AppResult<()> {
+    if settings.proxy.mode == ProxyMode::System && detect_system_proxy_url().is_none() {
+        return Err(AppError::InvalidInput(
+            "system proxy was not detected".to_string(),
+        ));
+    }
     if settings.proxy.mode != ProxyMode::Manual {
         return Ok(());
     }
@@ -285,6 +298,155 @@ fn validate_proxy_settings(settings: &SystemSettings) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn detect_system_proxy_url() -> Option<String> {
+    system_proxy_url_from_environment()
+        .or_else(system_proxy_url_from_macos)
+        .or_else(system_proxy_url_from_windows)
+}
+
+fn system_proxy_url_from_environment() -> Option<String> {
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .into_iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .find_map(|value| normalize_detected_proxy_url(&value))
+}
+
+fn normalize_detected_proxy_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let lower_value = value.to_ascii_lowercase();
+    if lower_value.starts_with("http://") || lower_value.starts_with("https://") {
+        return Some(value.to_string());
+    }
+    if value.contains("://") {
+        return None;
+    }
+    Some(format!("http://{value}"))
+}
+
+#[cfg(target_os = "macos")]
+fn system_proxy_url_from_macos() -> Option<String> {
+    let output = Command::new("scutil").arg("--proxy").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    system_proxy_url_from_macos_scutil_output(&text)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_proxy_url_from_macos() -> Option<String> {
+    None
+}
+
+fn system_proxy_url_from_macos_scutil_output(output: &str) -> Option<String> {
+    let https_enabled = scutil_value(output, "HTTPSEnable").as_deref() == Some("1");
+    if https_enabled {
+        if let (Some(host), Some(port)) = (
+            scutil_value(output, "HTTPSProxy"),
+            scutil_value(output, "HTTPSPort"),
+        ) {
+            return normalize_detected_proxy_url(&format!("{host}:{port}"));
+        }
+    }
+
+    let http_enabled = scutil_value(output, "HTTPEnable").as_deref() == Some("1");
+    if http_enabled {
+        if let (Some(host), Some(port)) = (
+            scutil_value(output, "HTTPProxy"),
+            scutil_value(output, "HTTPPort"),
+        ) {
+            return normalize_detected_proxy_url(&format!("{host}:{port}"));
+        }
+    }
+
+    None
+}
+
+fn scutil_value(output: &str, key: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (left, right) = line.split_once(':')?;
+        if left.trim() != key {
+            return None;
+        }
+        let value = right.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn system_proxy_url_from_windows() -> Option<String> {
+    let enable_output = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyEnable",
+        ])
+        .output()
+        .ok()?;
+    if !enable_output.status.success() {
+        return None;
+    }
+    let enable_text = String::from_utf8_lossy(&enable_output.stdout);
+    if !windows_proxy_enabled(&enable_text) {
+        return None;
+    }
+
+    let server_output = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyServer",
+        ])
+        .output()
+        .ok()?;
+    if !server_output.status.success() {
+        return None;
+    }
+    let server_text = String::from_utf8_lossy(&server_output.stdout);
+    system_proxy_url_from_windows_proxy_server(&server_text)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_proxy_url_from_windows() -> Option<String> {
+    None
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_proxy_enabled(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.contains("ProxyEnable")
+            && (line.split_whitespace().last() == Some("0x1")
+                || line.split_whitespace().last() == Some("1"))
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn system_proxy_url_from_windows_proxy_server(output: &str) -> Option<String> {
+    let value = output
+        .lines()
+        .find(|line| line.contains("ProxyServer"))?
+        .split_whitespace()
+        .last()?;
+    let server = value
+        .split(';')
+        .find_map(|part| part.strip_prefix("https="))
+        .or_else(|| value.split(';').find_map(|part| part.strip_prefix("http=")))
+        .unwrap_or(value);
+    normalize_detected_proxy_url(server)
 }
 
 fn normalize_proxy_test_url(test_domain: &str) -> AppResult<String> {
@@ -778,6 +940,68 @@ mod tests {
 
         settings.proxy.port = Some(7890);
         assert!(validate_proxy_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn save_system_settings_rejects_invalid_proxy_settings() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let workspace_root = temp_dir.path().join("workspace");
+        let mut settings =
+            SystemSettings::with_workspace_root(workspace_root.to_string_lossy().to_string());
+        settings.proxy.mode = ProxyMode::Manual;
+        settings.proxy.host = "127.0.0.1".to_string();
+        settings.proxy.port = Some(0);
+
+        let error = save_system_settings(temp_dir.path(), settings)
+            .expect_err("invalid proxy settings should not be saved");
+
+        assert!(error
+            .to_string()
+            .contains("manual proxy port is required"));
+    }
+
+    #[test]
+    fn macos_system_proxy_detection_prefers_https_proxy() {
+        let output = r#"
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7891
+  HTTPSProxy : 127.0.0.2
+}
+"#;
+
+        assert_eq!(
+            system_proxy_url_from_macos_scutil_output(output),
+            Some("http://127.0.0.2:7891".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_system_proxy_detection_reads_protocol_specific_proxy() {
+        let output = r#"
+ProxyServer    REG_SZ    http=127.0.0.1:7890;https=127.0.0.2:7891
+"#;
+
+        assert_eq!(
+            system_proxy_url_from_windows_proxy_server(output),
+            Some("http://127.0.0.2:7891".to_string())
+        );
+    }
+
+    #[test]
+    fn detected_system_proxy_rejects_unsupported_proxy_scheme() {
+        assert_eq!(
+            normalize_detected_proxy_url("socks5://127.0.0.1:7890"),
+            None
+        );
+        assert_eq!(normalize_detected_proxy_url("ftp://127.0.0.1:7890"), None);
+        assert_eq!(
+            normalize_detected_proxy_url("127.0.0.1:7890"),
+            Some("http://127.0.0.1:7890".to_string())
+        );
     }
 
     #[test]

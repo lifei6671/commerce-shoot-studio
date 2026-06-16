@@ -319,6 +319,7 @@ pub async fn rerun_generation_from_current_combination_with_provider<P: ImageGen
             combination_id: combination_id.to_string(),
             draft_prompt_binding: None,
             draft_model_config: Some(model_config),
+            draft_garment_asset_ids: None,
             revision: None,
         },
     )
@@ -778,6 +779,10 @@ async fn build_generation_plan(
     let draft_model_config = request.draft_model_config.clone().ok_or_else(|| {
         AppError::InvalidInput("draftModelConfig is required to start generation".to_string())
     })?;
+    let generation_garment_asset_ids = resolve_generation_garment_asset_ids(
+        &combination.garment_asset_ids,
+        request.draft_garment_asset_ids.as_deref(),
+    )?;
 
     let prompt_binding = match request.draft_prompt_binding.clone() {
         Some(binding) => Some(binding),
@@ -792,7 +797,7 @@ async fn build_generation_plan(
                 id: Some(combination.id.clone()),
                 name: Some(combination.name.clone()),
                 person_asset_id: Some(combination.person_asset_id.clone()),
-                garment_asset_ids: combination.garment_asset_ids.clone(),
+                garment_asset_ids: generation_garment_asset_ids.clone(),
             },
             draft_prompt_binding: prompt_binding.clone(),
             draft_model_config: Some(draft_model_config.clone()),
@@ -833,7 +838,7 @@ async fn build_generation_plan(
         sort_order: 0,
         is_primary: true,
     });
-    for (index, garment_id) in combination.garment_asset_ids.iter().enumerate() {
+    for (index, garment_id) in generation_garment_asset_ids.iter().enumerate() {
         let garment = get_required_asset(database, garment_id, AssetType::Garment).await?;
         assets.push(TaskAssetRole {
             asset: garment,
@@ -887,7 +892,7 @@ async fn build_generation_plan(
         "combinationId": combination.id.clone(),
         "combinationName": combination.name.clone(),
         "personAssetId": combination.person_asset_id.clone(),
-        "garmentAssetIds": combination.garment_asset_ids.clone()
+        "garmentAssetIds": generation_garment_asset_ids
     });
     let final_prompt_snapshot_json = serde_json::to_value(&resolved_prompt).map_err(|err| {
         AppError::InvalidInput(format!("resolved prompt snapshot invalid: {err}"))
@@ -931,6 +936,34 @@ async fn build_generation_plan(
             params: draft_model_config.params_json,
         },
     })
+}
+
+fn resolve_generation_garment_asset_ids(
+    combination_garment_asset_ids: &[String],
+    draft_garment_asset_ids: Option<&[String]>,
+) -> AppResult<Vec<String>> {
+    let Some(draft_ids) = draft_garment_asset_ids else {
+        return Ok(combination_garment_asset_ids.to_vec());
+    };
+    let combination_ids = combination_garment_asset_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::new();
+    for id in draft_ids {
+        let value = id.trim();
+        if value.is_empty() || !seen.insert(value.to_string()) {
+            continue;
+        }
+        if !combination_ids.contains(value) {
+            return Err(AppError::InvalidInput(format!(
+                "draft garment asset {value} is not part of combination"
+            )));
+        }
+        resolved.push(value.to_string());
+    }
+    Ok(resolved)
 }
 
 async fn build_retry_generation_plan(
@@ -1948,7 +1981,9 @@ mod tests {
         ProviderErrorCode, RemoteCancelResult,
     };
     use crate::services::assets::import_image_file;
-    use crate::services::combinations::save_image_combination_request;
+    use crate::services::combinations::{
+        get_image_combination_by_id, save_image_combination_request,
+    };
     use crate::services::prompt_resolver::save_prompt_binding_request;
     use crate::storage::file_store::WorkspacePaths;
     use crate::storage::migrations::run_workspace_migrations;
@@ -2392,6 +2427,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_observed".to_string()),
@@ -2438,6 +2474,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_cancelled_during_flow".to_string()),
@@ -2505,6 +2542,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
         )
@@ -2585,6 +2623,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_generation_flow_uses_draft_garments_without_rewriting_combination() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let extra_garment_path = paths.root().join("garment-extra.png");
+        write_png(&extra_garment_path, [20, 120, 160, 255]);
+        let extra_garment =
+            import_image_file(&database, &paths, extra_garment_path, AssetType::Garment)
+                .await
+                .expect("extra garment");
+        let original = get_image_combination_by_id(&database, &combination_id)
+            .await
+            .expect("load combination")
+            .expect("combination exists");
+        save_image_combination_request(
+            &database,
+            SaveImageCombinationRequest {
+                id: Some(combination_id.clone()),
+                name: original.name,
+                person_asset_id: original.person_asset_id,
+                person_asset_ids: original.person_asset_ids,
+                garment_asset_ids: vec![
+                    original.garment_asset_ids[0].clone(),
+                    extra_garment.asset.id.clone(),
+                ],
+            },
+        )
+        .await
+        .expect("add garment to combination library");
+
+        let task = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id: combination_id.clone(),
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-1".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                draft_garment_asset_ids: Some(vec![extra_garment.asset.id.clone()]),
+                revision: Some(8),
+            },
+            Some("task_draft_garments".to_string()),
+        )
+        .await
+        .expect("run generation");
+
+        assert_eq!(
+            task.input_snapshot_json["garmentAssetIds"],
+            json!([extra_garment.asset.id.clone()])
+        );
+
+        let input_garments: Vec<String> = sqlx::query(
+            "SELECT asset_id
+             FROM generation_task_input_assets
+             WHERE task_id = ? AND role = 'garment'
+             ORDER BY sort_order",
+        )
+        .bind(&task.id)
+        .fetch_all(database.pool())
+        .await
+        .expect("input garments")
+        .into_iter()
+        .map(|row| row.get("asset_id"))
+        .collect();
+        assert_eq!(input_garments, vec![extra_garment.asset.id.clone()]);
+
+        let reloaded = get_image_combination_by_id(&database, &combination_id)
+            .await
+            .expect("reload combination")
+            .expect("combination exists");
+        assert_eq!(reloaded.garment_asset_ids.len(), 2);
+    }
+
+    #[tokio::test]
     async fn run_generation_flow_persists_success_execution_log() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let combination_id = seed_generation_inputs(&database, &paths).await;
@@ -2603,6 +2720,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_success_execution_log".to_string()),
@@ -2649,6 +2767,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_history_page".to_string()),
@@ -2772,6 +2891,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_provider_failed".to_string()),
@@ -2817,6 +2937,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_failed_execution_log".to_string()),
@@ -2859,6 +2980,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_retry_source".to_string()),
@@ -2931,6 +3053,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_retry_missing_source".to_string()),
@@ -2989,6 +3112,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
             Some("task_retry_cancel_source".to_string()),
@@ -3054,6 +3178,7 @@ mod tests {
                     model_id: "gpt-image-1".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
+                draft_garment_asset_ids: None,
                 revision: Some(7),
             },
         )

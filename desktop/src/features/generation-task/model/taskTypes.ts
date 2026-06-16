@@ -53,6 +53,7 @@ export type StartGenerationRequest = {
   combinationId: string;
   draftPromptBinding?: SavePromptBindingRequest | null;
   draftModelConfig?: SaveModelConfigRequest | null;
+  draftGarmentAssetIds?: string[] | null;
   revision?: number | null;
 };
 

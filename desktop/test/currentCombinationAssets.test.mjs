@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  buildActiveGarmentAssetIdsForCombination,
+  buildActivePersonAssetIdForCombination,
+  buildCombinationGarmentAssetIdsAfterImport,
+  buildCombinationAssetIdsAfterReorder,
   buildCombinationPersonAssetIdsAfterImport,
   buildCurrentCombinationAssetView,
-  pickCurrentPersonAssetIdAfterImport,
+  buildDeselectedAssetIdsFromActiveIds,
+  buildPersonAssetSelectionAfterRemove,
+  buildSelectedAssetIdsAfterCombinationReorder,
+  toggleDeselectedAssetId,
 } from "../src/features/workflow/components/currentCombinationAssets.ts";
 
 function asset(id, assetType = "person") {
@@ -99,23 +106,6 @@ test("current combination asset view is recalculated when switching combinations
   assert.deepEqual(secondView.results.map((result) => result.assetId), ["result-b"]);
 });
 
-test("imported person becomes the current combination person", () => {
-  assert.equal(
-    pickCurrentPersonAssetIdAfterImport({
-      currentPersonAssetId: "person-a",
-      importedPeople: [asset("person-b")],
-    }),
-    "person-b",
-  );
-  assert.equal(
-    pickCurrentPersonAssetIdAfterImport({
-      currentPersonAssetId: "person-a",
-      importedPeople: [],
-    }),
-    "person-a",
-  );
-});
-
 test("imported people are appended to the current combination person library", () => {
   assert.deepEqual(
     buildCombinationPersonAssetIdsAfterImport({
@@ -132,5 +122,136 @@ test("imported people are appended to the current combination person library", (
       importedPeople: [],
     }),
     ["person-a"],
+  );
+});
+
+test("imported garments are added to the current combination garment library without duplicates", () => {
+  assert.deepEqual(
+    buildCombinationGarmentAssetIdsAfterImport({
+      currentGarmentAssetIds: ["garment-a", "garment-b", "garment-c", "garment-d"],
+      importedGarments: [
+        asset("garment-e", "garment"),
+        asset("garment-b", "garment"),
+        asset("garment-f", "garment"),
+      ],
+    }),
+    ["garment-e", "garment-f", "garment-a", "garment-b", "garment-c", "garment-d"],
+  );
+});
+
+test("imported garments stay inactive until explicitly selected", () => {
+  const nextCurrentGarmentIds = buildCombinationGarmentAssetIdsAfterImport({
+    currentGarmentAssetIds: ["garment-a", "garment-b", "garment-c", "garment-d"],
+    importedGarments: [
+      asset("garment-e", "garment"),
+      asset("garment-b", "garment"),
+      asset("garment-f", "garment"),
+    ],
+  });
+
+  assert.deepEqual(
+    buildDeselectedAssetIdsFromActiveIds({
+      currentAssetIds: nextCurrentGarmentIds,
+      activeAssetIds: ["garment-a", "garment-b", "garment-c", "garment-d"],
+    }),
+    ["garment-e", "garment-f"],
+  );
+});
+
+test("current combination asset order follows asset library drag reorder", () => {
+  assert.deepEqual(
+    buildCombinationAssetIdsAfterReorder({
+      currentAssetIds: ["garment-a", "garment-b", "garment-c", "garment-d"],
+      activeId: "garment-d",
+      overId: "garment-b",
+    }),
+    ["garment-a", "garment-d", "garment-b", "garment-c"],
+  );
+
+  const unchanged = ["garment-a", "garment-b"];
+  assert.equal(
+    buildCombinationAssetIdsAfterReorder({
+      currentAssetIds: unchanged,
+      activeId: "garment-a",
+      overId: "missing",
+    }),
+    unchanged,
+  );
+});
+
+test("selected garment order follows reordered current combination order", () => {
+  assert.deepEqual(
+    buildSelectedAssetIdsAfterCombinationReorder({
+      currentAssetIds: ["garment-a", "garment-d", "garment-b", "garment-c"],
+      selectedAssetIds: ["garment-b", "garment-d"],
+    }),
+    ["garment-d", "garment-b"],
+  );
+});
+
+test("deselected current combination assets stay inactive when the combination is loaded again", () => {
+  assert.deepEqual(
+    buildActiveGarmentAssetIdsForCombination({
+      currentGarmentAssetIds: ["garment-a", "garment-b", "garment-c"],
+      deselectedGarmentAssetIds: ["garment-b"],
+    }),
+    ["garment-a", "garment-c"],
+  );
+  assert.equal(
+    buildActivePersonAssetIdForCombination({
+      currentPersonAssetId: "person-a",
+      currentPersonAssetIds: ["person-a", "person-b"],
+      deselectedPersonAssetIds: ["person-a"],
+    }),
+    null,
+  );
+});
+
+test("asset deselection toggles without removing the asset from the current combination library", () => {
+  assert.deepEqual(
+    toggleDeselectedAssetId({
+      assetId: "garment-a",
+      isSelected: true,
+      deselectedAssetIds: [],
+    }),
+    ["garment-a"],
+  );
+  assert.deepEqual(
+    toggleDeselectedAssetId({
+      assetId: "garment-a",
+      isSelected: false,
+      deselectedAssetIds: ["garment-a", "garment-b"],
+    }),
+    ["garment-b"],
+  );
+});
+
+test("removing the active person does not select a deselected person", () => {
+  assert.deepEqual(
+    buildPersonAssetSelectionAfterRemove({
+      removedAssetId: "person-a",
+      selectedPersonAssetId: "person-a",
+      currentPersonAssetIds: ["person-a", "person-b", "person-c"],
+      deselectedPersonAssetIds: ["person-b"],
+    }),
+    {
+      personAssetIds: ["person-b", "person-c"],
+      selectedPersonAssetId: "person-c",
+      deselectedPersonAssetIds: ["person-b"],
+    },
+  );
+
+  assert.deepEqual(
+    buildPersonAssetSelectionAfterRemove({
+      removedAssetId: "person-a",
+      selectedPersonAssetId: "person-a",
+      currentPersonAssetIds: ["person-a", "person-b"],
+      deselectedPersonAssetIds: ["person-b"],
+    }),
+    {
+      personAssetIds: ["person-b"],
+      selectedPersonAssetId: null,
+      deselectedPersonAssetIds: ["person-b"],
+    },
   );
 });

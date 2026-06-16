@@ -58,6 +58,7 @@ impl Default for SystemSettings {
 pub struct SystemSettingsView {
     pub settings: SystemSettings,
     pub current_workspace_root: String,
+    pub system_proxy_detected: bool,
     pub workspace_change_requires_restart: bool,
 }
 

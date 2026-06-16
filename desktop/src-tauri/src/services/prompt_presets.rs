@@ -2,8 +2,9 @@ use sqlx::Row;
 use ulid::Ulid;
 
 use crate::domain::prompt::{
-    PromptBindingSection, PromptMode, PromptPreset, PromptTemplateSource, PromptTemplateVariable,
-    PromptVariableControlType, SavePromptPresetRequest,
+    PromptBindingSection, PromptMode, PromptPreset, PromptPresetScenario, PromptTemplateSource,
+    PromptTemplateVariable, PromptVariableControlType, SavePromptPresetRequest,
+    SavePromptPresetScenarioRequest,
 };
 use crate::error::{AppError, AppResult};
 use crate::services::prompt_templates::list_prompt_templates;
@@ -12,6 +13,86 @@ use crate::storage::sqlite::WorkspaceDatabase;
 pub async fn list_prompt_presets(database: &WorkspaceDatabase) -> AppResult<Vec<PromptPreset>> {
     ensure_default_prompt_presets(database).await?;
     query_prompt_presets(database).await
+}
+
+pub async fn list_prompt_preset_scenarios(
+    database: &WorkspaceDatabase,
+) -> AppResult<Vec<PromptPresetScenario>> {
+    ensure_default_prompt_preset_scenarios(database).await?;
+    query_prompt_preset_scenarios(database).await
+}
+
+pub async fn save_prompt_preset_scenario_request(
+    database: &WorkspaceDatabase,
+    request: SavePromptPresetScenarioRequest,
+) -> AppResult<PromptPresetScenario> {
+    validate_prompt_preset_scenario_request(&request)?;
+
+    ensure_default_prompt_preset_scenarios(database).await?;
+
+    let id = request
+        .id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("prompt_preset_scenario_{}", Ulid::new()));
+    let name = request.name.trim();
+    if let Some(existing) = get_prompt_preset_scenario_by_name(database, name).await? {
+        if existing.id != id {
+            return Err(AppError::InvalidInput(
+                "prompt preset scenario name already exists".to_string(),
+            ));
+        }
+    }
+
+    let existing = get_prompt_preset_scenario_by_id(database, &id).await?;
+    if existing
+        .as_ref()
+        .is_some_and(|scenario| scenario.source == PromptTemplateSource::BuiltIn)
+    {
+        return Err(AppError::InvalidInput(
+            "built-in prompt preset scenarios cannot be edited".to_string(),
+        ));
+    }
+    let source = existing
+        .as_ref()
+        .map(|scenario| scenario.source.clone())
+        .unwrap_or(PromptTemplateSource::Custom);
+    let sort_order = existing.as_ref().map(|scenario| scenario.sort_order);
+    let old_name = existing.map(|scenario| scenario.name);
+
+    let mut writer = database.writer().await;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
+    let write_result = async {
+        insert_or_update_prompt_preset_scenario(&mut writer, &id, name, &source, sort_order)
+            .await?;
+        if let Some(old_name) = old_name {
+            if old_name != name {
+                sqlx::query(
+                    "UPDATE prompt_presets
+                     SET scenario = ?, updated_at = datetime('now')
+                     WHERE scenario = ?",
+                )
+                .bind(name)
+                .bind(old_name)
+                .execute(&mut *writer)
+                .await?;
+            }
+        }
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(error) = write_result {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *writer).await;
+        return Err(error);
+    }
+    sqlx::query("COMMIT").execute(&mut *writer).await?;
+    drop(writer);
+
+    get_prompt_preset_scenario_by_id(database, &id)
+        .await?
+        .ok_or_else(|| {
+            AppError::InvalidInput("saved prompt preset scenario was not found".to_string())
+        })
 }
 
 pub async fn save_prompt_preset_request(
@@ -38,6 +119,17 @@ pub async fn save_prompt_preset_request(
         }
     }
 
+    ensure_default_prompt_preset_scenarios(database).await?;
+    let scenario_name = request.scenario.trim();
+    if get_prompt_preset_scenario_by_name(database, scenario_name)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::InvalidInput(
+            "prompt preset scenario does not exist".to_string(),
+        ));
+    }
+
     let source = if id.starts_with("builtin_") {
         PromptTemplateSource::BuiltIn
     } else {
@@ -51,6 +143,54 @@ pub async fn save_prompt_preset_request(
     get_prompt_preset_by_id(database, &id)
         .await?
         .ok_or_else(|| AppError::InvalidInput("saved prompt preset was not found".to_string()))
+}
+
+async fn query_prompt_preset_scenarios(
+    database: &WorkspaceDatabase,
+) -> AppResult<Vec<PromptPresetScenario>> {
+    let rows = sqlx::query(
+        "SELECT id, name, source, sort_order, created_at, updated_at
+         FROM prompt_preset_scenarios
+         ORDER BY sort_order ASC, created_at ASC",
+    )
+    .fetch_all(database.pool())
+    .await?;
+
+    rows.into_iter()
+        .map(row_to_prompt_preset_scenario)
+        .collect()
+}
+
+async fn get_prompt_preset_scenario_by_id(
+    database: &WorkspaceDatabase,
+    id: &str,
+) -> AppResult<Option<PromptPresetScenario>> {
+    let row = sqlx::query(
+        "SELECT id, name, source, sort_order, created_at, updated_at
+         FROM prompt_preset_scenarios
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(database.pool())
+    .await?;
+
+    row.map(row_to_prompt_preset_scenario).transpose()
+}
+
+async fn get_prompt_preset_scenario_by_name(
+    database: &WorkspaceDatabase,
+    name: &str,
+) -> AppResult<Option<PromptPresetScenario>> {
+    let row = sqlx::query(
+        "SELECT id, name, source, sort_order, created_at, updated_at
+         FROM prompt_preset_scenarios
+         WHERE name = ?",
+    )
+    .bind(name)
+    .fetch_optional(database.pool())
+    .await?;
+
+    row.map(row_to_prompt_preset_scenario).transpose()
 }
 
 async fn query_prompt_presets(database: &WorkspaceDatabase) -> AppResult<Vec<PromptPreset>> {
@@ -91,6 +231,7 @@ async fn get_prompt_preset_by_id(
 
 async fn ensure_default_prompt_presets(database: &WorkspaceDatabase) -> AppResult<()> {
     list_prompt_templates(database).await?;
+    ensure_default_prompt_preset_scenarios(database).await?;
 
     let mut writer = database.writer().await;
     for request in default_prompt_preset_requests() {
@@ -100,6 +241,23 @@ async fn ensure_default_prompt_presets(database: &WorkspaceDatabase) -> AppResul
             .expect("built-in prompt preset must have stable id");
         let source = PromptTemplateSource::BuiltIn;
         insert_or_ignore_prompt_preset(&mut writer, &id, &source, &request).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_default_prompt_preset_scenarios(database: &WorkspaceDatabase) -> AppResult<()> {
+    let mut writer = database.writer().await;
+    for (id, name, sort_order) in default_prompt_preset_scenarios() {
+        sqlx::query(
+            "INSERT OR IGNORE INTO prompt_preset_scenarios (
+                id, name, source, sort_order
+             ) VALUES (?, ?, 'built_in', ?)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(sort_order)
+        .execute(&mut *writer)
+        .await?;
     }
     Ok(())
 }
@@ -161,6 +319,33 @@ async fn insert_or_ignore_prompt_preset(
     .bind(serialize_variables(&request.variables)?)
     .bind(request.is_default)
     .bind(request.locked)
+    .execute(&mut *writer)
+    .await?;
+    Ok(())
+}
+
+async fn insert_or_update_prompt_preset_scenario(
+    writer: &mut sqlx::SqliteConnection,
+    id: &str,
+    name: &str,
+    source: &PromptTemplateSource,
+    sort_order: Option<i64>,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO prompt_preset_scenarios (
+            id, name, source, sort_order
+         ) VALUES (?, ?, ?, COALESCE(?, (
+            SELECT COALESCE(MAX(sort_order), 0) + 10
+            FROM prompt_preset_scenarios
+         )))
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            updated_at = datetime('now')",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(source.as_str())
+    .bind(sort_order)
     .execute(&mut *writer)
     .await?;
     Ok(())
@@ -248,6 +433,17 @@ async fn insert_or_update_prompt_preset(
     Ok(())
 }
 
+fn row_to_prompt_preset_scenario(row: sqlx::sqlite::SqliteRow) -> AppResult<PromptPresetScenario> {
+    Ok(PromptPresetScenario {
+        id: row.get("id"),
+        name: row.get("name"),
+        source: PromptTemplateSource::from_db(row.get::<String, _>("source").as_str()),
+        sort_order: row.get("sort_order"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
 fn row_to_prompt_preset(row: sqlx::sqlite::SqliteRow) -> AppResult<PromptPreset> {
     let variables_json: String = row.get("variables_json");
     let variables =
@@ -315,10 +511,30 @@ fn validate_prompt_preset_request(request: &SavePromptPresetRequest) -> AppResul
     Ok(())
 }
 
+fn validate_prompt_preset_scenario_request(
+    request: &SavePromptPresetScenarioRequest,
+) -> AppResult<()> {
+    if request.name.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "prompt preset scenario name is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn serialize_variables(variables: &[PromptTemplateVariable]) -> AppResult<String> {
     serde_json::to_string(variables).map_err(|err| {
         AppError::PromptTemplateInvalid(format!("preset variables_json is invalid: {err}"))
     })
+}
+
+fn default_prompt_preset_scenarios() -> Vec<(&'static str, &'static str, i64)> {
+    vec![
+        ("builtin_scenario_white_background", "白底主图", 10),
+        ("builtin_scenario_model_display", "模特展示", 20),
+        ("builtin_scenario_detail_display", "细节展示", 30),
+        ("builtin_scenario_social_style", "社媒风格", 40),
+    ]
 }
 
 fn default_prompt_preset_requests() -> Vec<SavePromptPresetRequest> {
@@ -441,6 +657,7 @@ mod tests {
     use super::*;
     use crate::domain::prompt::{
         PromptMode, PromptTemplateSource, PromptTemplateVariable, SavePromptPresetRequest,
+        SavePromptPresetScenarioRequest,
     };
     use crate::storage::{file_store::WorkspacePaths, sqlite::WorkspaceDatabase};
 
@@ -531,6 +748,227 @@ mod tests {
         assert!(error
             .to_string()
             .contains("built-in prompt presets cannot be edited"));
+    }
+
+    #[tokio::test]
+    async fn prompt_preset_scenarios_can_be_added_and_renamed() {
+        let (_temp_dir, database) = test_database().await;
+
+        let scenarios = list_prompt_preset_scenarios(&database)
+            .await
+            .expect("list default scenarios");
+        assert!(scenarios.iter().any(|scenario| scenario.name == "白底主图"));
+
+        let saved = save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: None,
+                name: "直播带货".to_string(),
+            },
+        )
+        .await
+        .expect("save scenario");
+        assert!(saved.id.starts_with("prompt_preset_scenario_"));
+        assert_eq!(saved.name, "直播带货");
+
+        let renamed = save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: Some(saved.id.clone()),
+                name: "直播货架".to_string(),
+            },
+        )
+        .await
+        .expect("rename scenario");
+        assert_eq!(renamed.name, "直播货架");
+
+        let scenarios = list_prompt_preset_scenarios(&database)
+            .await
+            .expect("reload scenarios");
+        assert!(scenarios.iter().any(|scenario| scenario.name == "直播货架"));
+        assert!(!scenarios.iter().any(|scenario| scenario.name == "直播带货"));
+    }
+
+    #[tokio::test]
+    async fn built_in_prompt_preset_scenarios_cannot_be_renamed() {
+        let (_temp_dir, database) = test_database().await;
+        let scenarios = list_prompt_preset_scenarios(&database)
+            .await
+            .expect("list default scenarios");
+        let builtin = scenarios
+            .iter()
+            .find(|scenario| scenario.id == "builtin_scenario_white_background")
+            .expect("builtin scenario");
+
+        let error = save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: Some(builtin.id.clone()),
+                name: "已修改白底主图".to_string(),
+            },
+        )
+        .await
+        .expect_err("built-in scenario rename should fail");
+
+        assert!(error
+            .to_string()
+            .contains("built-in prompt preset scenarios cannot be edited"));
+    }
+
+    #[tokio::test]
+    async fn prompt_preset_scenario_rename_updates_existing_presets() {
+        let (_temp_dir, database) = test_database().await;
+        let presets = list_prompt_presets(&database).await.expect("list presets");
+        let builtin = presets
+            .iter()
+            .find(|preset| preset.id == "builtin_ecommerce_white_background")
+            .expect("builtin preset");
+
+        let saved_scenario = save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: None,
+                name: "直播带货".to_string(),
+            },
+        )
+        .await
+        .expect("save scenario");
+
+        let saved_preset = save_prompt_preset_request(
+            &database,
+            SavePromptPresetRequest {
+                id: None,
+                name: "直播主图".to_string(),
+                scenario: "直播带货".to_string(),
+                description: String::new(),
+                system: builtin.system.clone(),
+                user: builtin.user.clone(),
+                negative: builtin.negative.clone(),
+                variables: vec![],
+                is_default: false,
+                locked: false,
+            },
+        )
+        .await
+        .expect("save preset");
+
+        save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: Some(saved_scenario.id),
+                name: "直播货架".to_string(),
+            },
+        )
+        .await
+        .expect("rename scenario");
+
+        let presets = list_prompt_presets(&database)
+            .await
+            .expect("reload presets");
+        let reloaded = presets
+            .iter()
+            .find(|preset| preset.id == saved_preset.id)
+            .expect("custom preset");
+        assert_eq!(reloaded.scenario, "直播货架");
+    }
+
+    #[tokio::test]
+    async fn prompt_preset_save_rejects_unknown_scenario() {
+        let (_temp_dir, database) = test_database().await;
+        let presets = list_prompt_presets(&database).await.expect("list presets");
+        let builtin = presets
+            .iter()
+            .find(|preset| preset.id == "builtin_ecommerce_white_background")
+            .expect("builtin preset");
+
+        let error = save_prompt_preset_request(
+            &database,
+            SavePromptPresetRequest {
+                id: None,
+                name: "孤儿场景方案".to_string(),
+                scenario: "未登记场景".to_string(),
+                description: String::new(),
+                system: builtin.system.clone(),
+                user: builtin.user.clone(),
+                negative: builtin.negative.clone(),
+                variables: vec![],
+                is_default: false,
+                locked: false,
+            },
+        )
+        .await
+        .expect_err("unknown scenario should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("prompt preset scenario does not exist"));
+    }
+
+    #[tokio::test]
+    async fn prompt_preset_scenario_rename_rolls_back_when_preset_sync_fails() {
+        let (_temp_dir, database) = test_database().await;
+        let presets = list_prompt_presets(&database).await.expect("list presets");
+        let builtin = presets
+            .iter()
+            .find(|preset| preset.id == "builtin_ecommerce_white_background")
+            .expect("builtin preset");
+
+        let saved_scenario = save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: None,
+                name: "直播带货".to_string(),
+            },
+        )
+        .await
+        .expect("save scenario");
+        save_prompt_preset_request(
+            &database,
+            SavePromptPresetRequest {
+                id: None,
+                name: "直播主图".to_string(),
+                scenario: "直播带货".to_string(),
+                description: String::new(),
+                system: builtin.system.clone(),
+                user: builtin.user.clone(),
+                negative: builtin.negative.clone(),
+                variables: vec![],
+                is_default: false,
+                locked: false,
+            },
+        )
+        .await
+        .expect("save preset");
+
+        {
+            let mut writer = database.writer().await;
+            sqlx::query(
+                "CREATE TRIGGER fail_prompt_preset_scenario_sync
+                 BEFORE UPDATE OF scenario ON prompt_presets
+                 BEGIN
+                   SELECT RAISE(FAIL, 'scenario sync failed');
+                 END",
+            )
+            .execute(&mut *writer)
+            .await
+            .expect("create failure trigger");
+        }
+
+        save_prompt_preset_scenario_request(
+            &database,
+            SavePromptPresetScenarioRequest {
+                id: Some(saved_scenario.id),
+                name: "直播货架".to_string(),
+            },
+        )
+        .await
+        .expect_err("rename should fail");
+
+        let scenarios = list_prompt_preset_scenarios(&database)
+            .await
+            .expect("reload scenarios");
+        assert!(scenarios.iter().any(|scenario| scenario.name == "直播带货"));
+        assert!(!scenarios.iter().any(|scenario| scenario.name == "直播货架"));
     }
 
     async fn test_database() -> (tempfile::TempDir, WorkspaceDatabase) {

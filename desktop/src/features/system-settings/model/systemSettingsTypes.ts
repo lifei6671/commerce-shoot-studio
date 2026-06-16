@@ -37,6 +37,7 @@ export type SystemSettings = {
 export type SystemSettingsView = {
   settings: SystemSettings;
   currentWorkspaceRoot: string;
+  systemProxyDetected: boolean;
   workspaceChangeRequiresRestart: boolean;
 };
 

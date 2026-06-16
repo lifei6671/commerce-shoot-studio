@@ -1,12 +1,14 @@
 use tauri::State;
 
 use crate::domain::prompt::{
-    PromptBinding, PromptPreset, PromptTemplate, ResolvedPrompt, SavePromptBindingRequest,
-    SavePromptPresetRequest, SavePromptTemplateRequest,
+    PromptBinding, PromptPreset, PromptPresetScenario, PromptTemplate, ResolvedPrompt,
+    SavePromptBindingRequest, SavePromptPresetRequest, SavePromptPresetScenarioRequest,
+    SavePromptTemplateRequest,
 };
 use crate::error::AppResult;
 use crate::services::prompt_presets::{
-    list_prompt_presets as list_presets, save_prompt_preset_request,
+    list_prompt_preset_scenarios as list_scenarios, list_prompt_presets as list_presets,
+    save_prompt_preset_request, save_prompt_preset_scenario_request,
 };
 use crate::services::prompt_resolver::{
     get_prompt_binding_for_combination, preview_resolved_prompt_for_combination,
@@ -66,6 +68,21 @@ pub async fn save_prompt_preset(
     preset: SavePromptPresetRequest,
 ) -> AppResult<PromptPreset> {
     save_prompt_preset_request(state.database(), preset).await
+}
+
+#[tauri::command]
+pub async fn list_prompt_preset_scenarios(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PromptPresetScenario>> {
+    list_scenarios(state.database()).await
+}
+
+#[tauri::command]
+pub async fn save_prompt_preset_scenario(
+    state: State<'_, AppState>,
+    scenario: SavePromptPresetScenarioRequest,
+) -> AppResult<PromptPresetScenario> {
+    save_prompt_preset_scenario_request(state.database(), scenario).await
 }
 
 #[tauri::command]

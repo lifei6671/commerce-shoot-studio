@@ -66,6 +66,8 @@ pub struct StartGenerationRequest {
     pub combination_id: String,
     pub draft_prompt_binding: Option<SavePromptBindingRequest>,
     pub draft_model_config: Option<SaveModelConfigRequest>,
+    #[serde(default)]
+    pub draft_garment_asset_ids: Option<Vec<String>>,
     pub revision: Option<u64>,
 }
 

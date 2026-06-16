@@ -4,10 +4,12 @@ import type {
   PreviewResolvedPromptRequest,
   PromptBinding,
   PromptPreset,
+  PromptPresetScenario,
   PromptTemplate,
   ResolvedPrompt,
   SavePromptBindingRequest,
   SavePromptPresetRequest,
+  SavePromptPresetScenarioRequest,
   SavePromptTemplateRequest,
 } from "../model/promptTypes";
 
@@ -41,6 +43,16 @@ export async function savePromptPreset(
   preset: SavePromptPresetRequest,
 ): Promise<PromptPreset> {
   return invoke<PromptPreset>("save_prompt_preset", { preset });
+}
+
+export async function listPromptPresetScenarios(): Promise<PromptPresetScenario[]> {
+  return invoke<PromptPresetScenario[]>("list_prompt_preset_scenarios");
+}
+
+export async function savePromptPresetScenario(
+  scenario: SavePromptPresetScenarioRequest,
+): Promise<PromptPresetScenario> {
+  return invoke<PromptPresetScenario>("save_prompt_preset_scenario", { scenario });
 }
 
 export async function savePromptTemplate(

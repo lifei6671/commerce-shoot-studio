@@ -71,6 +71,19 @@ export type PromptPreset = SavePromptPresetRequest & {
   updatedAt: string;
 };
 
+export type SavePromptPresetScenarioRequest = {
+  id?: string | null;
+  name: string;
+};
+
+export type PromptPresetScenario = SavePromptPresetScenarioRequest & {
+  id: string;
+  source: PromptTemplateSource;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type PromptBinding = SavePromptBindingRequest & {
   id: string;
   createdAt: string;

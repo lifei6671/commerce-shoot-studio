@@ -57,8 +57,20 @@ test("workbench side panels are floating overlays instead of resizable columns",
     globalCssSource,
     /\.flow-minimap\.react-flow__panel\.right\s*\{[\s\S]*?right:\s*var\(--canvas-control-safe-right\)/,
   );
-  assert.match(globalCssSource, /\.flow-context\s*\{[\s\S]*?right:\s*var\(--canvas-control-safe-right\)/);
+  assert.match(globalCssSource, /\.flow-context\s*\{[\s\S]*?margin-left:\s*auto/);
   assert.match(globalCssSource, /\.canvas-toolbar\s*\{[\s\S]*?z-index:\s*20/);
   assert.match(globalCssSource, /\.flow-help-wrap\s*\{[\s\S]*?z-index:\s*24/);
   assert.doesNotMatch(globalCssSource, /\.side-panel-slot\b|\.layout-resize-handle\b/);
+});
+
+test("workbench flow status appears before the flow help control", () => {
+  const toolbarStart = workflowCanvasSource.indexOf('className="canvas-toolbar"');
+  const flowContext = workflowCanvasSource.indexOf('className="flow-context"', toolbarStart);
+  const flowHelp = workflowCanvasSource.indexOf('className="flow-help-wrap"', toolbarStart);
+
+  assert.notEqual(toolbarStart, -1);
+  assert.notEqual(flowContext, -1);
+  assert.notEqual(flowHelp, -1);
+  assert.ok(flowContext > toolbarStart);
+  assert.ok(flowHelp > flowContext);
 });

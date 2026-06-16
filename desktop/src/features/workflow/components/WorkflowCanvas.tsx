@@ -1,4 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { pictureDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   DndContext,
@@ -43,8 +45,11 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Archive,
   Box,
@@ -115,21 +120,25 @@ import type {
   PromptBindingSection,
   PromptMode,
   PromptPreset,
+  PromptPresetScenario,
   PromptTemplate,
   PromptTemplateType,
   PromptTemplateVariable,
   SavePromptBindingRequest,
   SavePromptPresetRequest,
+  SavePromptPresetScenarioRequest,
   SavePromptTemplateRequest,
 } from "../../prompt/model/promptTypes";
 import {
   deletePromptTemplate,
   getPromptBinding,
+  listPromptPresetScenarios,
   listPromptPresets,
   listPromptTemplates,
   restoreDefaultPromptTemplates,
   savePromptBinding,
   savePromptPreset,
+  savePromptPresetScenario,
   savePromptTemplate,
 } from "../../prompt/services/promptService";
 import type {
@@ -201,15 +210,23 @@ import {
   type FlowNodeSize,
 } from "./workflowFlowGraph";
 import {
+  buildNewCombinationPersonAssetIdsAfterImport,
   buildNewCombinationForm,
   filterNewCombinationPickerAssets,
   type NewCombinationForm,
 } from "./newCombinationForm";
 import {
+  buildActiveGarmentAssetIdsForCombination,
+  buildActivePersonAssetIdForCombination,
+  buildCombinationAssetIdsAfterReorder,
+  buildCombinationGarmentAssetIdsAfterImport,
   buildCombinationPersonAssetIdsAfterImport,
   buildCurrentCombinationAssetView,
+  buildDeselectedAssetIdsFromActiveIds,
+  buildPersonAssetSelectionAfterRemove,
+  buildSelectedAssetIdsAfterCombinationReorder,
   normalizeCombinationPersonAssetIds,
-  pickCurrentPersonAssetIdAfterImport,
+  toggleDeselectedAssetId,
 } from "./currentCombinationAssets";
 import { buildFlowNodeRenderQualityStyle } from "./flowNodeRenderQuality";
 import {
@@ -276,9 +293,24 @@ type CanvasPanelCollapseState = {
   assetLibrary: boolean;
   inspector: boolean;
 };
+type StoredCombinationSelectionState = {
+  deselectedPersonAssetIds: string[];
+  deselectedGarmentAssetIds: string[];
+};
+type WorkbenchContextMenuItem = {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+};
+type WorkbenchContextMenuState = {
+  x: number;
+  y: number;
+  items: WorkbenchContextMenuItem[];
+} | null;
 type PromptWorkbenchData = {
   templates: PromptTemplate[];
   presets: PromptPreset[];
+  scenarios: PromptPresetScenario[];
   presetOptions: PromptPresetOption[];
 };
 type WorkflowNodeData = Record<string, unknown> & {
@@ -301,6 +333,12 @@ const CANVAS_ZOOM_LEVELS = [33, 50, 75, 100, 125, 150, 200, 300] as const;
 const ACTION_MESSAGE_AUTO_DISMISS_MS = 2400;
 const REACT_FLOW_DEFAULT_VIEWPORT: Viewport = { x: 40, y: 158, zoom: 1 };
 const MODEL_CONFIG_STORAGE_KEY = "commerce-shoot-studio:selected-model-config-id";
+const COMBINATION_SELECTION_STATE_STORAGE_KEY =
+  "commerce-shoot-studio:combination-selection-state";
+const OPEN_WORKBENCH_EVENT = "commerce-shoot-studio://open-workbench";
+const OPEN_SYSTEM_SETTINGS_EVENT = "commerce-shoot-studio://open-system-settings";
+const OPEN_MODEL_SETTINGS_EVENT = "commerce-shoot-studio://open-model-settings";
+const OPEN_PROMPT_PRESET_CENTER_EVENT = "commerce-shoot-studio://open-prompt-preset-center";
 const GOOGLE_PROVIDER = "google";
 const CUSTOM_PROVIDER = "custom";
 const DEFAULT_CUSTOM_MODEL_ID = "custom-image-model";
@@ -412,7 +450,6 @@ type PromptTemplateDraft = SavePromptTemplateRequest;
 type PromptPresetDraft = SavePromptPresetRequest;
 type PromptTemplatePreviewValues = Record<string, string>;
 type PromptPresetSourceMode = "blank" | "copy";
-
 function OpenAIProviderIcon() {
   return (
     <svg
@@ -477,7 +514,14 @@ export function WorkflowCanvas() {
   const [garments, setGarments] = useState<AssetFileView[]>([]);
   const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null);
   const [currentPersonAssetIds, setCurrentPersonAssetIds] = useState<string[]>([]);
+  const [currentGarmentAssetIds, setCurrentGarmentAssetIds] = useState<string[]>([]);
   const [selectedGarmentIds, setSelectedGarmentIds] = useState<string[]>([]);
+  const [deselectedAssetLibraryPersonIds, setDeselectedAssetLibraryPersonIds] = useState<
+    string[]
+  >([]);
+  const [deselectedAssetLibraryGarmentIds, setDeselectedAssetLibraryGarmentIds] = useState<
+    string[]
+  >([]);
   const [promptWorkbench, setPromptWorkbench] = useState<PromptWorkbenchState>(
     DEFAULT_PROMPT_WORKBENCH_STATE,
   );
@@ -487,10 +531,14 @@ export function WorkflowCanvas() {
   const [workbenchPromptPresets, setWorkbenchPromptPresets] = useState<PromptPreset[]>(() =>
     buildFallbackPromptPresets(),
   );
+  const [workbenchPromptPresetScenarios, setWorkbenchPromptPresetScenarios] = useState<
+    PromptPresetScenario[]
+  >(() => buildFallbackPromptPresetScenarios());
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>(DEFAULT_PROVIDER);
   const [selectedModelId, setSelectedModelId] = useState(DEFAULT_MODEL_ID);
   const [customModelId, setCustomModelId] = useState(DEFAULT_CUSTOM_MODEL_ID);
   const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customProviderName, setCustomProviderName] = useState("");
   const [isCustomEndpointEnabled, setIsCustomEndpointEnabled] = useState(false);
   const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("1024x1024");
   const [outputCount, setOutputCount] = useState(1);
@@ -520,11 +568,14 @@ export function WorkflowCanvas() {
   const [validationResult, setValidationResult] =
     useState<ValidateCombinationResponse | null>(null);
   const [isSettingsCenterOpen, setIsSettingsCenterOpen] = useState(false);
+  const [settingsCenterInitialPage, setSettingsCenterInitialPage] =
+    useState<SettingsPage>("model");
   const [isTaskHistoryOpen, setIsTaskHistoryOpen] = useState(false);
   const [isPromptPresetCenterOpen, setIsPromptPresetCenterOpen] = useState(false);
   const [systemSettingsView, setSystemSettingsView] = useState<SystemSettingsView>(() => ({
     settings: DEFAULT_SYSTEM_SETTINGS,
     currentWorkspaceRoot: DEFAULT_SYSTEM_SETTINGS.workspaceRoot,
+    systemProxyDetected: false,
     workspaceChangeRequiresRestart: false,
   }));
   const [cacheStats, setCacheStats] = useState<CacheStats>(EMPTY_CACHE_STATS);
@@ -567,6 +618,8 @@ export function WorkflowCanvas() {
   );
   const [promptPresetCenterError, setPromptPresetCenterError] = useState<string | null>(null);
   const [isSavingPromptPreset, setIsSavingPromptPreset] = useState(false);
+  const [isPromptPresetScenarioModalOpen, setIsPromptPresetScenarioModalOpen] = useState(false);
+  const [isSavingPromptPresetScenario, setIsSavingPromptPresetScenario] = useState(false);
   const latestTask = useGenerationTaskStore((state) => state.latestTask);
   const setLatestTask = useGenerationTaskStore((state) => state.setLatestTask);
   const setRunningTasks = useGenerationTaskStore((state) => state.setRunningTasks);
@@ -585,6 +638,7 @@ export function WorkflowCanvas() {
           concurrency,
           format: imageFormat,
           outputCount,
+          providerName: isCustomProvider ? customProviderName.trim() || undefined : undefined,
           providerBaseUrl: isCustomProvider || isCustomEndpointEnabled ? customBaseUrl.trim() : undefined,
           seed,
           size: modelSize,
@@ -597,6 +651,7 @@ export function WorkflowCanvas() {
       concurrency,
       customBaseUrl,
       customModelId,
+      customProviderName,
       imageFormat,
       isCustomEndpointEnabled,
       modelSize,
@@ -631,9 +686,9 @@ export function WorkflowCanvas() {
         results: resultAssets,
         personAssetId: selectedPersonId,
         personAssetIds: currentPersonAssetIds,
-        garmentAssetIds: selectedGarmentIds,
+        garmentAssetIds: currentGarmentAssetIds,
       }),
-    [currentPersonAssetIds, garments, people, resultAssets, selectedGarmentIds, selectedPersonId],
+    [currentGarmentAssetIds, currentPersonAssetIds, garments, people, resultAssets, selectedPersonId],
   );
   const canRun = validationResult?.executable === true && !isStarting && !isSaving;
   const combinationName = currentCombination?.name ?? draftCombinationName ?? "未保存组合";
@@ -677,7 +732,7 @@ export function WorkflowCanvas() {
         currentPersonAssetId: selectedPersonId,
         currentPersonAssetIds: currentPersonAssetIds,
       }),
-      garmentAssetIds: selectedGarmentIds,
+      garmentAssetIds: currentGarmentAssetIds,
       promptBinding:
         currentCombination?.id && selectedPromptPreset
           ? {
@@ -696,8 +751,8 @@ export function WorkflowCanvas() {
       draftCombinationName,
       modelConfig,
       promptBindingDraft,
+      currentGarmentAssetIds,
       currentPersonAssetIds,
-      selectedGarmentIds,
       selectedPersonId,
       selectedPromptPreset,
       storedModelConfigId,
@@ -741,6 +796,7 @@ export function WorkflowCanvas() {
         : {
             settings,
             currentWorkspaceRoot: settings.workspaceRoot,
+            systemProxyDetected: false,
             workspaceChangeRequiresRestart: false,
           };
       setSystemSettingsView(settingsView);
@@ -827,7 +883,7 @@ export function WorkflowCanvas() {
       saveModelConfig(plan.modelConfig),
     ]);
     setCurrentCombination(savedCombination);
-    setCurrentPersonAssetIds(savedCombination.personAssetIds);
+    applyCombinationAssetSelection(savedCombination);
     setCombinationSummaries((summaries) =>
       upsertCombinationSummary(summaries, savedCombination),
     );
@@ -880,6 +936,44 @@ export function WorkflowCanvas() {
     };
   }
 
+  function applyCombinationAssetSelection(combination: ImageCombination) {
+    const storedSelectionState = readStoredCombinationSelectionState(combination.id);
+    const nextCurrentPersonAssetIds = normalizeCombinationPersonAssetIds({
+      currentPersonAssetId: combination.personAssetId,
+      currentPersonAssetIds: combination.personAssetIds,
+    });
+    const nextDeselectedPersonAssetIds =
+      storedSelectionState.deselectedPersonAssetIds.filter((id) =>
+        nextCurrentPersonAssetIds.includes(id),
+      );
+    const nextDeselectedGarmentAssetIds =
+      storedSelectionState.deselectedGarmentAssetIds.filter((id) =>
+        combination.garmentAssetIds.includes(id),
+      );
+
+    setSelectedPersonId(
+      buildActivePersonAssetIdForCombination({
+        currentPersonAssetId: combination.personAssetId,
+        currentPersonAssetIds: nextCurrentPersonAssetIds,
+        deselectedPersonAssetIds: nextDeselectedPersonAssetIds,
+      }),
+    );
+    setCurrentPersonAssetIds(nextCurrentPersonAssetIds);
+    setDeselectedAssetLibraryPersonIds(nextDeselectedPersonAssetIds);
+    setCurrentGarmentAssetIds(combination.garmentAssetIds);
+    setDeselectedAssetLibraryGarmentIds(nextDeselectedGarmentAssetIds);
+    setSelectedGarmentIds(
+      buildActiveGarmentAssetIdsForCombination({
+        currentGarmentAssetIds: combination.garmentAssetIds,
+        deselectedGarmentAssetIds: nextDeselectedGarmentAssetIds,
+      }),
+    );
+    storeCombinationSelectionState(combination.id, {
+      deselectedPersonAssetIds: nextDeselectedPersonAssetIds,
+      deselectedGarmentAssetIds: nextDeselectedGarmentAssetIds,
+    });
+  }
+
   function buildPromptBindingForWorkbenchState(
     combinationId: string,
     workbench: PromptWorkbenchState,
@@ -902,20 +996,29 @@ export function WorkflowCanvas() {
     if (!isTauriRuntime()) {
       const templates = buildFallbackPromptTemplates();
       const presets = buildFallbackPromptPresets();
+      const scenarios = buildFallbackPromptPresetScenarios();
       setWorkbenchPromptTemplates(templates);
       setWorkbenchPromptPresets(presets);
+      setWorkbenchPromptPresetScenarios(scenarios);
       return {
         templates,
         presets,
+        scenarios,
         presetOptions: buildPromptPresetOptions(presets),
       };
     }
-    const [templates, presets] = await Promise.all([listPromptTemplates(), listPromptPresets()]);
+    const [templates, presets, scenarios] = await Promise.all([
+      listPromptTemplates(),
+      listPromptPresets(),
+      listPromptPresetScenarios(),
+    ]);
     setWorkbenchPromptTemplates(templates);
     setWorkbenchPromptPresets(presets);
+    setWorkbenchPromptPresetScenarios(scenarios);
     return {
       templates,
       presets,
+      scenarios,
       presetOptions: buildPromptPresetOptions(presets),
     };
   }
@@ -962,6 +1065,9 @@ export function WorkflowCanvas() {
     } else {
       setSelectedModelId(config.modelId);
     }
+    setCustomProviderName(
+      provider === CUSTOM_PROVIDER ? normalizeStringParam(config.paramsJson.providerName, "") : "",
+    );
     setCustomBaseUrl(normalizeStringParam(config.paramsJson.providerBaseUrl, ""));
     setIsCustomEndpointEnabled(
       provider === CUSTOM_PROVIDER || Boolean(normalizeStringParam(config.paramsJson.providerBaseUrl, "")),
@@ -999,21 +1105,26 @@ export function WorkflowCanvas() {
       setCurrentCombination(null);
       setSelectedPersonId(null);
       setCurrentPersonAssetIds([]);
+      setCurrentGarmentAssetIds([]);
       setSelectedGarmentIds([]);
+      setDeselectedAssetLibraryPersonIds([]);
+      setDeselectedAssetLibraryGarmentIds([]);
       setLatestTask(null);
       return;
     }
 
     const combination = await getImageCombination(latest.id);
     setCurrentCombination(combination);
-    setSelectedPersonId(combination?.personAssetId ?? null);
-    setCurrentPersonAssetIds(
-      normalizeCombinationPersonAssetIds({
-        currentPersonAssetId: combination?.personAssetId ?? null,
-        currentPersonAssetIds: combination?.personAssetIds ?? [],
-      }),
-    );
-    setSelectedGarmentIds(combination?.garmentAssetIds ?? []);
+    if (combination) {
+      applyCombinationAssetSelection(combination);
+    } else {
+      setSelectedPersonId(null);
+      setCurrentPersonAssetIds([]);
+      setCurrentGarmentAssetIds([]);
+      setSelectedGarmentIds([]);
+      setDeselectedAssetLibraryPersonIds([]);
+      setDeselectedAssetLibraryGarmentIds([]);
+    }
 
     if (combination) {
       const promptBinding = await getPromptBinding(combination.id);
@@ -1068,14 +1179,7 @@ export function WorkflowCanvas() {
       setGarments(applySavedAssetOrder("garment", garmentAssets));
       setCurrentCombination(combination);
       setDraftCombinationName(null);
-      setSelectedPersonId(combination.personAssetId);
-      setCurrentPersonAssetIds(
-        normalizeCombinationPersonAssetIds({
-          currentPersonAssetId: combination.personAssetId,
-          currentPersonAssetIds: combination.personAssetIds,
-        }),
-      );
-      setSelectedGarmentIds(combination.garmentAssetIds);
+      applyCombinationAssetSelection(combination);
       setPromptWorkbench(nextPromptWorkbench);
       markWorkbenchAutoSaveSnapshot(
         buildAutoSaveInputForCombination(combination, nextPromptBinding),
@@ -1240,7 +1344,6 @@ export function WorkflowCanvas() {
             return;
           }
           setCurrentCombination(savedCombination);
-          setCurrentPersonAssetIds(savedCombination.personAssetIds);
           setCombinationSummaries((summaries) =>
             upsertCombinationSummary(summaries, savedCombination),
           );
@@ -1339,16 +1442,7 @@ export function WorkflowCanvas() {
   }, [currentCombination, setLatestTask, setRecentTasks, setRunningTasks]);
 
   async function handleImport(assetType: Extract<AssetType, "person" | "garment">) {
-    const selected = await open({
-      multiple: true,
-      title: getImageDialogTitle(assetType),
-      filters: [
-        {
-          name: "图片文件",
-          extensions: ["png", "jpg", "jpeg"],
-        },
-      ],
-    });
+    const selected = await openImagePicker(assetType);
 
     const selectedPaths = normalizeSelectedImagePaths(selected);
     if (!selectedPaths.length) {
@@ -1361,26 +1455,37 @@ export function WorkflowCanvas() {
     try {
       const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
       if (assetType === "person") {
-        setPeople((items) => saveOrderedAssets("person", upsertAssets(items, views)));
-        setCurrentPersonAssetIds((personAssetIds) => {
-          return buildCombinationPersonAssetIdsAfterImport({
-            currentPersonAssetId: selectedPersonId,
-            currentPersonAssetIds: personAssetIds,
-            importedPeople: views,
-          });
+        const nextCurrentPersonAssetIds = buildCombinationPersonAssetIdsAfterImport({
+          currentPersonAssetId: selectedPersonId,
+          currentPersonAssetIds,
+          importedPeople: views,
         });
-        setSelectedPersonId((personAssetId) =>
-          pickCurrentPersonAssetIdAfterImport({
-            currentPersonAssetId: personAssetId,
-            importedPeople: views,
-          }),
+        const nextDeselectedPersonAssetIds = deselectedAssetLibraryPersonIds.filter(
+          (id) => nextCurrentPersonAssetIds.includes(id),
         );
+        setPeople((items) => saveOrderedAssets("person", upsertAssets(items, views)));
+        setCurrentPersonAssetIds(nextCurrentPersonAssetIds);
+        setDeselectedAssetLibraryPersonIds(nextDeselectedPersonAssetIds);
+        storeCombinationSelectionState(currentCombination?.id, {
+          deselectedPersonAssetIds: nextDeselectedPersonAssetIds,
+          deselectedGarmentAssetIds: deselectedAssetLibraryGarmentIds,
+        });
       } else {
-        const importedIds = views.map((view) => view.asset.id);
+        const nextCurrentGarmentAssetIds = buildCombinationGarmentAssetIdsAfterImport({
+          currentGarmentAssetIds,
+          importedGarments: views,
+        });
+        const nextDeselectedGarmentAssetIds = buildDeselectedAssetIdsFromActiveIds({
+          currentAssetIds: nextCurrentGarmentAssetIds,
+          activeAssetIds: selectedGarmentIds,
+        });
         setGarments((items) => saveOrderedAssets("garment", upsertAssets(items, views)));
-        setSelectedGarmentIds((ids) =>
-          [...importedIds, ...ids.filter((id) => !importedIds.includes(id))].slice(0, 4),
-        );
+        setCurrentGarmentAssetIds(nextCurrentGarmentAssetIds);
+        setDeselectedAssetLibraryGarmentIds(nextDeselectedGarmentAssetIds);
+        storeCombinationSelectionState(currentCombination?.id, {
+          deselectedPersonAssetIds: deselectedAssetLibraryPersonIds,
+          deselectedGarmentAssetIds: nextDeselectedGarmentAssetIds,
+        });
       }
       setActionMessage(buildImportSuccessMessage(views.length, duplicateCount));
     } catch (error) {
@@ -1393,16 +1498,7 @@ export function WorkflowCanvas() {
   async function handleImportForNewCombination(
     assetType: Extract<AssetType, "person" | "garment">,
   ) {
-    const selected = await open({
-      multiple: true,
-      title: getImageDialogTitle(assetType),
-      filters: [
-        {
-          name: "图片文件",
-          extensions: ["png", "jpg", "jpeg"],
-        },
-      ],
-    });
+    const selected = await openImagePicker(assetType);
 
     const selectedPaths = normalizeSelectedImagePaths(selected);
     if (!selectedPaths.length) {
@@ -1415,10 +1511,16 @@ export function WorkflowCanvas() {
       const { views, duplicateCount } = await importSelectedImages(selectedPaths, assetType);
 
       if (assetType === "person") {
+        const importedIds = views.map((view) => view.asset.id);
         setPeople((items) => saveOrderedAssets("person", upsertAssets(items, views)));
         setNewCombinationForm((form) => ({
           ...form,
-          personAssetId: views[0].asset.id,
+          personAssetId: form.personAssetId ?? importedIds[0] ?? null,
+          personAssetIds: buildNewCombinationPersonAssetIdsAfterImport({
+            currentPersonAssetId: form.personAssetId,
+            currentPersonAssetIds: form.personAssetIds,
+            importedPersonAssetIds: importedIds,
+          }),
         }));
       } else {
         const importedIds = views.map((view) => view.asset.id);
@@ -1472,6 +1574,7 @@ export function WorkflowCanvas() {
         combinationId: saved.id,
         draftPromptBinding: promptBinding,
         draftModelConfig: modelConfig,
+        draftGarmentAssetIds: selectedGarmentIds,
       });
       const detail = await getGenerationTaskDetail(task.id);
       setLatestTask(detail ?? { task, results: [], executionLogs: [] });
@@ -1623,10 +1726,9 @@ export function WorkflowCanvas() {
         currentPersonAssetId: selectedPersonId,
         currentPersonAssetIds,
       }),
-      garmentAssetIds: selectedGarmentIds,
+      garmentAssetIds: currentGarmentAssetIds,
     });
     setCurrentCombination(saved);
-    setCurrentPersonAssetIds(saved.personAssetIds);
     setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
     setDraftCombinationName(null);
     const promptBinding = buildPromptBindingFromWorkbench({
@@ -1648,7 +1750,7 @@ export function WorkflowCanvas() {
       combinationName: saved.name,
       personAssetId: saved.personAssetId,
       personAssetIds: saved.personAssetIds,
-      garmentAssetIds: saved.garmentAssetIds,
+      garmentAssetIds: currentGarmentAssetIds,
       promptBinding,
       modelConfig: {
         ...modelConfig,
@@ -1688,11 +1790,54 @@ export function WorkflowCanvas() {
     setIsPromptPresetCenterOpen(true);
   }
 
-  function openSettingsCenter() {
+  function openWorkbench() {
+    setIsTaskHistoryOpen(false);
+    setIsPromptPresetCenterOpen(false);
+    setIsSettingsCenterOpen(false);
+  }
+
+  function openSettingsCenter(page: SettingsPage = "model") {
+    setSettingsCenterInitialPage(page);
     setIsTaskHistoryOpen(false);
     setIsPromptPresetCenterOpen(false);
     setIsSettingsCenterOpen(true);
   }
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let disposed = false;
+    let unlisteners: Array<() => void> = [];
+
+    Promise.all([
+      listen(OPEN_WORKBENCH_EVENT, () => {
+        openWorkbench();
+      }),
+      listen(OPEN_SYSTEM_SETTINGS_EVENT, () => {
+        openSettingsCenter("system");
+      }),
+      listen(OPEN_MODEL_SETTINGS_EVENT, () => {
+        openSettingsCenter("model");
+      }),
+      listen(OPEN_PROMPT_PRESET_CENTER_EVENT, () => {
+        openPromptPresetCenter();
+      }),
+    ])
+      .then((handlers) => {
+        if (disposed) {
+          handlers.forEach((handler) => handler());
+          return;
+        }
+        unlisteners = handlers;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((handler) => handler());
+    };
+  }, [promptPresetOptions, selectedPromptPreset]);
 
   function openTaskHistory() {
     setIsSettingsCenterOpen(false);
@@ -1710,10 +1855,9 @@ export function WorkflowCanvas() {
     setPromptPresetCenterError(null);
   }
 
-  function applyPromptPresetToWorkbench(presetId = selectedPromptPresetCenterId) {
-    const preset = findPromptPresetOption(promptPresetOptions, presetId);
+  function applyPromptPresetToWorkbench() {
+    const preset = findPromptPresetOption(promptPresetOptions, selectedPromptPresetCenterId);
     if (!preset) {
-      setPromptPresetCenterError("请选择一个组合方案");
       return;
     }
     applyPromptWorkbenchState({
@@ -1723,6 +1867,7 @@ export function WorkflowCanvas() {
       advanced: null,
     });
     setPromptPresetCenterError(null);
+    setActionError(null);
     setActionMessage("已应用到当前组合");
   }
 
@@ -1826,6 +1971,49 @@ export function WorkflowCanvas() {
     }
   }
 
+  async function handleSavePromptPresetScenario(request: SavePromptPresetScenarioRequest) {
+    const name = request.name.trim();
+    if (!name) {
+      throw new Error("请填写场景名称");
+    }
+    setIsSavingPromptPresetScenario(true);
+    setActionError(null);
+    try {
+      const previousScenario = request.id
+        ? workbenchPromptPresetScenarios.find((scenario) => scenario.id === request.id) ?? null
+        : null;
+      const saved = isTauriRuntime()
+        ? await savePromptPresetScenario({ ...request, name })
+        : buildLocalPromptPresetScenario(request, workbenchPromptPresetScenarios);
+      setWorkbenchPromptPresetScenarios((scenarios) => upsertPromptPresetScenario(scenarios, saved));
+
+      if (previousScenario && previousScenario.name !== saved.name) {
+        setWorkbenchPromptPresets((presets) =>
+          presets.map((preset) =>
+            preset.scenario === previousScenario.name
+              ? { ...preset, scenario: saved.name, updatedAt: new Date().toISOString() }
+              : preset,
+          ),
+        );
+        setPromptPresetCenterDraft((draft) =>
+          draft.scenario === previousScenario.name ? { ...draft, scenario: saved.name } : draft,
+        );
+        setNewPromptPresetDraft((draft) =>
+          draft.scenario === previousScenario.name ? { ...draft, scenario: saved.name } : draft,
+        );
+      }
+
+      setActionMessage(request.id ? "场景已更新" : "场景已添加");
+      return saved;
+    } catch (error) {
+      setActionMessage(null);
+      setActionError(error instanceof Error ? error.message : "保存场景失败");
+      throw error;
+    } finally {
+      setIsSavingPromptPresetScenario(false);
+    }
+  }
+
   async function handleCreateCombination() {
     const name = newCombinationForm.name.trim();
     if (!name) {
@@ -1834,7 +2022,13 @@ export function WorkflowCanvas() {
     }
 
     const nextGarmentIds = newCombinationForm.garmentAssetIds.slice(0, 4);
-    if (!newCombinationForm.personAssetId) {
+    const nextPersonIds = buildNewCombinationPersonAssetIdsAfterImport({
+      currentPersonAssetId: newCombinationForm.personAssetId,
+      currentPersonAssetIds: newCombinationForm.personAssetIds,
+      importedPersonAssetIds: [],
+    });
+    const nextPersonAssetId = newCombinationForm.personAssetId ?? nextPersonIds[0] ?? null;
+    if (!nextPersonAssetId) {
       setNewCombinationError("请选择或导入一张人物图片");
       return;
     }
@@ -1857,25 +2051,21 @@ export function WorkflowCanvas() {
       advanced: null,
     };
     setPromptWorkbench(nextPromptWorkbench);
-    setSelectedPersonId(newCombinationForm.personAssetId);
-    setCurrentPersonAssetIds(
-      normalizeCombinationPersonAssetIds({
-        currentPersonAssetId: newCombinationForm.personAssetId,
-        currentPersonAssetIds: [],
-      }),
-    );
+    setSelectedPersonId(nextPersonAssetId);
+    setCurrentPersonAssetIds(nextPersonIds);
+    setCurrentGarmentAssetIds(nextGarmentIds);
     setSelectedGarmentIds(nextGarmentIds);
 
     setIsSaving(true);
     try {
       const saved = await saveImageCombination({
         name,
-        personAssetId: newCombinationForm.personAssetId,
-        personAssetIds: [newCombinationForm.personAssetId],
+        personAssetId: nextPersonAssetId,
+        personAssetIds: nextPersonIds,
         garmentAssetIds: nextGarmentIds,
       });
       setCurrentCombination(saved);
-      setCurrentPersonAssetIds(saved.personAssetIds);
+      applyCombinationAssetSelection(saved);
       setCombinationSummaries((summaries) => upsertCombinationSummary(summaries, saved));
       setDraftCombinationName(null);
       await savePromptBinding(
@@ -1900,12 +2090,39 @@ export function WorkflowCanvas() {
     }
   }
 
-  function toggleGarment(assetId: string) {
-    setSelectedGarmentIds((ids) => {
-      if (ids.includes(assetId)) {
-        return ids.filter((id) => id !== assetId);
-      }
-      return [assetId, ...ids].slice(0, 4);
+  function toggleGarmentAssetSelection(assetId: string) {
+    const nextCurrentGarmentAssetIds = currentGarmentAssetIds.includes(assetId)
+      ? currentGarmentAssetIds
+      : [assetId, ...currentGarmentAssetIds];
+    const nextSelectedGarmentIds = selectedGarmentIds.includes(assetId)
+      ? selectedGarmentIds.filter((id) => id !== assetId)
+      : [assetId, ...selectedGarmentIds.filter((id) => id !== assetId)].slice(0, 4);
+    const nextDeselectedGarmentAssetIds = buildDeselectedAssetIdsFromActiveIds({
+      currentAssetIds: nextCurrentGarmentAssetIds,
+      activeAssetIds: nextSelectedGarmentIds,
+    });
+
+    setCurrentGarmentAssetIds(nextCurrentGarmentAssetIds);
+    setSelectedGarmentIds(nextSelectedGarmentIds);
+    setDeselectedAssetLibraryGarmentIds(nextDeselectedGarmentAssetIds);
+    storeCombinationSelectionState(currentCombination?.id, {
+      deselectedPersonAssetIds: deselectedAssetLibraryPersonIds,
+      deselectedGarmentAssetIds: nextDeselectedGarmentAssetIds,
+    });
+  }
+
+  function removeGarmentFromCurrentCombination(assetId: string) {
+    const nextCurrentGarmentAssetIds = currentGarmentAssetIds.filter((id) => id !== assetId);
+    const nextSelectedGarmentIds = selectedGarmentIds.filter((id) => id !== assetId);
+    const nextDeselectedGarmentAssetIds = deselectedAssetLibraryGarmentIds.filter(
+      (id) => id !== assetId && nextCurrentGarmentAssetIds.includes(id),
+    );
+    setCurrentGarmentAssetIds(nextCurrentGarmentAssetIds);
+    setSelectedGarmentIds(nextSelectedGarmentIds);
+    setDeselectedAssetLibraryGarmentIds(nextDeselectedGarmentAssetIds);
+    storeCombinationSelectionState(currentCombination?.id, {
+      deselectedPersonAssetIds: deselectedAssetLibraryPersonIds,
+      deselectedGarmentAssetIds: nextDeselectedGarmentAssetIds,
     });
   }
 
@@ -1919,11 +2136,85 @@ export function WorkflowCanvas() {
     });
   }
 
+  function togglePersonAssetSelection(assetId: string) {
+    if (selectedPersonId === assetId) {
+      const nextDeselectedPersonAssetIds = toggleDeselectedAssetId({
+        assetId,
+        isSelected: true,
+        deselectedAssetIds: deselectedAssetLibraryPersonIds,
+      });
+      setSelectedPersonId(null);
+      setDeselectedAssetLibraryPersonIds(nextDeselectedPersonAssetIds);
+      storeCombinationSelectionState(currentCombination?.id, {
+        deselectedPersonAssetIds: nextDeselectedPersonAssetIds,
+        deselectedGarmentAssetIds: deselectedAssetLibraryGarmentIds,
+      });
+      return;
+    }
+    const nextDeselectedPersonAssetIds = toggleDeselectedAssetId({
+      assetId,
+      isSelected: false,
+      deselectedAssetIds: deselectedAssetLibraryPersonIds,
+    });
+    setDeselectedAssetLibraryPersonIds(nextDeselectedPersonAssetIds);
+    setSelectedPersonId(assetId);
+    setCurrentPersonAssetIds((personAssetIds) =>
+      normalizeCombinationPersonAssetIds({
+        currentPersonAssetId: assetId,
+        currentPersonAssetIds: personAssetIds,
+      }),
+    );
+    storeCombinationSelectionState(currentCombination?.id, {
+      deselectedPersonAssetIds: nextDeselectedPersonAssetIds,
+      deselectedGarmentAssetIds: deselectedAssetLibraryGarmentIds,
+    });
+  }
+
+  function removePersonFromCurrentCombination(assetId: string) {
+    const nextSelection = buildPersonAssetSelectionAfterRemove({
+      removedAssetId: assetId,
+      selectedPersonAssetId: selectedPersonId,
+      currentPersonAssetIds,
+      deselectedPersonAssetIds: deselectedAssetLibraryPersonIds,
+    });
+    setCurrentPersonAssetIds(nextSelection.personAssetIds);
+    setDeselectedAssetLibraryPersonIds(nextSelection.deselectedPersonAssetIds);
+    setSelectedPersonId(nextSelection.selectedPersonAssetId);
+    storeCombinationSelectionState(currentCombination?.id, {
+      deselectedPersonAssetIds: nextSelection.deselectedPersonAssetIds,
+      deselectedGarmentAssetIds: deselectedAssetLibraryGarmentIds,
+    });
+  }
+
   function reorderAssetLibraryItems(
     assetType: SortableAssetType,
     activeId: string,
     overId: string,
   ) {
+    if (assetType === "person") {
+      setCurrentPersonAssetIds((assetIds) =>
+        buildCombinationAssetIdsAfterReorder({
+          currentAssetIds: assetIds,
+          activeId,
+          overId,
+        }),
+      );
+    } else {
+      setCurrentGarmentAssetIds((assetIds) => {
+        const nextAssetIds = buildCombinationAssetIdsAfterReorder({
+          currentAssetIds: assetIds,
+          activeId,
+          overId,
+        });
+        setSelectedGarmentIds((selectedIds) =>
+          buildSelectedAssetIdsAfterCombinationReorder({
+            currentAssetIds: nextAssetIds,
+            selectedAssetIds: selectedIds,
+          }),
+        );
+        return nextAssetIds;
+      });
+    }
     const updateAssets = assetType === "person" ? setPeople : setGarments;
     updateAssets((items) => {
       const nextItems = moveAssetById(items, activeId, overId);
@@ -2000,6 +2291,7 @@ export function WorkflowCanvas() {
             isSaving={isSavingModelSettings}
             isTesting={isTestingProviderConnection}
             isTestingProxy={isTestingProxy}
+            initialPage={settingsCenterInitialPage}
             modelDefinitions={modelDefinitions}
             modelSize={modelSize}
             outputCount={outputCount}
@@ -2067,6 +2359,10 @@ export function WorkflowCanvas() {
                 <ChevronLeft size={16} />
                 返回工作台
               </Button>
+              <div className="task-history-title">
+                <h1>任务历史</h1>
+                <p>追踪生成任务、执行日志与结果文件</p>
+              </div>
             </header>
             <div className="settings-center__body">
               <TaskHistorySettingsPage
@@ -2088,12 +2384,14 @@ export function WorkflowCanvas() {
             error={promptPresetCenterError}
             isSaving={isSavingPromptPreset}
             presets={promptPresetOptions}
+            promptPresetScenarios={workbenchPromptPresetScenarios}
             selectedPresetId={selectedPromptPresetCenterId}
             templates={workbenchPromptTemplates}
-            onApply={() => applyPromptPresetToWorkbench()}
             onBack={() => setIsPromptPresetCenterOpen(false)}
             onDraftChange={setPromptPresetCenterDraft}
+            onManageScenarios={() => setIsPromptPresetScenarioModalOpen(true)}
             onNew={openPromptPresetModal}
+            onApply={() => applyPromptPresetToWorkbench()}
             onReset={() => {
               const preset = findPromptPresetOption(promptPresetOptions, selectedPromptPresetCenterId);
               if (preset) {
@@ -2125,7 +2423,7 @@ export function WorkflowCanvas() {
               isStarting={isStarting}
               onHistory={openTaskHistory}
               onPromptPresetCenter={openPromptPresetCenter}
-              onModelSettings={openSettingsCenter}
+              onModelSettings={() => openSettingsCenter("model")}
               onNew={openNewCombinationModal}
               onSelectCombination={(combinationId) => {
                 void handleSelectCombination(combinationId);
@@ -2145,6 +2443,9 @@ export function WorkflowCanvas() {
                   people={currentCombinationAssetView.people}
                   garments={currentCombinationAssetView.garments}
                   results={currentCombinationAssetView.results}
+                  currentPersonAssetIds={currentPersonAssetIds}
+                  currentGarmentAssetIds={currentGarmentAssetIds}
+                  deselectedPersonAssetIds={deselectedAssetLibraryPersonIds}
                   selectedPersonId={selectedPersonId}
                   selectedGarmentIds={selectedGarmentIds}
                   importingType={importingType}
@@ -2152,9 +2453,11 @@ export function WorkflowCanvas() {
                   onImport={(assetType) => {
                     void handleImport(assetType);
                   }}
+                  onRemoveGarment={removeGarmentFromCurrentCombination}
+                  onRemovePerson={removePersonFromCurrentCombination}
                   onRefresh={handleRefreshAll}
-                  onSelectPerson={selectPersonForCurrentCombination}
-                  onToggleGarment={toggleGarment}
+                  onSelectPerson={togglePersonAssetSelection}
+                  onToggleGarment={toggleGarmentAssetSelection}
                   onReorder={reorderAssetLibraryItems}
                 />
                 <PanelRestoreButton
@@ -2275,6 +2578,7 @@ export function WorkflowCanvas() {
           error={newPromptPresetError}
           isSaving={isSavingPromptPreset}
           presets={promptPresetOptions}
+          promptPresetScenarios={workbenchPromptPresetScenarios}
           shouldApplyAfterCreate={shouldApplyNewPromptPreset}
           sourceMode={newPromptPresetSourceMode}
           templates={workbenchPromptTemplates}
@@ -2301,6 +2605,14 @@ export function WorkflowCanvas() {
                 : selectedPromptPreset;
             setNewPromptPresetDraft(buildEmptyPromptPresetDraft(preset));
           }}
+        />
+      ) : null}
+      {isPromptPresetScenarioModalOpen ? (
+        <PromptPresetScenarioModal
+          isSaving={isSavingPromptPresetScenario}
+          promptPresetScenarios={workbenchPromptPresetScenarios}
+          onCancel={() => setIsPromptPresetScenarioModalOpen(false)}
+          onSave={(request) => handleSavePromptPresetScenario(request)}
         />
       ) : null}
       {proxyTestSettings ? (
@@ -2351,6 +2663,32 @@ function normalizeSelectedImagePaths(selected: string | string[] | null): string
     return [];
   }
   return Array.isArray(selected) ? selected : [selected];
+}
+
+async function getDefaultImageDialogPath() {
+  try {
+    return await pictureDir();
+  } catch {
+    return undefined;
+  }
+}
+
+async function openImagePicker(
+  assetType: Extract<AssetType, "person" | "garment">,
+  options: { multiple?: boolean } = {},
+) {
+  const defaultPath = await getDefaultImageDialogPath();
+  return open({
+    defaultPath,
+    multiple: options.multiple ?? true,
+    title: getImageDialogTitle(assetType),
+    filters: [
+      {
+        name: "图片文件",
+        extensions: ["png", "jpg", "jpeg"],
+      },
+    ],
+  });
 }
 
 async function importSelectedImages(
@@ -2407,6 +2745,81 @@ function storeModelConfigId(id: string) {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(MODEL_CONFIG_STORAGE_KEY, id);
   }
+}
+
+function normalizeStoredAssetIds(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
+}
+
+function emptyStoredCombinationSelectionState(): StoredCombinationSelectionState {
+  return {
+    deselectedPersonAssetIds: [],
+    deselectedGarmentAssetIds: [],
+  };
+}
+
+function readStoredCombinationSelectionStates(): Record<string, StoredCombinationSelectionState> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  const rawValue = window.localStorage.getItem(COMBINATION_SELECTION_STATE_STORAGE_KEY);
+  if (!rawValue) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).map(([combinationId, value]) => {
+        const state = value && typeof value === "object" ? value : {};
+        return [
+          combinationId,
+          {
+            deselectedPersonAssetIds: normalizeStoredAssetIds(
+              (state as Partial<StoredCombinationSelectionState>).deselectedPersonAssetIds,
+            ),
+            deselectedGarmentAssetIds: normalizeStoredAssetIds(
+              (state as Partial<StoredCombinationSelectionState>).deselectedGarmentAssetIds,
+            ),
+          },
+        ];
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function readStoredCombinationSelectionState(combinationId?: string | null) {
+  if (!combinationId) {
+    return emptyStoredCombinationSelectionState();
+  }
+  return (
+    readStoredCombinationSelectionStates()[combinationId] ??
+    emptyStoredCombinationSelectionState()
+  );
+}
+
+function storeCombinationSelectionState(
+  combinationId: string | null | undefined,
+  state: StoredCombinationSelectionState,
+) {
+  if (typeof window === "undefined" || !combinationId) {
+    return;
+  }
+  const states = readStoredCombinationSelectionStates();
+  const hasDeselectedAssets =
+    state.deselectedPersonAssetIds.length > 0 || state.deselectedGarmentAssetIds.length > 0;
+  if (hasDeselectedAssets) {
+    states[combinationId] = state;
+  } else {
+    delete states[combinationId];
+  }
+  window.localStorage.setItem(COMBINATION_SELECTION_STATE_STORAGE_KEY, JSON.stringify(states));
 }
 
 function normalizeModelSize(value: unknown): (typeof MODEL_SIZES)[number] {
@@ -2650,6 +3063,7 @@ function ModelSettingsCenter({
   isSaving,
   isTesting,
   isTestingProxy,
+  initialPage,
   modelDefinitions,
   modelSize,
   outputCount,
@@ -2699,6 +3113,7 @@ function ModelSettingsCenter({
   isSaving: boolean;
   isTesting: boolean;
   isTestingProxy: boolean;
+  initialPage: SettingsPage;
   modelDefinitions: ModelDefinition[];
   modelSize: (typeof MODEL_SIZES)[number];
   outputCount: number;
@@ -2766,7 +3181,7 @@ function ModelSettingsCenter({
   const outputMax = selectedDefinition.output.maxCount;
   const configured = credentialStatus?.configured === true;
   const lastTestSuccess = !actionError && credentialStatus?.configured === true;
-  const [activeSettingsPage, setActiveSettingsPage] = useState<SettingsPage>("model");
+  const [activeSettingsPage, setActiveSettingsPage] = useState<SettingsPage>(initialPage);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [promptTemplateType, setPromptTemplateType] = useState<PromptTemplateType>("system");
   const [promptSearch, setPromptSearch] = useState("");
@@ -2800,6 +3215,10 @@ function ModelSettingsCenter({
       }),
     [promptSearch, promptTemplateType, promptTemplates],
   );
+
+  useEffect(() => {
+    setActiveSettingsPage(initialPage);
+  }, [initialPage]);
   const promptPreview = useMemo(
     () =>
       renderPromptTemplatePreview(
@@ -3103,6 +3522,7 @@ function ModelSettingsCenter({
             isLoading={isSystemSettingsLoading}
             isSaving={isSavingSystemSettings}
             isTestingProxy={isTestingProxy}
+            systemProxyDetected={systemSettingsView.systemProxyDetected}
             workspaceChangeRequiresRestart={systemSettingsView.workspaceChangeRequiresRestart}
             onChange={setSystemSettingsDraft}
             onClearCache={onClearCache}
@@ -3506,6 +3926,7 @@ function SystemSettingsPage({
   isLoading,
   isSaving,
   isTestingProxy,
+  systemProxyDetected,
   workspaceChangeRequiresRestart,
   onChange,
   onClearCache,
@@ -3520,6 +3941,7 @@ function SystemSettingsPage({
   isLoading: boolean;
   isSaving: boolean;
   isTestingProxy: boolean;
+  systemProxyDetected: boolean;
   workspaceChangeRequiresRestart: boolean;
   onChange: (settings: SystemSettings) => void;
   onClearCache: () => void;
@@ -3550,7 +3972,15 @@ function SystemSettingsPage({
   const manualProxyIncomplete =
     draft.proxy.mode === "manual" &&
     (draft.proxy.host.trim() === "" || draft.proxy.port == null || draft.proxy.port <= 0);
-  const proxyTestDisabled = isSaving || isTestingProxy || manualProxyIncomplete;
+  const proxyModeNotSelected = draft.proxy.mode === "none";
+  const systemProxyUnavailable =
+    draft.proxy.mode === "system" && !systemProxyDetected;
+  const proxyTestDisabled =
+    isSaving ||
+    isTestingProxy ||
+    proxyModeNotSelected ||
+    manualProxyIncomplete ||
+    systemProxyUnavailable;
 
   return (
     <main className="settings-main system-settings-main">
@@ -3956,6 +4386,7 @@ function TaskHistorySettingsPage({
   const [historyPage, setHistoryPage] = useState<GenerationTaskHistoryPage | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchDraft, setSearchDraft] = useState("");
   const [status, setStatus] = useState<GenerationTaskStatus | "all">("all");
   const [provider, setProvider] = useState("all");
   const [modelId, setModelId] = useState("all");
@@ -4069,10 +4500,18 @@ function TaskHistorySettingsPage({
     };
   }, [selectedDetail]);
 
-  function resetPageAndSetSearch(value: string) {
-    setSearch(value);
-    setPageIndex(0);
+  function runTaskHistorySearch() {
     setOpenFilterMenu(null);
+    if (pageIndex !== 0) {
+      setSearch(searchDraft);
+      setPageIndex(0);
+      return;
+    }
+    if (search !== searchDraft) {
+      setSearch(searchDraft);
+      return;
+    }
+    void loadHistory();
   }
 
   async function exportExecutionLogs() {
@@ -4148,15 +4587,6 @@ function TaskHistorySettingsPage({
       <div className="task-history-layout">
         <section className="task-history-board">
           <div className="task-history-toolbar">
-            <label className="task-history-search">
-              <Search size={14} />
-              <input
-                className="task-history-search-input"
-                value={search}
-                onChange={(event) => resetPageAndSetSearch(event.target.value)}
-                placeholder="搜索组合名称 / 任务 ID / Prompt"
-              />
-            </label>
             <div className="task-history-tabs">
               {(["all", "succeeded", "failed", "cancelled"] as const).map((item) => (
                 <Button
@@ -4226,7 +4656,31 @@ function TaskHistorySettingsPage({
                 setOpenFilterMenu(null);
               }}
             />
+            <label className="task-history-search">
+              <Search size={14} />
+              <input
+                className="task-history-search-input"
+                value={searchDraft}
+                onChange={(event) => setSearchDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    runTaskHistorySearch();
+                  }
+                }}
+                placeholder="搜索组合名称 / 任务 ID / Prompt"
+              />
+            </label>
             <Button
+              className="task-history-search-button"
+              disabled={isLoading}
+              onClick={runTaskHistorySearch}
+              type="button"
+            >
+              <Search size={14} />
+              搜索
+            </Button>
+            <Button
+              className="task-history-refresh-button"
               disabled={isLoading}
               onClick={() => {
                 setOpenFilterMenu(null);
@@ -5742,6 +6196,23 @@ function buildFallbackPromptPresets(): PromptPreset[] {
   }));
 }
 
+function buildFallbackPromptPresetScenarios(): PromptPresetScenario[] {
+  const now = new Date().toISOString();
+  return [
+    ["builtin_scenario_white_background", "白底主图"],
+    ["builtin_scenario_model_display", "模特展示"],
+    ["builtin_scenario_detail_display", "细节展示"],
+    ["builtin_scenario_social_style", "社媒风格"],
+  ].map(([id, name], index) => ({
+    id,
+    name,
+    source: "built_in",
+    sortOrder: (index + 1) * 10,
+    createdAt: now,
+    updatedAt: now,
+  }));
+}
+
 function buildLocalPromptTemplate(draft: PromptTemplateDraft): PromptTemplate {
   const now = new Date().toISOString();
   const syncedDraft = syncPromptTemplateDraftVariables(draft);
@@ -5765,11 +6236,45 @@ function buildLocalPromptPreset(draft: PromptPresetDraft): PromptPreset {
   };
 }
 
+function buildLocalPromptPresetScenario(
+  request: SavePromptPresetScenarioRequest,
+  scenarios: PromptPresetScenario[],
+): PromptPresetScenario {
+  const now = new Date().toISOString();
+  const existing = request.id
+    ? scenarios.find((scenario) => scenario.id === request.id) ?? null
+    : null;
+  return {
+    id: existing?.id ?? `prompt_preset_scenario_${Date.now()}`,
+    name: request.name.trim(),
+    source: existing?.source ?? "custom",
+    sortOrder:
+      existing?.sortOrder ??
+      scenarios.reduce((max, scenario) => Math.max(max, scenario.sortOrder), 0) + 10,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
 function upsertPromptPreset(presets: PromptPreset[], preset: PromptPreset): PromptPreset[] {
   const exists = presets.some((item) => item.id === preset.id);
   return exists
     ? presets.map((item) => (item.id === preset.id ? preset : item))
     : [preset, ...presets];
+}
+
+function upsertPromptPresetScenario(
+  scenarios: PromptPresetScenario[],
+  scenario: PromptPresetScenario,
+): PromptPresetScenario[] {
+  const exists = scenarios.some((item) => item.id === scenario.id);
+  const next = exists
+    ? scenarios.map((item) => (item.id === scenario.id ? scenario : item))
+    : [...scenarios, scenario];
+  return next.sort(
+    (left, right) =>
+      left.sortOrder - right.sortOrder || left.createdAt.localeCompare(right.createdAt),
+  );
 }
 
 function upsertPromptTemplate(
@@ -5875,12 +6380,14 @@ function PromptPresetCenterPage({
   error,
   isSaving,
   presets,
+  promptPresetScenarios,
   selectedPresetId,
   templates,
-  onApply,
   onBack,
   onDraftChange,
+  onManageScenarios,
   onNew,
+  onApply,
   onReset,
   onSave,
   onSelectPreset,
@@ -5891,12 +6398,14 @@ function PromptPresetCenterPage({
   error: string | null;
   isSaving: boolean;
   presets: PromptPresetOption[];
+  promptPresetScenarios: PromptPresetScenario[];
   selectedPresetId: string;
   templates: PromptTemplate[];
-  onApply: () => void;
   onBack: () => void;
   onDraftChange: (draft: PromptPresetDraft) => void;
+  onManageScenarios: () => void;
   onNew: () => void;
+  onApply: () => void;
   onReset: () => void;
   onSave: () => void;
   onSelectPreset: (presetId: string) => void;
@@ -6051,6 +6560,15 @@ function PromptPresetCenterPage({
         </div>
         <div className="settings-header-actions">
           <Button
+            className="settings-header-action settings-header-action--scenarios"
+            onClick={onManageScenarios}
+            type="button"
+            variant="default"
+          >
+            <SlidersHorizontal size={16} />
+            场景设置
+          </Button>
+          <Button
             className="settings-header-action settings-header-action--create"
             onClick={onNew}
             type="button"
@@ -6058,6 +6576,15 @@ function PromptPresetCenterPage({
           >
             <Plus size={16} />
             新建方案
+          </Button>
+          <Button
+            className="settings-header-action settings-header-action--apply"
+            onClick={onApply}
+            type="button"
+            variant="primary"
+          >
+            <Play size={16} />
+            应用到当前组合
           </Button>
           <Button
             className={`settings-header-action settings-header-action--save${
@@ -6183,12 +6710,13 @@ function PromptPresetCenterPage({
                   <SelectTrigger className="prompt-preset-center-select-trigger">
                     <SelectValue placeholder="选择适用场景" />
                   </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="白底主图">白底主图</SelectItem>
-                    <SelectItem value="模特展示">模特展示</SelectItem>
-                    <SelectItem value="细节展示">细节展示</SelectItem>
-                    <SelectItem value="社媒风格">社媒风格</SelectItem>
-                  </SelectContent>
+	                  <SelectContent>
+	                    {promptPresetScenarios.map((scenario) => (
+	                      <SelectItem key={scenario.id} value={scenario.name}>
+	                        {scenario.name}
+	                      </SelectItem>
+	                    ))}
+	                  </SelectContent>
                 </Select>
               </label>
               <label className="prompt-preset-basic-grid__full">
@@ -6241,12 +6769,10 @@ function PromptPresetCenterPage({
             <div className="prompt-preset-center-variable-list">
               {activeVariables.map((variable) => (
                 <div className="prompt-preset-center-variable-row" key={variable.name}>
-                  <span className="prompt-preset-center-variable-name">
-                    {getPromptVariableDisplayLabel(variable)}
-                  </span>
                   <code>{`{{${variable.name}}}`}</code>
-                  <span>=</span>
-                  {renderVariableDefaultControl(variable)}
+                  <div className="prompt-preset-center-variable-value">
+                    {renderVariableDefaultControl(variable)}
+                  </div>
                 </div>
               ))}
             </div>
@@ -6305,18 +6831,141 @@ function PromptPresetCenterPage({
               />
             </div>
           </Card>
-          <footer className="prompt-preset-preview-actions">
-            <Button className="primary-action" onClick={onApply} type="button" variant="primary">
-              <Play size={15} />
-              应用到当前组合
-            </Button>
-            <Button className="toolbar-button" onClick={onBack} type="button" variant="default">
-              取消
-            </Button>
-          </footer>
         </aside>
       </div>
     </section>
+  );
+}
+
+function PromptPresetScenarioModal({
+  isSaving,
+  promptPresetScenarios,
+  onCancel,
+  onSave,
+}: {
+  isSaving: boolean;
+  promptPresetScenarios: PromptPresetScenario[];
+  onCancel: () => void;
+  onSave: (request: SavePromptPresetScenarioRequest) => Promise<PromptPresetScenario>;
+}) {
+  const [scenarioDrafts, setScenarioDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(promptPresetScenarios.map((scenario) => [scenario.id, scenario.name])),
+  );
+  const [newScenarioName, setNewScenarioName] = useState("");
+  const [fieldError, setFieldError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setScenarioDrafts(
+      Object.fromEntries(promptPresetScenarios.map((scenario) => [scenario.id, scenario.name])),
+    );
+  }, [promptPresetScenarios]);
+
+  async function saveExistingScenario(scenario: PromptPresetScenario) {
+    const name = (scenarioDrafts[scenario.id] ?? "").trim();
+    if (!name) {
+      setFieldError("请填写场景名称");
+      return;
+    }
+    setFieldError(null);
+    try {
+      await onSave({ id: scenario.id, name });
+    } catch {
+      // 全局 toast 已显示保存失败信息。
+    }
+  }
+
+  async function addScenario() {
+    const name = newScenarioName.trim();
+    if (!name) {
+      setFieldError("请填写新场景名称");
+      return;
+    }
+    setFieldError(null);
+    try {
+      await onSave({ id: null, name });
+      setNewScenarioName("");
+    } catch {
+      // 全局 toast 已显示保存失败信息。
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="prompt-preset-scenario-modal" aria-modal="true" role="dialog">
+        <header className="modal-header">
+          <div>
+            <h2>场景设置</h2>
+            <p>维护输出方案可选择的适用场景，修改名称会同步已有方案。</p>
+          </div>
+          <Button onClick={onCancel} type="button" aria-label="关闭">
+            <X size={18} />
+          </Button>
+        </header>
+        <div className="prompt-preset-scenario-modal__body">
+          {fieldError ? (
+            <div className="modal-error">
+              <CircleAlert size={15} />
+              {fieldError}
+            </div>
+          ) : null}
+          <div className="prompt-preset-scenario-list">
+            {promptPresetScenarios.map((scenario) => {
+              const draftName = scenarioDrafts[scenario.id] ?? "";
+              const isDirty = draftName.trim() !== scenario.name;
+              const isBuiltInScenario = scenario.source === "built_in";
+              return (
+                <div className="prompt-preset-scenario-row" key={scenario.id}>
+                  <Input
+                    disabled={isBuiltInScenario}
+                    value={draftName}
+                    maxLength={30}
+                    onChange={(event) =>
+                      setScenarioDrafts((drafts) => ({
+                        ...drafts,
+                        [scenario.id]: event.target.value,
+                      }))
+                    }
+                  />
+                  <Badge variant={scenario.source === "built_in" ? "success" : "secondary"}>
+                    {scenario.source === "built_in" ? "内置" : "自定义"}
+                  </Badge>
+                  <Button
+                    disabled={isSaving || isBuiltInScenario || !isDirty}
+                    onClick={() => {
+                      void saveExistingScenario(scenario);
+                    }}
+                    type="button"
+                    variant="default"
+                  >
+                    <Save size={15} />
+                    保存
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="prompt-preset-scenario-add">
+            <Input
+              value={newScenarioName}
+              maxLength={30}
+              placeholder="输入新场景名称"
+              onChange={(event) => setNewScenarioName(event.target.value)}
+            />
+            <Button
+              disabled={isSaving || !newScenarioName.trim()}
+              onClick={() => {
+                void addScenario();
+              }}
+              type="button"
+              variant="primary"
+            >
+              <Plus size={15} />
+              添加场景
+            </Button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -6388,8 +7037,14 @@ function NewCombinationModal({
   onFormChange: (form: NewCombinationForm) => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
 }) {
-  const selectedPersonIds = form.personAssetId ? [form.personAssetId] : [];
-  const selectedPerson = people.find((asset) => asset.asset.id === form.personAssetId) ?? null;
+  const selectedPersonIds = buildNewCombinationPersonAssetIdsAfterImport({
+    currentPersonAssetId: form.personAssetId,
+    currentPersonAssetIds: form.personAssetIds,
+    importedPersonAssetIds: [],
+  });
+  const selectedPeople = selectedPersonIds
+    .map((assetId) => people.find((asset) => asset.asset.id === assetId))
+    .filter((asset): asset is AssetFileView => Boolean(asset));
   const selectedGarments = form.garmentAssetIds
     .map((assetId) => garments.find((asset) => asset.asset.id === assetId))
     .filter((asset): asset is AssetFileView => Boolean(asset));
@@ -6499,7 +7154,7 @@ function NewCombinationModal({
                 <ModalAssetPreview
                   emptyIcon={<ImageIcon size={34} />}
                   emptyText="尚未选择人物图片"
-                  images={selectedPerson ? [selectedPerson] : []}
+                  images={selectedPeople}
                   label="预览"
                 />
                 <ModalAssetPicker
@@ -6544,6 +7199,7 @@ function PromptPresetModal({
   error,
   isSaving,
   presets,
+  promptPresetScenarios,
   shouldApplyAfterCreate,
   sourceMode,
   templates,
@@ -6559,6 +7215,7 @@ function PromptPresetModal({
   error: string | null;
   isSaving: boolean;
   presets: PromptPresetOption[];
+  promptPresetScenarios: PromptPresetScenario[];
   shouldApplyAfterCreate: boolean;
   sourceMode: PromptPresetSourceMode;
   templates: PromptTemplate[];
@@ -6653,10 +7310,11 @@ function PromptPresetModal({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="白底主图">白底主图</SelectItem>
-                    <SelectItem value="模特展示">模特展示</SelectItem>
-                    <SelectItem value="细节展示">细节展示</SelectItem>
-                    <SelectItem value="社媒风格">社媒风格</SelectItem>
+                    {promptPresetScenarios.map((scenario) => (
+                      <SelectItem key={scenario.id} value={scenario.name}>
+                        {scenario.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </label>
@@ -6954,11 +7612,16 @@ function AssetLibrary({
   people,
   garments,
   results,
+  currentPersonAssetIds,
+  currentGarmentAssetIds,
+  deselectedPersonAssetIds,
   selectedPersonId,
   selectedGarmentIds,
   importingType,
   onCollapse,
   onImport,
+  onRemoveGarment,
+  onRemovePerson,
   onRefresh,
   onSelectPerson,
   onToggleGarment,
@@ -6967,11 +7630,16 @@ function AssetLibrary({
   people: AssetFileView[];
   garments: AssetFileView[];
   results: GenerationTaskResultAsset[];
+  currentPersonAssetIds: string[];
+  currentGarmentAssetIds: string[];
+  deselectedPersonAssetIds: string[];
   selectedPersonId: string | null;
   selectedGarmentIds: string[];
   importingType: Extract<AssetType, "person" | "garment"> | null;
   onCollapse: () => void;
   onImport: (assetType: Extract<AssetType, "person" | "garment">) => void;
+  onRemoveGarment: (assetId: string) => void;
+  onRemovePerson: (assetId: string) => void;
   onRefresh: () => void;
   onSelectPerson: (assetId: string) => void;
   onToggleGarment: (assetId: string) => void;
@@ -6994,11 +7662,19 @@ function AssetLibrary({
       <AssetSection
         title="人物图片"
         count={people.length}
-        assets={people.map((asset) => toSelectableAsset(asset, asset.asset.id === selectedPersonId))}
+        assets={people.map((asset) =>
+          toSelectableAsset(
+            asset,
+            asset.asset.id === selectedPersonId &&
+              currentPersonAssetIds.includes(asset.asset.id) &&
+              !deselectedPersonAssetIds.includes(asset.asset.id),
+          ),
+        )}
         accent="green"
         action="导入"
         isImporting={importingType === "person"}
         onAction={() => onImport("person")}
+        onRemove={onRemovePerson}
         onSelect={onSelectPerson}
         onReorder={(activeId, overId) => onReorder("person", activeId, overId)}
       />
@@ -7006,12 +7682,17 @@ function AssetLibrary({
         title="服装图片"
         count={garments.length}
         assets={garments.map((asset) =>
-          toSelectableAsset(asset, selectedGarmentIds.includes(asset.asset.id)),
+          toSelectableAsset(
+            asset,
+            currentGarmentAssetIds.includes(asset.asset.id) &&
+              selectedGarmentIds.includes(asset.asset.id),
+          ),
         )}
         accent="green"
         action="导入"
         isImporting={importingType === "garment"}
         onAction={() => onImport("garment")}
+        onRemove={onRemoveGarment}
         onSelect={onToggleGarment}
         onReorder={(activeId, overId) => onReorder("garment", activeId, overId)}
       />
@@ -7029,11 +7710,6 @@ function AssetLibrary({
         action="刷新"
         onAction={onRefresh}
       />
-      <Button className="all-assets" onClick={onRefresh} type="button">
-        <Archive size={16} />
-        刷新全部资源
-        <ChevronRight size={16} />
-      </Button>
     </aside>
   );
 }
@@ -7046,6 +7722,7 @@ function AssetSection({
   action,
   isImporting = false,
   onAction,
+  onRemove,
   onSelect,
   onReorder,
 }: {
@@ -7056,6 +7733,7 @@ function AssetSection({
   action: "导入" | "刷新";
   isImporting?: boolean;
   onAction: () => void;
+  onRemove?: (assetId: string) => void;
   onSelect?: (assetId: string) => void;
   onReorder?: (activeId: string, overId: string) => void;
 }) {
@@ -7093,6 +7771,7 @@ function AssetSection({
       asset={asset}
       canReorder={canReorder}
       key={asset.id}
+      onRemove={onRemove}
       onSelect={handleSelect}
     />
   ));
@@ -7150,24 +7829,64 @@ function AssetSection({
 function SortableAssetThumb({
   asset,
   canReorder,
+  onRemove,
   onSelect,
 }: {
   asset: SelectableAsset;
   canReorder: boolean;
+  onRemove?: (assetId: string) => void;
   onSelect: (assetId: string) => void;
 }) {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
     disabled: !canReorder,
     id: asset.id,
   });
+  const [contextMenu, setContextMenu] = useState<WorkbenchContextMenuState>(null);
   const style = {
     transform: DndCSS.Transform.toString(transform),
     transition,
   };
 
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    onSelect(asset.id);
+  }
+
+  function openAssetContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          label: asset.selected ? "取消选中图片" : "选中图片",
+          onSelect: () => onSelect(asset.id),
+        },
+        ...(onRemove
+          ? [
+              {
+                label: "从当前组合移除",
+                onSelect: () => onRemove(asset.id),
+              },
+            ]
+          : []),
+      ],
+    });
+  }
+
   return (
-    <Button
+    <div
       ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      aria-label={asset.label}
       className={[
         "asset-thumb",
         asset.selected ? "is-selected" : "",
@@ -7177,19 +7896,119 @@ function SortableAssetThumb({
         .filter(Boolean)
         .join(" ")}
       onClick={() => onSelect(asset.id)}
+      onContextMenu={openAssetContextMenu}
+      onKeyDown={handleKeyDown}
+      role="button"
       style={style}
+      tabIndex={0}
       title={canReorder ? "拖动调整顺序" : undefined}
-      type="button"
-      {...attributes}
-      {...listeners}
     >
       <AssetImage asset={asset} />
+      {onRemove ? (
+        <button
+          aria-label={`移除${asset.label}`}
+          className="asset-thumb__remove"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onRemove(asset.id);
+          }}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+          }}
+          title="移除图片"
+          type="button"
+        >
+          <X size={12} />
+        </button>
+      ) : null}
       {asset.selected ? (
-        <span className="asset-thumb__check">
-          <CircleCheck size={13} fill="currentColor" />
+        <span className="asset-thumb__check" aria-hidden="true">
+          <span className="asset-thumb__check-dot" />
         </span>
       ) : null}
-    </Button>
+      <WorkbenchContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />
+    </div>
+  );
+}
+
+function WorkbenchContextMenu({
+  state,
+  onClose,
+}: {
+  state: WorkbenchContextMenuState;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!state) {
+      return undefined;
+    }
+
+    function closeMenu() {
+      onClose();
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", closeMenu, true);
+
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [onClose, state]);
+
+  if (!state) {
+    return null;
+  }
+
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  const menuWidth = 164;
+  const menuHeight = Math.max(40, state.items.length * 32 + 10);
+  const viewportWidth = window.innerWidth || menuWidth;
+  const viewportHeight = window.innerHeight || menuHeight;
+  const left = Math.min(Math.max(8, state.x), Math.max(8, viewportWidth - menuWidth - 8));
+  const top = Math.min(Math.max(8, state.y), Math.max(8, viewportHeight - menuHeight - 8));
+
+  return createPortal(
+    <div
+      className="workbench-context-menu"
+      role="menu"
+      style={{ left, top }}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {state.items.map((item) => (
+        <button
+          disabled={item.disabled}
+          key={item.label}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (item.disabled) {
+              return;
+            }
+            item.onSelect();
+            onClose();
+          }}
+          role="menuitem"
+          type="button"
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>,
+    document.body,
   );
 }
 
@@ -7251,6 +8070,7 @@ function FlowWorkbench({
   const [isCanvasReady, setIsCanvasReady] = useState(false);
   const [isSpacePanning, setIsSpacePanning] = useState(false);
   const [isGridVisible, setIsGridVisible] = useState(true);
+  const [contextMenu, setContextMenu] = useState<WorkbenchContextMenuState>(null);
   const canvasShellRef = useRef<HTMLElement | null>(null);
   const reactFlowRef = useRef<ReactFlowInstance<WorkflowReactFlowNode, WorkflowReactFlowEdge> | null>(
     null,
@@ -7573,6 +8393,32 @@ function FlowWorkbench({
     [handleViewportChange],
   );
 
+  function resetCanvasViewport() {
+    setViewport(REACT_FLOW_DEFAULT_VIEWPORT);
+    onZoomChange(REACT_FLOW_DEFAULT_VIEWPORT.zoom * 100);
+  }
+
+  function fitCanvasViewport() {
+    reactFlowRef.current?.fitView({ padding: 0.16, duration: 120 });
+  }
+
+  function openCanvasContextMenu(event: ReactMouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: "适配画布", onSelect: fitCanvasViewport },
+        { label: "重置视图", onSelect: resetCanvasViewport },
+        {
+          label: isGridVisible ? "隐藏网格" : "显示网格",
+          onSelect: () => setIsGridVisible((visible) => !visible),
+        },
+      ],
+    });
+  }
+
   return (
     <section
       ref={canvasShellRef}
@@ -7583,6 +8429,8 @@ function FlowWorkbench({
     >
       <CanvasToolbar
         canvasTool={canvasTool}
+        combinationName={currentCombination?.name ?? "未保存组合"}
+        isFlowReady={validationResult?.executable === true}
         isCanvasMaximized={isCanvasMaximized}
         isGridVisible={isGridVisible}
         zoom={zoom}
@@ -7632,6 +8480,7 @@ function FlowWorkbench({
             }}
             onNodesChange={handleNodesChange}
             onNodeClick={handleNodeClick}
+            onContextMenu={openCanvasContextMenu}
             onMoveEnd={handleMoveEnd}
             onViewportChange={handleViewportChange}
           >
@@ -7642,10 +8491,7 @@ function FlowWorkbench({
       ) : (
         <div className="flow-canvas flow-canvas--pending" aria-hidden="true" />
       )}
-      <div className="flow-context">
-        <span>{currentCombination?.name ?? "未保存组合"}</span>
-        <strong>{validationResult?.executable ? "流程已就绪" : "待补充输入"}</strong>
-      </div>
+      <WorkbenchContextMenu state={contextMenu} onClose={() => setContextMenu(null)} />
     </section>
   );
 }
@@ -7670,6 +8516,8 @@ function FlowInternalsUpdater({ revision }: { revision: string }) {
 
 function CanvasToolbar({
   canvasTool,
+  combinationName,
+  isFlowReady,
   isCanvasMaximized,
   isGridVisible,
   zoom,
@@ -7679,6 +8527,8 @@ function CanvasToolbar({
   onZoomChange,
 }: {
   canvasTool: CanvasTool;
+  combinationName: string;
+  isFlowReady: boolean;
   isCanvasMaximized: boolean;
   isGridVisible: boolean;
   zoom: number;
@@ -7772,6 +8622,10 @@ function CanvasToolbar({
       >
         <Grid3X3 size={17} />
       </Button>
+      <div className="flow-context" aria-label="当前流程状态">
+        <span>{combinationName}</span>
+        <strong>{isFlowReady ? "流程已就绪" : "待补充输入"}</strong>
+      </div>
       <div className="flow-help-wrap" ref={flowHelpRef}>
         <Button
           aria-expanded={isFlowHelpOpen}
