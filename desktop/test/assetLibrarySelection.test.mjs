@@ -99,6 +99,24 @@ test("asset thumb selection and remove controls stay compact and centered", () =
   assert.match(globalCssSource, /\.asset-thumb__remove svg\s*\{[\s\S]*?height:\s*12px/);
 });
 
+test("dragging asset thumb follows pointer without an extra overlay preview", () => {
+  assert.doesNotMatch(workflowCanvasSource, /DragOverlay/);
+  assert.doesNotMatch(workflowCanvasSource, /function AssetDragOverlay/);
+  assert.match(
+    workflowCanvasSource,
+    /transform:\s*DndCSS\.Transform\.toString\(transform\)/,
+  );
+  assert.match(
+    workflowCanvasSource,
+    /transition:\s*isDragging \? undefined : transition/,
+  );
+  assert.doesNotMatch(globalCssSource, /\.asset-thumb--drag-overlay/);
+  assert.doesNotMatch(
+    globalCssSource,
+    /\.asset-thumb\.is-dragging\s+\.asset-thumb__image,\s*\.asset-thumb\.is-dragging img,\s*\.asset-thumb\.is-dragging \.asset-thumb__remove,\s*\.asset-thumb\.is-dragging \.asset-thumb__check\s*\{[\s\S]*?opacity:\s*0/,
+  );
+});
+
 test("new combination asset picker keeps selected thumbnail sizing stable", () => {
   const modalThumbRule = globalCssSource.match(/^\.modal-resource-grid button\s*\{(?<body>[^}]*)\}/m)?.groups?.body ?? "";
   const modalSelectedRule =

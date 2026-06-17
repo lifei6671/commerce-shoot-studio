@@ -15,6 +15,26 @@ use crate::error::{AppError, AppResult};
 use crate::services::prompt_resolver::PromptResolver;
 use crate::storage::sqlite::WorkspaceDatabase;
 
+const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-image-2";
+const DEFAULT_OPENAI_MODEL_DISPLAY_NAME: &str = "GPT Image 2";
+const DEFAULT_OPENAI_IMAGE_SIZE: &str = "1024x1024";
+const GPT_IMAGE_2_SIZE_OPTIONS: [&str; 14] = [
+    "auto",
+    "1024x1024",
+    "1672x941",
+    "941x1672",
+    "1443x1090",
+    "1090x1443",
+    "1536x1024",
+    "1024x1536",
+    "1408x1120",
+    "1120x1408",
+    "1920x832",
+    "832x1920",
+    "896x1792",
+    "1792x896",
+];
+
 pub fn list_model_definitions(advanced_models: bool) -> Vec<ModelDefinition> {
     fixed_model_definitions()
         .into_iter()
@@ -32,13 +52,15 @@ pub fn validate_model_config(input: ValidateModelConfigInput) -> AppResult<Valid
         )));
     }
 
-    let normalized_output_count = normalize_output_count(&definition, &input.request.params_json)?;
-    validate_required_params(&definition, &input.request.params_json)?;
+    let normalized_params_json =
+        normalize_model_params(&definition, input.request.params_json.clone())?;
+    let normalized_output_count = normalize_output_count(&definition, &normalized_params_json)?;
+    validate_required_params(&definition, &normalized_params_json)?;
 
     Ok(ValidatedModelConfig {
         input_limits: definition.input_limits.clone(),
         normalized_output_count,
-        normalized_params_json: input.request.params_json,
+        normalized_params_json,
         definition,
     })
 }
@@ -401,7 +423,7 @@ fn normalize_saved_model_config_request(request: SaveModelConfigRequest) -> Save
     SaveModelConfigRequest {
         id: request.id,
         provider: "openai".to_string(),
-        model_id: "gpt-image-1".to_string(),
+        model_id: DEFAULT_OPENAI_MODEL_ID.to_string(),
         params_json: json!({
             "outputCount": normalize_legacy_output_count(&request.params_json),
             "size": normalize_legacy_size(&request.params_json),
@@ -422,10 +444,11 @@ fn normalize_legacy_size(params_json: &Value) -> String {
     let value = params_json
         .get("size")
         .and_then(Value::as_str)
-        .unwrap_or("1024x1024");
-    match value {
-        "1024x1024" | "1024x1536" | "1536x1024" => value.to_string(),
-        _ => "1024x1024".to_string(),
+        .unwrap_or(DEFAULT_OPENAI_IMAGE_SIZE);
+    if GPT_IMAGE_2_SIZE_OPTIONS.contains(&value) {
+        value.to_string()
+    } else {
+        DEFAULT_OPENAI_IMAGE_SIZE.to_string()
     }
 }
 
@@ -450,6 +473,62 @@ fn validate_required_params(definition: &ModelDefinition, params_json: &Value) -
         }
     }
     Ok(())
+}
+
+fn normalize_model_params(definition: &ModelDefinition, params_json: Value) -> AppResult<Value> {
+    let Value::Object(mut params) = params_json else {
+        return Err(AppError::ModelConfigInvalid(
+            "model paramsJson must be an object".to_string(),
+        ));
+    };
+
+    match params.remove("providerBaseUrl") {
+        Some(value) if !value.is_null() => {
+            let normalized = normalize_provider_base_url(definition, &value)?;
+            params.insert("providerBaseUrl".to_string(), json!(normalized));
+        }
+        _ => {}
+    }
+
+    Ok(Value::Object(params))
+}
+
+fn normalize_provider_base_url(definition: &ModelDefinition, value: &Value) -> AppResult<String> {
+    if definition.provider != "openai" {
+        return Err(AppError::ModelConfigInvalid(format!(
+            "providerBaseUrl is not supported by provider {}",
+            definition.provider
+        )));
+    }
+
+    normalize_openai_provider_base_url(value)
+}
+
+pub fn normalize_openai_provider_base_url(value: &Value) -> AppResult<String> {
+    let raw = value.as_str().ok_or_else(|| {
+        AppError::ModelConfigInvalid("providerBaseUrl must be a URL string".to_string())
+    })?;
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(AppError::ModelConfigInvalid(
+            "providerBaseUrl is required when custom endpoint is enabled".to_string(),
+        ));
+    }
+
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|_| AppError::ModelConfigInvalid("providerBaseUrl is invalid".to_string()))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(AppError::ModelConfigInvalid(
+            "providerBaseUrl must be a valid https URL".to_string(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AppError::ModelConfigInvalid(
+            "providerBaseUrl must not include query or fragment".to_string(),
+        ));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn validate_param_value(schema: &ModelParamSchema, value: &Value) -> AppResult<()> {
@@ -501,8 +580,8 @@ fn validate_param_value(schema: &ModelParamSchema, value: &Value) -> AppResult<(
 fn fixed_model_definitions() -> Vec<ModelDefinition> {
     vec![ModelDefinition {
         provider: "openai".to_string(),
-        model_id: "gpt-image-1".to_string(),
-        display_name: "GPT Image 1".to_string(),
+        model_id: DEFAULT_OPENAI_MODEL_ID.to_string(),
+        display_name: DEFAULT_OPENAI_MODEL_DISPLAY_NAME.to_string(),
         advanced: false,
         input_limits: ModelInputLimits {
             min_garments: 1,
@@ -524,10 +603,13 @@ fn fixed_model_definitions() -> Vec<ModelDefinition> {
                 label: "Size".to_string(),
                 kind: ModelParamKind::Select,
                 required: true,
-                default_value: json!("1024x1024"),
+                default_value: json!(DEFAULT_OPENAI_IMAGE_SIZE),
                 min: None,
                 max: None,
-                options: vec![json!("1024x1024"), json!("1024x1536"), json!("1536x1024")],
+                options: GPT_IMAGE_2_SIZE_OPTIONS
+                    .into_iter()
+                    .map(|value| json!(value))
+                    .collect(),
             },
         ],
         output: ModelOutputSchema {
@@ -558,7 +640,37 @@ mod tests {
         assert!(public_defs
             .iter()
             .any(|definition| definition.provider == "openai"
-                && definition.model_id == "gpt-image-1"));
+                && definition.model_id == "gpt-image-2"));
+        let openai = public_defs
+            .iter()
+            .find(|definition| definition.provider == "openai")
+            .expect("openai definition");
+        let size_options = openai
+            .params_schema
+            .iter()
+            .find(|schema| schema.key == "size")
+            .expect("size schema")
+            .options
+            .clone();
+        assert_eq!(
+            size_options,
+            vec![
+                json!("auto"),
+                json!("1024x1024"),
+                json!("1672x941"),
+                json!("941x1672"),
+                json!("1443x1090"),
+                json!("1090x1443"),
+                json!("1536x1024"),
+                json!("1024x1536"),
+                json!("1408x1120"),
+                json!("1120x1408"),
+                json!("1920x832"),
+                json!("832x1920"),
+                json!("896x1792"),
+                json!("1792x896"),
+            ]
+        );
         assert_eq!(
             public_defs
                 .iter()
@@ -577,7 +689,7 @@ mod tests {
             request: SaveModelConfigRequest {
                 id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 params_json: json!({
                     "outputCount": 3,
                     "size": "1024x1024"
@@ -590,6 +702,47 @@ mod tests {
         assert_eq!(validated.input_limits.min_garments, 1);
         assert_eq!(validated.input_limits.max_garments, 4);
         assert_eq!(validated.normalized_output_count, 3);
+    }
+
+    #[test]
+    fn validate_model_config_accepts_openai_custom_base_url() {
+        let validated = validate_model_config(ValidateModelConfigInput {
+            request: SaveModelConfigRequest {
+                id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-2".to_string(),
+                params_json: json!({
+                    "outputCount": 2,
+                    "size": "1024x1024",
+                    "providerBaseUrl": "https://gateway.example.com/v1/"
+                }),
+            },
+            advanced_models: false,
+        })
+        .expect("validate custom endpoint");
+
+        assert_eq!(
+            validated.normalized_params_json["providerBaseUrl"],
+            "https://gateway.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn validate_model_config_rejects_invalid_openai_custom_base_url() {
+        let result = validate_model_config(ValidateModelConfigInput {
+            request: SaveModelConfigRequest {
+                id: None,
+                provider: "openai".to_string(),
+                model_id: "gpt-image-2".to_string(),
+                params_json: json!({
+                    "outputCount": 1,
+                    "providerBaseUrl": "http://localhost:8080/v1"
+                }),
+            },
+            advanced_models: false,
+        });
+
+        assert!(matches!(result, Err(AppError::ModelConfigInvalid(_))));
     }
 
     #[test]
@@ -649,7 +802,7 @@ mod tests {
             request: SaveModelConfigRequest {
                 id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1-pro".to_string(),
+                model_id: "gpt-image-2-pro".to_string(),
                 params_json: json!({"outputCount": 1}),
             },
             advanced_models: false,
@@ -662,7 +815,7 @@ mod tests {
     fn normalize_output_count_uses_count_param_key_and_bounds() {
         let definition = list_model_definitions(true)
             .into_iter()
-            .find(|definition| definition.model_id == "gpt-image-1")
+            .find(|definition| definition.model_id == "gpt-image-2")
             .expect("definition");
 
         assert_eq!(
@@ -682,7 +835,7 @@ mod tests {
             SaveModelConfigRequest {
                 id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 params_json: json!({
                     "outputCount": 2,
                     "size": "1024x1024"
@@ -699,7 +852,7 @@ mod tests {
             .expect("config exists");
 
         assert_eq!(reloaded.provider, "openai");
-        assert_eq!(reloaded.model_id, "gpt-image-1");
+        assert_eq!(reloaded.model_id, "gpt-image-2");
         assert_eq!(reloaded.normalized_output_count, 2);
         assert_eq!(reloaded.input_limits.max_garments, 4);
     }
@@ -734,7 +887,7 @@ mod tests {
             .expect("config exists");
 
         assert_eq!(reloaded.provider, "openai");
-        assert_eq!(reloaded.model_id, "gpt-image-1");
+        assert_eq!(reloaded.model_id, "gpt-image-2");
         assert_eq!(reloaded.normalized_output_count, 2);
         assert_eq!(reloaded.params_json["size"], json!("1024x1536"));
         assert_eq!(reloaded.params_json["timeoutSeconds"], json!(600));
@@ -765,7 +918,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 2, "size": "1024x1024"}),
                 }),
             },
@@ -807,7 +960,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
             },
@@ -823,7 +976,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 3, "size": "1024x1024"}),
                 }),
             },
@@ -847,7 +1000,7 @@ mod tests {
         let model_config = SaveModelConfigRequest {
             id: None,
             provider: "openai".to_string(),
-            model_id: "gpt-image-1".to_string(),
+            model_id: "gpt-image-2".to_string(),
             params_json: json!({"outputCount": 1, "size": "1024x1024"}),
         };
 
@@ -913,7 +1066,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
             },
@@ -948,7 +1101,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
             },
@@ -964,7 +1117,7 @@ mod tests {
         );
         assert_eq!(
             response.effective_model.expect("model").model_id,
-            "gpt-image-1"
+            "gpt-image-2"
         );
     }
 

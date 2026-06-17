@@ -10,6 +10,8 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -62,6 +64,8 @@ import {
   Clock3,
   Code2,
   Copy,
+  Eye,
+  EyeOff,
   FileText,
   Filter,
   FolderOpen,
@@ -111,6 +115,7 @@ import type {
 } from "../../model-config/model/modelTypes";
 import {
   getModelConfig,
+  getProviderApiKey,
   getProviderCredentialStatus,
   listModelDefinitions,
   saveModelConfig,
@@ -144,6 +149,7 @@ import {
 import type {
   GenerationTaskDetail,
   GenerationTaskHistoryPage,
+  GenerationTaskHistoryStats,
   GenerationTaskStatus,
   GenerationTaskResultAsset,
 } from "../../generation-task/model/taskTypes";
@@ -244,11 +250,17 @@ import {
 import {
   applyStoredAssetOrder,
   assetIds,
+  isAssetDropTarget,
   moveAssetById,
   readAssetLibraryOrder,
   saveAssetLibraryOrder,
   type SortableAssetType,
 } from "./assetLibraryOrder";
+import {
+  getDefaultCombinationSummary,
+  sortCombinationSummaries,
+  upsertCombinationSummary,
+} from "./combinationSummaries";
 import { buildAssetImageSources } from "./assetImageSource";
 import {
   DEFAULT_PROMPT_WORKBENCH_STATE,
@@ -275,9 +287,40 @@ import {
   syncPromptTemplateVariablesFromBody,
 } from "./promptTemplateVariables";
 
-const DEFAULT_MODEL_ID = "gpt-image-1";
+const DEFAULT_MODEL_ID = "gpt-image-2";
 const DEFAULT_PROVIDER = "openai";
-const MODEL_SIZES = ["1024x1024", "1024x1536", "1536x1024"] as const;
+const MODEL_SIZES = [
+  "auto",
+  "1024x1024",
+  "1672x941",
+  "941x1672",
+  "1443x1090",
+  "1090x1443",
+  "1536x1024",
+  "1024x1536",
+  "1408x1120",
+  "1120x1408",
+  "1920x832",
+  "832x1920",
+  "896x1792",
+  "1792x896",
+] as const;
+const MODEL_SIZE_LABELS: Record<(typeof MODEL_SIZES)[number], string> = {
+  auto: "自动",
+  "1024x1024": "1:1 · 1024x1024",
+  "1672x941": "16:9 · 1672x941",
+  "941x1672": "9:16 · 941x1672",
+  "1443x1090": "4:3 · 1443x1090",
+  "1090x1443": "3:4 · 1090x1443",
+  "1536x1024": "3:2 · 1536x1024",
+  "1024x1536": "2:3 · 1024x1536",
+  "1408x1120": "5:4 · 1408x1120",
+  "1120x1408": "4:5 · 1120x1408",
+  "1920x832": "21:9 · 1920x832",
+  "832x1920": "9:21 · 832x1920",
+  "896x1792": "1:2 · 896x1792",
+  "1792x896": "2:1 · 1792x896",
+};
 
 type SelectableAsset = {
   id: string;
@@ -352,6 +395,12 @@ const DEFAULT_AUTO_SAVE_RESULT = true;
 const WORKBENCH_AUTO_SAVE_DELAY_MS = 800;
 const PROMPT_TEMPLATE_TYPES: PromptTemplateType[] = ["system", "user", "negative"];
 const PROMPT_TEMPLATE_LIMIT = 4000;
+const EMPTY_TASK_HISTORY_STATS: GenerationTaskHistoryStats = {
+  total: 0,
+  succeeded: 0,
+  failed: 0,
+  cancelled: 0,
+};
 const DEFAULT_PROMPT_TEMPLATE_VARIABLES: PromptTemplateVariable[] = [
   {
     name: "style",
@@ -542,7 +591,7 @@ export function WorkflowCanvas() {
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [customProviderName, setCustomProviderName] = useState("");
   const [isCustomEndpointEnabled, setIsCustomEndpointEnabled] = useState(false);
-  const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("1024x1024");
+  const [modelSize, setModelSize] = useState<(typeof MODEL_SIZES)[number]>("auto");
   const [outputCount, setOutputCount] = useState(1);
   const [imageFormat, setImageFormat] = useState(DEFAULT_IMAGE_FORMAT);
   const [timeoutSeconds, setTimeoutSeconds] = useState(DEFAULT_TIMEOUT_SECONDS);
@@ -1116,9 +1165,9 @@ export function WorkflowCanvas() {
     ]);
     setPeople(applySavedAssetOrder("person", personAssets));
     setGarments(applySavedAssetOrder("garment", garmentAssets));
-    setCombinationSummaries(combinations);
+    setCombinationSummaries(sortCombinationSummaries(combinations));
 
-    const latest = combinations[0];
+    const latest = getDefaultCombinationSummary(combinations);
     if (!latest) {
       setCurrentCombination(null);
       setSelectedPersonId(null);
@@ -1656,6 +1705,13 @@ export function WorkflowCanvas() {
         await setProviderApiKey(selectedProvider, apiKeyDraft);
         setApiKeyDraft("");
       }
+      const savedConfig = await saveModelConfig({
+        ...modelConfig,
+        id: readStoredModelConfigId(),
+      });
+      storeModelConfigId(savedConfig.id);
+      setStoredModelConfigId(savedConfig.id);
+      applyModelConfigState(savedConfig);
       const status = await getProviderCredentialStatus(selectedProvider);
       setCredentialStatus(status);
       if (!status.configured) {
@@ -2851,7 +2907,11 @@ function storeCombinationSelectionState(
 function normalizeModelSize(value: unknown): (typeof MODEL_SIZES)[number] {
   return MODEL_SIZES.includes(value as (typeof MODEL_SIZES)[number])
     ? (value as (typeof MODEL_SIZES)[number])
-    : "1024x1024";
+    : "auto";
+}
+
+function formatModelSizeLabel(size: (typeof MODEL_SIZES)[number]) {
+  return MODEL_SIZE_LABELS[size];
 }
 
 function normalizeIntegerParam(value: unknown, min: number, max: number, fallback: number) {
@@ -2873,21 +2933,6 @@ function applySavedAssetOrder(assetType: SortableAssetType, items: AssetFileView
 function saveOrderedAssets(assetType: SortableAssetType, items: AssetFileView[]) {
   saveAssetLibraryOrder(getAssetOrderStorage(), assetType, assetIds(items));
   return items;
-}
-
-function upsertCombinationSummary(
-  summaries: ImageCombinationSummary[],
-  combination: ImageCombination,
-) {
-  const summary: ImageCombinationSummary = {
-    id: combination.id,
-    name: combination.name,
-    personAssetId: combination.personAssetId,
-    garmentCount: combination.garmentAssetIds.length,
-    createdAt: combination.createdAt,
-    updatedAt: combination.updatedAt,
-  };
-  return [summary, ...summaries.filter((item) => item.id !== combination.id)];
 }
 
 function toSelectableAsset(view: AssetFileView, selected: boolean): SelectableAsset {
@@ -3198,6 +3243,7 @@ function ModelSettingsCenter({
     selectedProvider === CUSTOM_PROVIDER
       ? customModelId.trim() || DEFAULT_CUSTOM_MODEL_ID
       : selectedModelId;
+  const endpointCustomizationSupported = selectedProvider === DEFAULT_PROVIDER || selectedProvider === CUSTOM_PROVIDER;
   const endpointInputEnabled = selectedProvider === CUSTOM_PROVIDER || isCustomEndpointEnabled;
   const endpointLabel =
     endpointInputEnabled
@@ -3212,6 +3258,8 @@ function ModelSettingsCenter({
   const [promptTemplateType, setPromptTemplateType] = useState<PromptTemplateType>("system");
   const [promptSearch, setPromptSearch] = useState("");
   const [selectedPromptTemplateId, setSelectedPromptTemplateId] = useState<string | null>(null);
+  const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
+  const [isRevealingApiKey, setIsRevealingApiKey] = useState(false);
   const [promptDraft, setPromptDraft] = useState<PromptTemplateDraft>(() =>
     buildEmptyPromptTemplateDraft("system"),
   );
@@ -3271,10 +3319,18 @@ function ModelSettingsCenter({
     !isPromptTemplateReadOnly &&
     Boolean(selectedPromptTemplate) &&
     isPromptTemplateDirty;
+  const apiKeyVisible = revealedApiKey !== null;
+  const apiKeyInputValue = apiKeyDraft || revealedApiKey || "";
+  const apiKeyRevealDisabled =
+    isRevealingApiKey || (!apiKeyDraft.trim() && credentialStatus?.configured !== true);
 
   useEffect(() => {
     setSystemSettingsDraft(systemSettingsView.settings);
   }, [systemSettingsView.settings]);
+
+  useEffect(() => {
+    setRevealedApiKey(null);
+  }, [credentialStatus?.maskedKey, selectedProvider]);
 
   useEffect(() => {
     if (activeSettingsPage !== "prompt" || promptTemplates.length > 0) {
@@ -3453,6 +3509,40 @@ function ModelSettingsCenter({
     );
   }
 
+  function handleApiKeyInputChange(value: string) {
+    if (apiKeyVisible) {
+      setRevealedApiKey(null);
+    }
+    onApiKeyDraftChange(value);
+  }
+
+  async function handleToggleApiKeyReveal() {
+    if (apiKeyVisible) {
+      setRevealedApiKey(null);
+      return;
+    }
+
+    if (apiKeyDraft.trim()) {
+      setRevealedApiKey(apiKeyDraft);
+      return;
+    }
+
+    if (credentialStatus?.configured !== true) {
+      onNotifyError(`请先保存 ${selectedProviderOption.label} API Key`);
+      return;
+    }
+
+    setIsRevealingApiKey(true);
+    try {
+      const apiKey = isTauriRuntime() ? await getProviderApiKey(selectedProvider) : "";
+      setRevealedApiKey(apiKey);
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "读取 API Key 失败");
+    } finally {
+      setIsRevealingApiKey(false);
+    }
+  }
+
   return (
     <section className="settings-center">
       <header className="settings-center__header">
@@ -3613,13 +3703,19 @@ function ModelSettingsCenter({
               </div>
               <div className="settings-api-input">
                 <Input
-                  value={apiKeyDraft}
-                  onChange={(event) => onApiKeyDraftChange(event.target.value)}
+                  value={apiKeyInputValue}
+                  onChange={(event) => handleApiKeyInputChange(event.target.value)}
                   placeholder={credentialStatus?.maskedKey ?? `输入 ${selectedProviderOption.label} API Key`}
-                  type="password"
+                  type="text"
                 />
-                <Button aria-label="API Key 保存在系统密钥库" disabled type="button">
-                  <ShieldCheck size={17} />
+                <Button
+                  aria-label={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                  disabled={apiKeyRevealDisabled}
+                  onClick={() => void handleToggleApiKeyReveal()}
+                  title={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                  type="button"
+                >
+                  {apiKeyVisible ? <EyeOff size={17} /> : <Eye size={17} />}
                 </Button>
               </div>
               <p>输入您的 {selectedProviderOption.label} API Key，启用后可保存并校验该 Provider 的模型配置。</p>
@@ -3644,7 +3740,7 @@ function ModelSettingsCenter({
                   )}
                 </label>
                 <Button
-                  disabled={selectedProvider !== CUSTOM_PROVIDER}
+                  disabled={!endpointCustomizationSupported}
                   onClick={() =>
                     onCustomEndpointEnabledChange(
                       selectedProvider === CUSTOM_PROVIDER ? true : !isCustomEndpointEnabled,
@@ -3653,7 +3749,9 @@ function ModelSettingsCenter({
                   title={
                     selectedProvider === CUSTOM_PROVIDER
                       ? "配置自定义接入点"
-                      : "当前 Provider 暂不支持自定义接入点"
+                      : endpointCustomizationSupported
+                        ? "OpenAI 支持自定义 API 接入点"
+                        : "当前 Provider 暂不支持自定义接入点"
                   }
                   type="button"
                 >
@@ -3665,6 +3763,8 @@ function ModelSettingsCenter({
                 <small>
                   {endpointInputEnabled
                     ? "请手动输入 API 接入点，保存后会写入当前模型配置。"
+                    : endpointCustomizationSupported
+                      ? `${selectedProviderOption.label} 支持自定义 API 接入点，默认使用：${endpointLabel}`
                     : `${selectedProviderOption.label} 使用默认接入点：${endpointLabel}`}
                 </small>
               </div>
@@ -3766,7 +3866,7 @@ function ModelSettingsCenter({
                       <SelectContent>
                         {MODEL_SIZES.map((size) => (
                           <SelectItem key={size} value={size}>
-                            {size}
+                            {formatModelSizeLabel(size)}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -4414,6 +4514,8 @@ function TaskHistorySettingsPage({
   const PAGE_SIZE = 20;
   const EXPORT_PAGE_SIZE = 100;
   const [historyPage, setHistoryPage] = useState<GenerationTaskHistoryPage | null>(null);
+  const [allHistoryStats, setAllHistoryStats] =
+    useState<GenerationTaskHistoryStats>(EMPTY_TASK_HISTORY_STATS);
   const [isLoading, setIsLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
@@ -4494,9 +4596,29 @@ function TaskHistorySettingsPage({
     }
   }, [datePreset, modelId, onNotifyError, pageIndex, provider, search, status]);
 
+  const loadAllHistoryStats = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      setAllHistoryStats(EMPTY_TASK_HISTORY_STATS);
+      return;
+    }
+    try {
+      const allStatsPage = await listGenerationTaskHistory({
+        limit: 1,
+        offset: 0,
+      });
+      setAllHistoryStats(allStatsPage.stats);
+    } catch (error) {
+      onNotifyError(error instanceof Error ? error.message : "加载任务历史统计失败");
+    }
+  }, [onNotifyError]);
+
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    void loadAllHistoryStats();
+  }, [loadAllHistoryStats]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -4593,6 +4715,7 @@ function TaskHistorySettingsPage({
       await retryGenerationTask(selectedDetail.task.id);
       onNotifyMessage("任务已重新提交");
       void loadHistory();
+      void loadAllHistoryStats();
     } catch (error) {
       onNotifyError(error instanceof Error ? error.message : "重试任务失败");
     }
@@ -4607,6 +4730,7 @@ function TaskHistorySettingsPage({
       await rerunGenerationFromCurrentCombination(currentCombinationId, modelConfig);
       onNotifyMessage("已按当前配置重新提交任务");
       void loadHistory();
+      void loadAllHistoryStats();
     } catch (error) {
       onNotifyError(error instanceof Error ? error.message : "按当前配置重跑失败");
     } finally {
@@ -4633,6 +4757,12 @@ function TaskHistorySettingsPage({
     <main className="settings-main task-history-main">
       <div className="task-history-layout">
         <section className="task-history-board">
+          <div className="task-history-stats">
+            <TaskHistoryStat label="总任务" tone="total" value={allHistoryStats.total} />
+            <TaskHistoryStat label="成功" tone="succeeded" value={allHistoryStats.succeeded} />
+            <TaskHistoryStat label="失败" tone="failed" value={allHistoryStats.failed} />
+            <TaskHistoryStat label="已取消" tone="cancelled" value={allHistoryStats.cancelled} />
+          </div>
           <div className="task-history-toolbar">
             <div className="task-history-tabs">
               {(["all", "succeeded", "failed", "cancelled"] as const).map((item) => (
@@ -4732,6 +4862,7 @@ function TaskHistorySettingsPage({
               onClick={() => {
                 setOpenFilterMenu(null);
                 void loadHistory();
+                void loadAllHistoryStats();
               }}
               type="button"
             >
@@ -4749,12 +4880,6 @@ function TaskHistorySettingsPage({
               <Archive size={14} />
               导出日志
             </Button>
-          </div>
-          <div className="task-history-stats">
-            <TaskHistoryStat label="总任务" value={historyPage?.stats.total ?? 0} />
-            <TaskHistoryStat label="成功" value={historyPage?.stats.succeeded ?? 0} />
-            <TaskHistoryStat label="失败" value={historyPage?.stats.failed ?? 0} />
-            <TaskHistoryStat label="已取消" value={historyPage?.stats.cancelled ?? 0} />
           </div>
           <div className="task-history-table">
             <div className="task-history-row task-history-row--head">
@@ -4915,9 +5040,17 @@ function TaskHistorySettingsPage({
   );
 }
 
-function TaskHistoryStat({ label, value }: { label: string; value: number }) {
+function TaskHistoryStat({
+  label,
+  tone,
+  value,
+}: {
+  label: string;
+  tone: "total" | "succeeded" | "failed" | "cancelled";
+  value: number;
+}) {
   return (
-    <div className="task-history-stat">
+    <div className={`task-history-stat is-${tone}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -5723,7 +5856,7 @@ function buildFallbackModelDefinition(provider: ProviderId = DEFAULT_PROVIDER): 
   return {
     provider: DEFAULT_PROVIDER,
     modelId: DEFAULT_MODEL_ID,
-    displayName: "GPT Image 1",
+    displayName: "GPT Image 2",
     advanced: false,
     inputLimits: {
       minGarments: 1,
@@ -7796,6 +7929,8 @@ function AssetSection({
   onSelect?: (assetId: string) => void;
   onReorder?: (activeId: string, overId: string) => void;
 }) {
+  const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
+  const [overAssetId, setOverAssetId] = useState<string | null>(null);
   const suppressNextClick = useRef(false);
   const canReorder = Boolean(onReorder);
   const sensors = useSensors(
@@ -7815,9 +7950,25 @@ function AssetSection({
     onSelect?.(assetId);
   }
 
+  function handleDragStart(event: DragStartEvent) {
+    const activeId = String(event.active.id);
+    setActiveAssetId(activeId);
+    setOverAssetId(null);
+  }
+
+  function handleDragOver(event: DragOverEvent) {
+    setOverAssetId(event.over ? String(event.over.id) : null);
+  }
+
+  function resetDragState() {
+    setActiveAssetId(null);
+    setOverAssetId(null);
+  }
+
   function handleDragEnd(event: DragEndEvent) {
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : "";
+    resetDragState();
     if (!onReorder || !overId || activeId === overId) {
       return;
     }
@@ -7832,6 +7983,11 @@ function AssetSection({
       key={asset.id}
       onRemove={onRemove}
       onSelect={handleSelect}
+      isDropTarget={isAssetDropTarget({
+        activeId: activeAssetId,
+        assetId: asset.id,
+        overId: overAssetId,
+      })}
     />
   ));
 
@@ -7854,7 +8010,10 @@ function AssetSection({
           canReorder ? (
             <DndContext
               collisionDetection={closestCenter}
+              onDragCancel={resetDragState}
               onDragEnd={handleDragEnd}
+              onDragOver={handleDragOver}
+              onDragStart={handleDragStart}
               sensors={sensors}
             >
               <SortableContext items={assets.map((asset) => asset.id)} strategy={rectSortingStrategy}>
@@ -7890,11 +8049,13 @@ function SortableAssetThumb({
   canReorder,
   onRemove,
   onSelect,
+  isDropTarget,
 }: {
   asset: SelectableAsset;
   canReorder: boolean;
   onRemove?: (assetId: string) => void;
   onSelect: (assetId: string) => void;
+  isDropTarget: boolean;
 }) {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({
     disabled: !canReorder,
@@ -7903,8 +8064,8 @@ function SortableAssetThumb({
   const [contextMenu, setContextMenu] = useState<WorkbenchContextMenuState>(null);
   const style = {
     transform: DndCSS.Transform.toString(transform),
-    transition,
-  };
+    transition: isDragging ? undefined : transition,
+  } satisfies CSSProperties;
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget) {
@@ -7951,6 +8112,7 @@ function SortableAssetThumb({
         asset.selected ? "is-selected" : "",
         canReorder ? "is-sortable" : "",
         isDragging ? "is-dragging" : "",
+        isDropTarget ? "is-drag-over" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -9100,7 +9262,7 @@ function ModelSettingsCard({
             <SelectContent>
               {MODEL_SIZES.map((size) => (
                 <SelectItem key={size} value={size}>
-                  {size}
+                  {formatModelSizeLabel(size)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -9131,7 +9293,7 @@ function ModelSettingsCard({
           value={apiKeyDraft}
           onChange={(event) => onApiKeyDraftChange(event.target.value)}
           placeholder="粘贴 OpenAI API Key"
-          type="password"
+          type="text"
         />
         <Button disabled={!apiKeyDraft.trim() || isSavingApiKey} onClick={onSaveApiKey} type="button">
           {isSavingApiKey ? "保存中" : "保存"}
@@ -9557,7 +9719,7 @@ function NodeEditor({
               <SelectContent>
                 {MODEL_SIZES.map((size) => (
                   <SelectItem key={size} value={size}>
-                    {size}
+                    {formatModelSizeLabel(size)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -10020,7 +10182,7 @@ function ApiKeyDetailBlock({
           value={apiKeyDraft}
           onChange={(event) => onApiKeyDraftChange(event.target.value)}
           placeholder="OpenAI API Key"
-          type="password"
+          type="text"
         />
         <Button disabled={!apiKeyDraft.trim()} onClick={onSaveApiKey} type="button">
           保存 API Key

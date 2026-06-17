@@ -30,7 +30,7 @@ const promptBinding = {
 const modelConfig = {
   id: "model-config-1",
   provider: "openai",
-  modelId: "gpt-image-1",
+  modelId: "gpt-image-2",
   paramsJson: {
     outputCount: 1,
     size: "1024x1024",

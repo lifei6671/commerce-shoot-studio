@@ -13,6 +13,10 @@ const workflowCanvasSource = readFileSync(
   new URL("../src/features/workflow/components/WorkflowCanvas.tsx", import.meta.url),
   "utf8",
 );
+const globalCssSource = readFileSync(
+  new URL("../src/shared/styles/global.css", import.meta.url),
+  "utf8",
+);
 
 test("task history provider options include catalog providers beyond the current page", () => {
   const options = buildTaskHistoryProviderOptions(
@@ -78,6 +82,34 @@ test("task history toolbar order matches the workbench layout", () => {
   assert.ok(search > dateFilter);
   assert.ok(searchButton > search);
   assert.ok(refreshButton > searchButton);
+});
+
+test("task history global stats stay above filters and ignore search results", () => {
+  const boardStart = workflowCanvasSource.indexOf('className="task-history-board"');
+  const stats = workflowCanvasSource.indexOf('className="task-history-stats"', boardStart);
+  const toolbar = workflowCanvasSource.indexOf('className="task-history-toolbar"', boardStart);
+
+  assert.notEqual(boardStart, -1);
+  assert.ok(stats > boardStart);
+  assert.ok(toolbar > stats);
+  assert.match(workflowCanvasSource, /const \[allHistoryStats, setAllHistoryStats\]/);
+  assert.match(
+    workflowCanvasSource,
+    /const allStatsPage = await listGenerationTaskHistory\(\{\s*limit: 1,\s*offset: 0,\s*\}\);/,
+  );
+  assert.match(workflowCanvasSource, /value=\{allHistoryStats\.total\}/);
+  assert.match(workflowCanvasSource, /value=\{allHistoryStats\.succeeded\}/);
+  assert.match(workflowCanvasSource, /value=\{allHistoryStats\.failed\}/);
+  assert.match(workflowCanvasSource, /value=\{allHistoryStats\.cancelled\}/);
+  assert.doesNotMatch(workflowCanvasSource, /value=\{historyPage\?\.stats\.total \?\? 0\}/);
+});
+
+test("task history global stats use distinct color blocks", () => {
+  assert.match(globalCssSource, /\.task-history-stat\.is-total\s*\{/);
+  assert.match(globalCssSource, /\.task-history-stat\.is-succeeded\s*\{/);
+  assert.match(globalCssSource, /\.task-history-stat\.is-failed\s*\{/);
+  assert.match(globalCssSource, /\.task-history-stat\.is-cancelled\s*\{/);
+  assert.match(globalCssSource, /\.task-history-stat\s*\{[\s\S]*?border-radius:\s*8px/);
 });
 
 test("task history search only reloads after search is submitted", () => {

@@ -95,12 +95,51 @@ pub async fn delete_prompt_template_by_id(database: &WorkspaceDatabase, id: &str
             "built-in or locked prompt templates cannot be deleted".to_string(),
         ));
     }
+    ensure_prompt_template_not_referenced(database, id).await?;
 
     let mut writer = database.writer().await;
     sqlx::query("DELETE FROM prompt_templates WHERE id = ?")
         .bind(id)
         .execute(&mut *writer)
         .await?;
+    Ok(())
+}
+
+async fn ensure_prompt_template_not_referenced(
+    database: &WorkspaceDatabase,
+    id: &str,
+) -> AppResult<()> {
+    let binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM prompt_bindings
+         WHERE template_id = ?
+            OR system_base_template_id = ?
+            OR user_base_template_id = ?
+            OR negative_base_template_id = ?",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .fetch_one(database.pool())
+    .await?;
+    let preset_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM prompt_presets
+         WHERE system_base_template_id = ?
+            OR user_base_template_id = ?
+            OR negative_base_template_id = ?",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .fetch_one(database.pool())
+    .await?;
+    if binding_count > 0 || preset_count > 0 {
+        return Err(AppError::InvalidInput(
+            "prompt template is used by existing bindings or presets".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -704,6 +743,110 @@ mod tests {
         assert!(error
             .to_string()
             .contains("built-in prompt templates cannot be edited"));
+    }
+
+    #[tokio::test]
+    async fn prompt_template_delete_rejects_template_used_by_binding() {
+        let (_temp_dir, database) = test_database().await;
+        let template = save_prompt_template_request(
+            &database,
+            SavePromptTemplateRequest {
+                id: None,
+                name: "Used Template".to_string(),
+                template_type: PromptTemplateType::User,
+                body: "used body".to_string(),
+                variables: vec![],
+                description: String::new(),
+                tags: vec![],
+                is_default: false,
+                locked: false,
+            },
+        )
+        .await
+        .expect("save template");
+        sqlx::query(
+            "INSERT INTO assets (
+                id, asset_type, original_name, relative_path, thumb_relative_path,
+                mime_type, sha256, width, height
+             ) VALUES ('person_1', 'person', 'person.png', 'assets/person/person.png',
+                'assets/cache/thumbs/person.jpg', 'image/png', 'sha-person', 10, 10)",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert person");
+        sqlx::query(
+            "INSERT INTO image_combinations (id, name, person_asset_id)
+             VALUES ('combination_1', 'Look', 'person_1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert combination");
+        sqlx::query(
+            "INSERT INTO prompt_bindings (
+                id, combination_id, template_id, mode, variables_json, append_text, override_text,
+                user_mode, user_base_template_id, user_append_text, user_override_text,
+                system_mode, system_append_text, system_override_text
+             ) VALUES (
+                'binding_1', 'combination_1', ?, 'default', '{}', '', '',
+                'default', ?, '', '',
+                'default', '', ''
+             )",
+        )
+        .bind(&template.id)
+        .bind(&template.id)
+        .execute(database.pool())
+        .await
+        .expect("insert binding");
+
+        let error = delete_prompt_template_by_id(&database, &template.id)
+            .await
+            .expect_err("referenced template should not be deleted");
+
+        assert!(error
+            .to_string()
+            .contains("prompt template is used by existing bindings or presets"));
+    }
+
+    #[tokio::test]
+    async fn prompt_template_delete_rejects_template_used_by_preset() {
+        let (_temp_dir, database) = test_database().await;
+        let template = save_prompt_template_request(
+            &database,
+            SavePromptTemplateRequest {
+                id: None,
+                name: "Preset Template".to_string(),
+                template_type: PromptTemplateType::User,
+                body: "preset body".to_string(),
+                variables: vec![],
+                description: String::new(),
+                tags: vec![],
+                is_default: false,
+                locked: false,
+            },
+        )
+        .await
+        .expect("save template");
+        sqlx::query(
+            "INSERT INTO prompt_presets (
+                id, name, scenario, description, source,
+                user_mode, user_base_template_id
+             ) VALUES (
+                'preset_1', 'Preset', '场景', '', 'custom',
+                'default', ?
+             )",
+        )
+        .bind(&template.id)
+        .execute(database.pool())
+        .await
+        .expect("insert preset");
+
+        let error = delete_prompt_template_by_id(&database, &template.id)
+            .await
+            .expect_err("referenced template should not be deleted");
+
+        assert!(error
+            .to_string()
+            .contains("prompt template is used by existing bindings or presets"));
     }
 
     async fn test_database() -> (tempfile::TempDir, WorkspaceDatabase) {

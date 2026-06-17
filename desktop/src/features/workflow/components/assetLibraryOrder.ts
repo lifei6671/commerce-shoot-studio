@@ -58,6 +58,18 @@ export function moveAssetById(
   return nextItems;
 }
 
+export function isAssetDropTarget({
+  activeId,
+  assetId,
+  overId,
+}: {
+  activeId: string | null;
+  assetId: string;
+  overId: string | null;
+}) {
+  return Boolean(activeId && overId && activeId !== overId && assetId === overId);
+}
+
 export function readAssetLibraryOrder(
   storage: AssetOrderStorage | null,
   assetType: SortableAssetType,

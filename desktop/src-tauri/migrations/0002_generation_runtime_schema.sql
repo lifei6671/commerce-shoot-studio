@@ -49,7 +49,7 @@ ALTER TABLE generation_tasks
 ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai';
 
 ALTER TABLE generation_tasks
-ADD COLUMN model_id TEXT NOT NULL DEFAULT 'gpt-image-1';
+ADD COLUMN model_id TEXT NOT NULL DEFAULT 'gpt-image-2';
 
 ALTER TABLE generation_tasks
 ADD COLUMN progress INTEGER NOT NULL DEFAULT 0;

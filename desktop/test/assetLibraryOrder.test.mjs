@@ -5,6 +5,7 @@ import {
   ASSET_LIBRARY_ORDER_STORAGE_KEY,
   applyStoredAssetOrder,
   assetIds,
+  isAssetDropTarget,
   moveAssetById,
   readAssetLibraryOrder,
   saveAssetLibraryOrder,
@@ -58,6 +59,25 @@ test("asset reorder moves the dragged item to the drop target index", () => {
 
   assert.deepEqual(assetIds(moveAssetById(items, "a", "c")), ["b", "c", "a", "d"]);
   assert.deepEqual(assetIds(moveAssetById(items, "d", "b")), ["a", "d", "b", "c"]);
+});
+
+test("asset drop target is shown only for the current snap target", () => {
+  assert.equal(
+    isAssetDropTarget({ activeId: "a", overId: "c", assetId: "c" }),
+    true,
+  );
+  assert.equal(
+    isAssetDropTarget({ activeId: "a", overId: "c", assetId: "a" }),
+    false,
+  );
+  assert.equal(
+    isAssetDropTarget({ activeId: "a", overId: "a", assetId: "a" }),
+    false,
+  );
+  assert.equal(
+    isAssetDropTarget({ activeId: "a", overId: null, assetId: "c" }),
+    false,
+  );
 });
 
 test("invalid asset reorder keeps the original array reference", () => {

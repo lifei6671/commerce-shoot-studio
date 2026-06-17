@@ -98,6 +98,7 @@ pub fn run() {
             commands::combinations::list_image_combinations,
             commands::combinations::validate_combination,
             commands::credentials::set_provider_api_key,
+            commands::credentials::get_provider_api_key,
             commands::credentials::get_provider_credential_status,
             commands::generation::start_generation,
             commands::generation::cancel_generation_task,

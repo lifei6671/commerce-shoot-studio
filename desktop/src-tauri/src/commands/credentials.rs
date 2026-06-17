@@ -9,6 +9,13 @@ pub async fn set_provider_api_key(provider: String, api_key: String) -> AppResul
 }
 
 #[tauri::command]
+pub async fn get_provider_api_key(provider: String) -> AppResult<String> {
+    ProviderCredentialService::system()
+        .read_provider_api_key(&provider)
+        .await
+}
+
+#[tauri::command]
 pub async fn get_provider_credential_status(
     provider: String,
 ) -> AppResult<ProviderCredentialStatus> {

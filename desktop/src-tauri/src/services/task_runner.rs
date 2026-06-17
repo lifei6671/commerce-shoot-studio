@@ -26,7 +26,9 @@ use crate::providers::provider_trait::{
 };
 use crate::services::assets::get_asset_by_id;
 use crate::services::combinations::get_image_combination_by_id;
-use crate::services::model_validator::validate_combination_request;
+use crate::services::model_validator::{
+    normalize_openai_provider_base_url, validate_combination_request,
+};
 use crate::services::prompt_resolver::{
     get_prompt_binding_save_request_for_combination, preview_resolved_prompt_for_combination,
 };
@@ -948,13 +950,14 @@ async fn build_generation_plan(
             task_id: String::new(),
             provider: provider_name,
             model_id,
+            provider_base_url: provider_base_url_from_params(&params_json)?,
             images: provider_images,
             prompt: PromptPayload {
                 system: resolved_prompt.system,
                 user: resolved_prompt.user,
                 negative: resolved_prompt.negative,
             },
-            params: draft_model_config.params_json,
+            params: params_json,
         },
     })
 }
@@ -1045,6 +1048,12 @@ async fn build_retry_generation_plan(
             task_id: String::new(),
             provider: source_task.provider.clone(),
             model_id: source_task.model_id.clone(),
+            provider_base_url: provider_base_url_from_params(
+                source_task
+                    .model_config_snapshot_json
+                    .get("paramsJson")
+                    .unwrap_or(&Value::Null),
+            )?,
             images: provider_images,
             prompt: PromptPayload {
                 system: source_task
@@ -1071,6 +1080,17 @@ async fn build_retry_generation_plan(
                 .unwrap_or_else(|| json!({})),
         },
     })
+}
+
+fn provider_base_url_from_params(params_json: &Value) -> AppResult<Option<String>> {
+    let Some(value) = params_json.get("providerBaseUrl") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    Ok(Some(normalize_openai_provider_base_url(value)?))
 }
 
 async fn list_generation_task_input_assets(
@@ -2104,7 +2124,7 @@ mod tests {
             &database,
             "task-calling",
             "openai",
-            "gpt-image-1",
+            "gpt-image-2",
             &json!({ "user": "prompt before crash" }),
         )
         .await
@@ -2113,7 +2133,7 @@ mod tests {
             &database,
             "task-succeeded",
             "openai",
-            "gpt-image-1",
+            "gpt-image-2",
             &json!({ "user": "already done" }),
         )
         .await
@@ -2186,16 +2206,16 @@ mod tests {
                 id: Some("task_1".to_string()),
                 combination_id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({
                     "provider": "openai",
-                    "modelId": "gpt-image-1",
+                    "modelId": "gpt-image-2",
                     "assetCount": 2,
                     "promptLength": 24
                 })),
                 input_snapshot_json: json!({"inputAssets": ["person_1", "garment_1"]}),
                 final_prompt_snapshot_json: json!({"user": "wear linen dress"}),
-                model_config_snapshot_json: json!({"modelId": "gpt-image-1", "outputCount": 1}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-2", "outputCount": 1}),
                 asset_snapshot_json: json!([
                     {"assetId": "person_1", "relativePath": "assets/person/person_1.png"},
                     {"assetId": "garment_1", "relativePath": "assets/garment/garment_1.png"}
@@ -2224,7 +2244,7 @@ mod tests {
 
         assert_eq!(task.status, "queued");
         assert_eq!(task.final_prompt_snapshot_json["user"], "wear linen dress");
-        assert_eq!(task.model_config_snapshot_json["modelId"], "gpt-image-1");
+        assert_eq!(task.model_config_snapshot_json["modelId"], "gpt-image-2");
 
         let input_refs: Vec<(String, String, i64)> = sqlx::query(
             "SELECT asset_id, role, is_primary
@@ -2260,7 +2280,7 @@ mod tests {
                 id: Some("task_unsafe".to_string()),
                 combination_id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({
                     "Authorization": "redacted",
                     "image": "data:image/png;base64,AAAA"
@@ -2314,11 +2334,11 @@ mod tests {
                 id: Some("task_second".to_string()),
                 combination_id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({"provider": "openai"})),
                 input_snapshot_json: json!({}),
                 final_prompt_snapshot_json: json!({"user": "prompt"}),
-                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-2"}),
                 asset_snapshot_json: json!([]),
                 input_assets: vec![],
                 output_count: 1,
@@ -2530,7 +2550,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -2577,7 +2597,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -2645,8 +2665,12 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
-                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                    model_id: "gpt-image-2".to_string(),
+                    params_json: json!({
+                        "outputCount": 1,
+                        "size": "1024x1024",
+                        "providerBaseUrl": "https://gateway.example.com/v1/"
+                    }),
                 }),
                 draft_garment_asset_ids: None,
                 revision: Some(7),
@@ -2657,7 +2681,11 @@ mod tests {
 
         assert_eq!(task.status, "succeeded");
         assert_eq!(task.final_prompt_snapshot_json["user"], "wear linen dress");
-        assert_eq!(task.model_config_snapshot_json["modelId"], "gpt-image-1");
+        assert_eq!(task.model_config_snapshot_json["modelId"], "gpt-image-2");
+        assert_eq!(
+            task.model_config_snapshot_json["paramsJson"]["providerBaseUrl"],
+            "https://gateway.example.com/v1"
+        );
 
         let result_refs: Vec<(String, Option<String>)> = sqlx::query(
             "SELECT r.asset_id, r.source_url
@@ -2769,7 +2797,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: Some(vec![extra_garment.asset.id.clone()]),
@@ -2823,7 +2851,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -2842,7 +2870,7 @@ mod tests {
         let log = &detail.execution_logs[0];
         assert_eq!(log.task_id, task.id);
         assert_eq!(log.provider, "openai");
-        assert_eq!(log.model_id, "gpt-image-1");
+        assert_eq!(log.model_id, "gpt-image-2");
         assert_eq!(log.prompt_json["user"], "wear linen dress");
         assert_eq!(
             log.success_response_json
@@ -2870,7 +2898,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -2888,7 +2916,7 @@ mod tests {
                 search: Some("look".to_string()),
                 status: Some("succeeded".to_string()),
                 provider: Some("openai".to_string()),
-                model_id: Some("gpt-image-1".to_string()),
+                model_id: Some("gpt-image-2".to_string()),
                 created_from: None,
                 created_to: None,
                 limit: Some(20),
@@ -2939,11 +2967,11 @@ mod tests {
                 id: Some("task_openai_history".to_string()),
                 combination_id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({"provider": "openai"})),
                 input_snapshot_json: json!({}),
                 final_prompt_snapshot_json: json!({"user": "openai prompt"}),
-                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-2"}),
                 asset_snapshot_json: json!([]),
                 input_assets: vec![],
                 output_count: 1,
@@ -2975,7 +3003,7 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total, 2);
         assert_eq!(page.providers, vec!["legacy-provider", "openai"]);
-        assert_eq!(page.model_ids, vec!["gpt-image-1", "legacy-model"]);
+        assert_eq!(page.model_ids, vec!["gpt-image-2", "legacy-model"]);
     }
 
     #[tokio::test]
@@ -2994,7 +3022,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3050,7 +3078,7 @@ mod tests {
         for (provider_code, expected_task_code) in cases {
             let err = provider_error_to_app_error(ProviderError::new(
                 "openai",
-                Some("gpt-image-1".to_string()),
+                Some("gpt-image-2".to_string()),
                 provider_code,
                 "provider failed",
             ));
@@ -3075,7 +3103,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3100,7 +3128,7 @@ mod tests {
         assert_eq!(detail.execution_logs.len(), 1);
         let log = &detail.execution_logs[0];
         assert_eq!(log.provider, "openai");
-        assert_eq!(log.model_id, "gpt-image-1");
+        assert_eq!(log.model_id, "gpt-image-2");
         assert_eq!(log.prompt_json["user"], "wear linen dress");
         assert!(log.success_response_json.is_none());
         let error_response = log.error_response_json.as_ref().expect("error response");
@@ -3124,7 +3152,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3183,6 +3211,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_generation_task_rejects_invalid_provider_base_url_snapshot() {
+        let (_temp_dir, paths, database) = test_workspace().await;
+        let combination_id = seed_generation_inputs(&database, &paths).await;
+        let original = run_generation_flow_with_task_id(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            StartGenerationRequest {
+                combination_id,
+                draft_prompt_binding: None,
+                draft_model_config: Some(SaveModelConfigRequest {
+                    id: None,
+                    provider: "openai".to_string(),
+                    model_id: "gpt-image-2".to_string(),
+                    params_json: json!({"outputCount": 1, "size": "1024x1024"}),
+                }),
+                draft_garment_asset_ids: None,
+                revision: Some(7),
+            },
+            Some("task_retry_invalid_base_url_source".to_string()),
+        )
+        .await
+        .expect("original generation");
+        sqlx::query("UPDATE generation_tasks SET model_config_snapshot_json = ? WHERE id = ?")
+            .bind(
+                json!({
+                    "provider": "openai",
+                    "modelId": "gpt-image-2",
+                    "advanced": false,
+                    "paramsJson": {
+                        "outputCount": 1,
+                        "size": "1024x1024",
+                        "providerBaseUrl": "http://localhost:8080/v1"
+                    },
+                    "normalizedOutputCount": 1
+                })
+                .to_string(),
+            )
+            .bind(&original.id)
+            .execute(database.pool())
+            .await
+            .expect("poison retry snapshot");
+
+        let result = retry_generation_task_with_provider(
+            &database,
+            &paths,
+            &StaticProvider,
+            "placeholder-api-key",
+            &original.id,
+            Some("task_retry_invalid_base_url_new".to_string()),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::ModelConfigInvalid(_))));
+    }
+
+    #[tokio::test]
     async fn retry_generation_task_rejects_missing_input_file() {
         let (_temp_dir, paths, database) = test_workspace().await;
         let combination_id = seed_generation_inputs(&database, &paths).await;
@@ -3197,7 +3285,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3256,7 +3344,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3322,7 +3410,7 @@ mod tests {
                 draft_model_config: Some(SaveModelConfigRequest {
                     id: None,
                     provider: "openai".to_string(),
-                    model_id: "gpt-image-1".to_string(),
+                    model_id: "gpt-image-2".to_string(),
                     params_json: json!({"outputCount": 1, "size": "1024x1024"}),
                 }),
                 draft_garment_asset_ids: None,
@@ -3364,7 +3452,7 @@ mod tests {
             SaveModelConfigRequest {
                 id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 params_json: json!({"outputCount": 1, "size": "1024x1024"}),
             },
             Some("task_rerun_current".to_string()),
@@ -3426,7 +3514,7 @@ mod tests {
             SaveModelConfigRequest {
                 id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 params_json: json!({"outputCount": 1, "size": "1024x1024"}),
             },
             Some("task_rerun_cancelled".to_string()),
@@ -3596,6 +3684,13 @@ mod tests {
         > {
             Box::pin(async move {
                 assert_eq!(input.prompt.user, "wear linen dress");
+                if let Some(expected_base_url) =
+                    input.params.get("providerBaseUrl").and_then(Value::as_str)
+                {
+                    assert_eq!(input.provider_base_url.as_deref(), Some(expected_base_url));
+                } else {
+                    assert!(input.provider_base_url.is_none());
+                }
                 Ok(GenerateResult {
                     provider: "openai".to_string(),
                     model_id: input.model_id,
@@ -3793,11 +3888,11 @@ mod tests {
                 id: Some(id.to_string()),
                 combination_id: None,
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({"provider": "openai"})),
                 input_snapshot_json: json!({}),
                 final_prompt_snapshot_json: json!({"user": "prompt"}),
-                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-2"}),
                 asset_snapshot_json: json!([]),
                 input_assets: vec![],
                 output_count: 1,
@@ -3818,11 +3913,11 @@ mod tests {
                 id: Some(id.to_string()),
                 combination_id: combination_id.map(str::to_string),
                 provider: "openai".to_string(),
-                model_id: "gpt-image-1".to_string(),
+                model_id: "gpt-image-2".to_string(),
                 request_summary_json: Some(json!({"provider": "openai"})),
                 input_snapshot_json: json!({}),
                 final_prompt_snapshot_json: json!({"user": "prompt"}),
-                model_config_snapshot_json: json!({"modelId": "gpt-image-1"}),
+                model_config_snapshot_json: json!({"modelId": "gpt-image-2"}),
                 asset_snapshot_json: json!([]),
                 input_assets: vec![],
                 output_count: 1,

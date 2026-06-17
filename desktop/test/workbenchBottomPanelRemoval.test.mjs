@@ -49,6 +49,7 @@ test("workbench side panels are floating overlays instead of resizable columns",
   assert.match(globalCssSource, /\.floating-panel-slot\b/);
   assert.match(globalCssSource, /--floating-panel-toolbar-offset:\s*48px/);
   assert.match(globalCssSource, /--canvas-control-safe-right:\s*calc\(var\(--inspector-column-width\) \+ var\(--floating-panel-gap\) \* 2\)/);
+  assert.match(globalCssSource, /--canvas-control-safe-bottom:\s*calc\(var\(--floating-panel-gap\) \+ 44px\)/);
   assert.match(
     globalCssSource,
     /top:\s*calc\(var\(--floating-panel-gap\) \+ var\(--floating-panel-toolbar-offset\)\)/,
@@ -56,6 +57,10 @@ test("workbench side panels are floating overlays instead of resizable columns",
   assert.match(
     globalCssSource,
     /\.flow-minimap\.react-flow__panel\.right\s*\{[\s\S]*?right:\s*var\(--canvas-control-safe-right\)/,
+  );
+  assert.match(
+    globalCssSource,
+    /\.flow-minimap\.react-flow__panel\.right\s*\{[\s\S]*?bottom:\s*var\(--canvas-control-safe-bottom\)/,
   );
   assert.match(globalCssSource, /\.flow-context\s*\{[\s\S]*?margin-left:\s*auto/);
   assert.match(globalCssSource, /\.canvas-toolbar\s*\{[\s\S]*?z-index:\s*20/);

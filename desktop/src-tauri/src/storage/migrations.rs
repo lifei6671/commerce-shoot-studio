@@ -1,18 +1,99 @@
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
+use std::time::SystemTime;
+
 use crate::error::AppResult;
 use crate::storage::file_store::WorkspacePaths;
 use crate::storage::sqlite::WorkspaceDatabase;
+
+const MIGRATION_BACKUP_RETENTION_COUNT: usize = 5;
+const MIGRATION_BACKUP_PREFIX: &str = "workspace-migration-";
+const MIGRATION_BACKUP_SUFFIX: &str = ".db";
+static WORKSPACE_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub async fn run_workspace_migrations(
     paths: &WorkspacePaths,
     database: &WorkspaceDatabase,
 ) -> AppResult<()> {
-    paths.backup_database_before_migration()?;
-    sqlx::migrate!("./migrations").run(database.pool()).await?;
+    if should_backup_before_migration(database, &WORKSPACE_MIGRATOR).await? {
+        paths.backup_database_before_migration(database).await?;
+        prune_migration_backups(paths, MIGRATION_BACKUP_RETENTION_COUNT)?;
+    }
+    WORKSPACE_MIGRATOR.run(database.pool()).await?;
+    Ok(())
+}
+
+async fn should_backup_before_migration(
+    database: &WorkspaceDatabase,
+    migrator: &sqlx::migrate::Migrator,
+) -> AppResult<bool> {
+    let migrations_table_exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(database.pool())
+    .await?;
+    if migrations_table_exists.is_none() {
+        return database_has_user_schema(database).await;
+    }
+
+    let applied_versions: HashSet<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(database.pool())
+            .await?
+            .into_iter()
+            .collect();
+    Ok(migrator
+        .iter()
+        .any(|migration| !applied_versions.contains(&migration.version)))
+}
+
+async fn database_has_user_schema(database: &WorkspaceDatabase) -> AppResult<bool> {
+    let table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'table' \
+           AND name NOT LIKE 'sqlite_%' \
+           AND name != '_sqlx_migrations'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    Ok(table_count > 0)
+}
+
+fn prune_migration_backups(paths: &WorkspacePaths, retention_count: usize) -> AppResult<()> {
+    let backups_dir = paths.backups_dir();
+    if !backups_dir.exists() {
+        return Ok(());
+    }
+    let mut backups: Vec<(PathBuf, SystemTime)> = fs::read_dir(backups_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|file_name| {
+                        file_name.starts_with(MIGRATION_BACKUP_PREFIX)
+                            && file_name.ends_with(MIGRATION_BACKUP_SUFFIX)
+                    })
+        })
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+    backups.sort_by(|(_, left), (_, right)| right.cmp(left));
+    for (path, _) in backups.into_iter().skip(retention_count) {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use sqlx::Row;
 
     use super::*;
@@ -123,7 +204,35 @@ CREATE TABLE IF NOT EXISTS generation_task_results (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (task_id, sort_order)
 );
-"#;
+    "#;
+
+    #[tokio::test]
+    async fn run_workspace_migrations_skips_backup_when_schema_is_current() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let paths = WorkspacePaths::new(temp_dir.path().to_path_buf());
+        paths.ensure().expect("ensure workspace");
+        let database = WorkspaceDatabase::connect(&paths.database_path())
+            .await
+            .expect("connect database");
+
+        run_workspace_migrations(&paths, &database)
+            .await
+            .expect("initial migration");
+        for entry in fs::read_dir(paths.backups_dir()).expect("backups dir") {
+            fs::remove_file(entry.expect("backup entry").path()).expect("remove initial backup");
+        }
+
+        run_workspace_migrations(&paths, &database)
+            .await
+            .expect("current migration check");
+
+        assert_eq!(
+            fs::read_dir(paths.backups_dir())
+                .expect("backups dir")
+                .count(),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn migrates_database_that_already_applied_legacy_init() {
@@ -177,6 +286,18 @@ CREATE TABLE IF NOT EXISTS generation_task_results (
         run_workspace_migrations(&paths, &database)
             .await
             .expect("migrate legacy database");
+
+        let migration_backup_count = fs::read_dir(paths.backups_dir())
+            .expect("backups dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|file_name| file_name.starts_with(MIGRATION_BACKUP_PREFIX))
+            })
+            .count();
+        assert_eq!(migration_backup_count, 1);
 
         assert!(table_has_column(&database, "generation_tasks", "provider").await);
         assert!(table_has_column(&database, "generation_tasks", "input_snapshot_json").await);

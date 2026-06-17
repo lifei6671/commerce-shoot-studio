@@ -11,7 +11,8 @@ use crate::providers::provider_trait::{
     ProviderError, ProviderErrorCode,
 };
 
-const OPENAI_IMAGES_EDITS_URL: &str = "https://api.openai.com/v1/images/edits";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_IMAGES_EDITS_PATH: &str = "images/edits";
 const OPENAI_PROVIDER: &str = "openai";
 const DEFAULT_OPENAI_REQUEST_TIMEOUT_SECONDS: u64 = 120;
 const MIN_OPENAI_REQUEST_TIMEOUT_SECONDS: u64 = 30;
@@ -97,7 +98,7 @@ impl OpenAiImageProvider {
 
         let response = self
             .client
-            .post(OPENAI_IMAGES_EDITS_URL)
+            .post(openai_images_edits_url(input.provider_base_url.as_deref()))
             .bearer_auth(api_key)
             .multipart(form)
             .timeout(openai_request_timeout(&input.params))
@@ -168,7 +169,7 @@ impl OpenAiImageProvider {
         }
         if !matches!(
             input.model_id.as_str(),
-            "gpt-image-1" | "gpt-image-1-mini" | "gpt-image-1.5"
+            "gpt-image-2" | "gpt-image-1" | "gpt-image-1-mini" | "gpt-image-1.5"
         ) {
             return Err(ProviderError::new(
                 OPENAI_PROVIDER,
@@ -329,6 +330,18 @@ fn decode_openai_images(
     Ok(images)
 }
 
+fn openai_images_edits_url(provider_base_url: Option<&str>) -> String {
+    let base_url = provider_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(OPENAI_BASE_URL);
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        OPENAI_IMAGES_EDITS_PATH
+    )
+}
+
 fn map_request_error(model_id: &str, err: reqwest::Error) -> ProviderError {
     let code = if err.is_timeout() {
         ProviderErrorCode::RequestTimeout
@@ -415,6 +428,22 @@ mod tests {
     }
 
     #[test]
+    fn openai_request_url_uses_custom_base_url_when_configured() {
+        assert_eq!(
+            openai_images_edits_url(Some("https://gateway.example.com/v1")),
+            "https://gateway.example.com/v1/images/edits"
+        );
+        assert_eq!(
+            openai_images_edits_url(Some("https://gateway.example.com/v1/")),
+            "https://gateway.example.com/v1/images/edits"
+        );
+        assert_eq!(
+            openai_images_edits_url(None),
+            "https://api.openai.com/v1/images/edits"
+        );
+    }
+
+    #[test]
     fn visible_openai_model_definitions_are_supported_by_adapter() {
         for definition in crate::services::model_validator::list_model_definitions(false)
             .into_iter()
@@ -425,6 +454,7 @@ mod tests {
                     task_id: "task_visible_model".to_string(),
                     provider: OPENAI_PROVIDER.to_string(),
                     model_id: definition.model_id.clone(),
+                    provider_base_url: None,
                     images: Vec::new(),
                     prompt: PromptPayload {
                         system: None,

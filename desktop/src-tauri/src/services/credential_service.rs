@@ -116,9 +116,14 @@ fn validate_fixed_provider(provider: &str) -> AppResult<()> {
 }
 
 fn mask_api_key(api_key: &str) -> String {
-    let chars: Vec<char> = api_key.chars().collect();
+    let trimmed = api_key.trim();
+    let (visible_prefix, secret_body) = trimmed
+        .strip_prefix("sk-")
+        .map(|body| ("sk-", body))
+        .unwrap_or(("", trimmed));
+    let chars: Vec<char> = secret_body.chars().collect();
     if chars.len() <= 8 {
-        return "****".to_string();
+        return format!("{visible_prefix}****");
     }
     let prefix: String = chars.iter().take(4).collect();
     let suffix: String = chars
@@ -129,7 +134,7 @@ fn mask_api_key(api_key: &str) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("{prefix}...{suffix}")
+    format!("{visible_prefix}{prefix}****{suffix}")
 }
 
 #[cfg(target_os = "macos")]
@@ -199,7 +204,8 @@ mod tests {
 
     #[test]
     fn mask_api_key_keeps_only_edges() {
-        assert_eq!(mask_api_key("placeholder-api-key-value"), "plac...alue");
+        assert_eq!(mask_api_key("sk-ABCDEFGH12345678"), "sk-ABCD****5678");
+        assert_eq!(mask_api_key("placeholder-api-key-value"), "plac****alue");
         assert_eq!(mask_api_key("short"), "****");
     }
 

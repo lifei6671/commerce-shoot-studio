@@ -1222,18 +1222,34 @@ button {
 .task-history-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0;
+  gap: 10px;
+  padding: 12px;
   border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
 }
 
 .task-history-stat {
   min-width: 0;
-  padding: 10px 16px;
-  border-right: 1px solid #e2e8f0;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68);
 }
 
-.task-history-stat:last-child {
-  border-right: 0;
+.task-history-stat.is-total {
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+}
+
+.task-history-stat.is-succeeded {
+  background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+}
+
+.task-history-stat.is-failed {
+  background: linear-gradient(135deg, #fff1f2, #ffe4e6);
+}
+
+.task-history-stat.is-cancelled {
+  background: linear-gradient(135deg, #fffbeb, #fef3c7);
 }
 
 .task-history-stat span {
@@ -1754,7 +1770,7 @@ button {
 .model-table__head,
 .model-table button {
   display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) minmax(190px, 1.4fr) 80px 72px;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(64px, 0.5fr) 48px;
   align-items: center;
   gap: 10px;
   padding: 0 10px;
@@ -1772,10 +1788,19 @@ button {
 .model-table button {
   width: 100%;
   min-height: 40px;
+  justify-items: stretch;
   color: #334155;
   border-bottom: 1px solid #edf2f7;
   text-align: left;
   font-size: 12px;
+}
+
+.model-table__head > span,
+.model-table button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-table button:last-child {
@@ -1790,6 +1815,7 @@ button {
   color: #111827;
   font-size: 13px;
   font-weight: 750;
+  white-space: nowrap;
 }
 
 .model-table em,
@@ -4022,6 +4048,7 @@ button {
   --floating-panel-gap: 16px;
   --floating-panel-toolbar-offset: 48px;
   --canvas-control-safe-right: calc(var(--inspector-column-width) + var(--floating-panel-gap) * 2);
+  --canvas-control-safe-bottom: calc(var(--floating-panel-gap) + 44px);
   min-height: 0;
   display: block;
 }
@@ -4323,11 +4350,11 @@ button {
 .asset-thumb.is-sortable {
   cursor: grab;
   touch-action: none;
+  will-change: transform;
   transition:
     border-color 160ms ease,
     box-shadow 160ms ease,
-    opacity 160ms ease,
-    transform 160ms ease;
+    opacity 120ms ease;
 }
 
 .asset-thumb.is-sortable:active {
@@ -4335,14 +4362,26 @@ button {
 }
 
 .asset-thumb.is-dragging {
-  opacity: 0.56;
-  transform: scale(0.96);
+  z-index: 3;
+  opacity: 0.86;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.18);
 }
 
 .asset-thumb.is-drag-over {
   border-color: #2563eb;
   border-style: dashed;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.14),
+    inset 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.asset-thumb.is-drag-over::after {
+  position: absolute;
+  inset: 5px;
+  border: 1px solid rgba(37, 99, 235, 0.34);
+  border-radius: 4px;
+  content: "";
+  pointer-events: none;
 }
 
 .asset-thumb__image,
@@ -5544,7 +5583,7 @@ button {
 .flow-minimap.react-flow__panel.right {
   position: absolute;
   right: var(--canvas-control-safe-right);
-  bottom: 22px;
+  bottom: var(--canvas-control-safe-bottom);
   width: 150px;
   height: 76px;
   padding: 0;

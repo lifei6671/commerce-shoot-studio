@@ -23,7 +23,7 @@ async fn credential_service_masks_key_without_exposing_secret() {
         .expect("status");
     assert!(status.configured);
     assert_eq!(status.provider, "openai");
-    assert_eq!(status.masked_key.as_deref(), Some("plac...alue"));
+    assert_eq!(status.masked_key.as_deref(), Some("plac****alue"));
 
     let api_key = service
         .read_provider_api_key("openai")
@@ -58,6 +58,7 @@ async fn openai_provider_rejects_unsupported_model_without_http_call() {
         task_id: "task_1".to_string(),
         provider: "openai".to_string(),
         model_id: "custom-model".to_string(),
+        provider_base_url: None,
         images: vec![GenerateInputImage {
             asset_id: "person_1".to_string(),
             role: "person".to_string(),

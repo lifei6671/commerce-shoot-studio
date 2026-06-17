@@ -12,6 +12,7 @@ pub struct GenerateInput {
     pub task_id: String,
     pub provider: String,
     pub model_id: String,
+    pub provider_base_url: Option<String>,
     pub images: Vec<GenerateInputImage>,
     pub prompt: PromptPayload,
     pub params: Value,

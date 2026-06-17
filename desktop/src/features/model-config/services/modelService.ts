@@ -31,6 +31,10 @@ export async function setProviderApiKey(
   return invoke<void>("set_provider_api_key", { provider, apiKey });
 }
 
+export async function getProviderApiKey(provider: string): Promise<string> {
+  return invoke<string>("get_provider_api_key", { provider });
+}
+
 export async function getProviderCredentialStatus(
   provider: string,
 ): Promise<ProviderCredentialStatus> {
