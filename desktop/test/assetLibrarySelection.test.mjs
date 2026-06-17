@@ -118,13 +118,21 @@ test("dragging asset thumb follows pointer without an extra overlay preview", ()
 });
 
 test("new combination asset picker keeps selected thumbnail sizing stable", () => {
+  const modalGridRule = globalCssSource.match(/^\.modal-resource-grid\s*\{(?<body>[^}]*)\}/m)?.groups?.body ?? "";
   const modalThumbRule = globalCssSource.match(/^\.modal-resource-grid button\s*\{(?<body>[^}]*)\}/m)?.groups?.body ?? "";
   const modalSelectedRule =
     globalCssSource.match(/^\.modal-resource-grid button\.is-selected\s*\{(?<body>[^}]*)\}/m)?.groups?.body ?? "";
+  assert.notEqual(modalGridRule, "");
   assert.notEqual(modalThumbRule, "");
   assert.notEqual(modalSelectedRule, "");
 
+  assert.match(modalGridRule, /grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(64px,\s*72px\)\)/);
+  assert.match(modalGridRule, /justify-content:\s*start/);
   assert.match(modalThumbRule, /border:\s*2px solid #e1e7f0/);
+  assert.match(modalThumbRule, /height:\s*auto/);
+  assert.match(modalThumbRule, /min-height:\s*0/);
+  assert.match(modalThumbRule, /padding:\s*0/);
+  assert.match(modalThumbRule, /aspect-ratio:\s*3\s*\/\s*4/);
   assert.match(modalSelectedRule, /border-color:\s*#2563eb/);
   assert.doesNotMatch(modalSelectedRule, /border:\s*2px solid #2563eb/);
 });

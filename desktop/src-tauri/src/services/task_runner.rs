@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use std::time::Duration;
 
+use chrono::Local;
 use image::GenericImageView;
 use serde_json::json;
 use serde_json::Value;
@@ -58,6 +59,14 @@ struct GenerationPlan {
 
 pub type GenerationTaskObserver<'a> = &'a (dyn Fn(LocalGenerationTask) + Send + Sync + 'a);
 pub type GenerationTaskCancellationChecker<'a> = &'a (dyn Fn() -> bool + Send + Sync + 'a);
+
+pub fn generate_generation_task_id() -> String {
+    format!(
+        "generation_task_{}_{}",
+        Local::now().format("%Y%m%d%H%M"),
+        Ulid::new()
+    )
+}
 
 #[derive(Clone)]
 struct NormalizedHistoryQuery {
@@ -391,7 +400,7 @@ pub async fn create_generation_task_snapshot(
     let id = request
         .id
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("generation_task_{}", Ulid::new()));
+        .unwrap_or_else(generate_generation_task_id);
 
     let mut writer = database.writer().await;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
@@ -900,6 +909,7 @@ async fn build_generation_plan(
                     "assetId": asset.asset.id,
                     "role": asset.role.as_str(),
                     "relativePath": asset.asset.relative_path,
+                    "thumbRelativePath": asset.asset.thumb_relative_path,
                     "mimeType": asset.asset.mime_type,
                     "width": asset.asset.width,
                     "height": asset.asset.height,
@@ -2096,6 +2106,20 @@ mod tests {
     use crate::storage::file_store::WorkspacePaths;
     use crate::storage::migrations::run_workspace_migrations;
 
+    #[test]
+    fn generation_task_id_includes_minute_timestamp_and_ulid() {
+        let id = generate_generation_task_id();
+        let body = id
+            .strip_prefix("generation_task_")
+            .expect("generation task prefix");
+        let (timestamp, ulid) = body.split_once('_').expect("timestamp and ulid");
+
+        assert_eq!(timestamp.len(), 12);
+        assert!(timestamp.chars().all(|value| value.is_ascii_digit()));
+        assert_eq!(ulid.len(), 26);
+        assert!(Ulid::from_string(ulid).is_ok());
+    }
+
     #[tokio::test]
     async fn recover_interrupted_tasks_fails_running_task_and_closes_execution_log() {
         let (_temp_dir, database) = test_database().await;
@@ -2880,6 +2904,11 @@ mod tests {
         );
         assert!(log.error_response_json.is_none());
         assert!(log.finished_at.is_some());
+        let thumb_relative_path = detail.task.asset_snapshot_json[0]["thumbRelativePath"]
+            .as_str()
+            .expect("thumb relative path");
+        assert!(thumb_relative_path.starts_with("assets/cache/thumbs/"));
+        assert!(thumb_relative_path.ends_with(".jpg"));
     }
 
     #[tokio::test]

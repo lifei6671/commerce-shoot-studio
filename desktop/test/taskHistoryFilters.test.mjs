@@ -17,6 +17,10 @@ const globalCssSource = readFileSync(
   new URL("../src/shared/styles/global.css", import.meta.url),
   "utf8",
 );
+const taskHistoryPreviewSource = readFileSync(
+  new URL("../src/features/workflow/components/taskHistoryPreviewSources.ts", import.meta.url),
+  "utf8",
+);
 
 test("task history provider options include catalog providers beyond the current page", () => {
   const options = buildTaskHistoryProviderOptions(
@@ -175,6 +179,43 @@ test("task history detail displays immutable task snapshots", () => {
   assert.match(workflowCanvasSource, /selectedDetail\.task\.finalPromptSnapshotJson/);
   assert.match(workflowCanvasSource, /<h4>模型参数<\/h4>/);
   assert.match(workflowCanvasSource, /selectedDetail\.task\.modelConfigSnapshotJson/);
+});
+
+test("task history previews use real result or input asset images", () => {
+  assert.match(workflowCanvasSource, /collectTaskHistoryInputAssetIds/);
+  assert.match(workflowCanvasSource, /getTaskHistoryCoverImageSrc\(/);
+  assert.match(workflowCanvasSource, /buildTaskHistoryDetailPreviews\(/);
+  assert.match(workflowCanvasSource, /const \[historyAssetViews, setHistoryAssetViews\]/);
+  assert.match(taskHistoryPreviewSource, /thumbDataUrl/);
+  assert.doesNotMatch(workflowCanvasSource, /const \[previewAssets, setPreviewAssets\]/);
+});
+
+test("task history detail actions are styled as visible buttons", () => {
+  assert.match(globalCssSource, /\.task-history-detail-actions button\s*\{[\s\S]*?height:\s*38px/);
+  assert.match(globalCssSource, /\.task-history-detail-actions button\s*\{[\s\S]*?border:\s*1px solid #d8e0ec/);
+  assert.match(globalCssSource, /\.task-history-detail-actions button\s*\{[\s\S]*?background:\s*#ffffff/);
+  assert.match(globalCssSource, /\.task-history-detail-actions button:not\(:disabled\):hover\s*\{/);
+  assert.match(globalCssSource, /\.task-history-detail-actions button:disabled\s*\{/);
+});
+
+test("task history pagination typography matches table rows", () => {
+  const rowRule = globalCssSource.match(/^\.task-history-row\s*\{(?<body>[^}]*)\}/m)?.groups
+    ?.body;
+  const paginationRule = globalCssSource.match(
+    /^\.task-history-pagination\s*\{(?<body>[^}]*)\}/m,
+  )?.groups?.body;
+  const paginationTextRule = globalCssSource.match(
+    /^\.task-history-pagination span,\n\.task-history-pagination strong\s*\{(?<body>[^}]*)\}/m,
+  )?.groups?.body;
+
+  assert.ok(rowRule);
+  assert.ok(paginationRule);
+  assert.ok(paginationTextRule);
+  assert.match(rowRule, /font-size:\s*11px/);
+  assert.match(paginationRule, /font-size:\s*11px/);
+  assert.match(paginationRule, /line-height:\s*1/);
+  assert.match(paginationTextRule, /font-size:\s*11px/);
+  assert.match(paginationTextRule, /line-height:\s*1/);
 });
 
 test("task events combine realtime updates with startup polling fallback", () => {

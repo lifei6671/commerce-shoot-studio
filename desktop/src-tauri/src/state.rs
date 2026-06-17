@@ -7,8 +7,6 @@ use std::sync::{
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
-use ulid::Ulid;
-
 use crate::domain::model::SaveModelConfigRequest;
 use crate::domain::task::{
     CreateGenerationTaskSnapshotRequest, LocalGenerationTask, StartGenerationRequest,
@@ -22,9 +20,9 @@ use crate::services::system_settings::{
     run_system_maintenance,
 };
 use crate::services::task_runner::{
-    cancel_generation_task_by_id, create_generation_task_snapshot, get_generation_task_by_id,
-    recover_interrupted_tasks, rerun_generation_from_current_combination_with_provider,
-    retry_generation_task_with_provider,
+    cancel_generation_task_by_id, create_generation_task_snapshot, generate_generation_task_id,
+    get_generation_task_by_id, recover_interrupted_tasks,
+    rerun_generation_from_current_combination_with_provider, retry_generation_task_with_provider,
     run_generation_flow_with_task_id_observer_and_cancellation, GenerationTaskObserver,
 };
 use crate::storage::file_store::WorkspacePaths;
@@ -203,7 +201,7 @@ impl AppState {
         let api_key = ProviderCredentialService::system()
             .read_provider_api_key(&source_task.provider)
             .await?;
-        let task_id = format!("generation_task_{}", Ulid::new());
+        let task_id = generate_generation_task_id();
         let cancellation_token = CancellationToken::new();
         {
             let mut active_task = self.generation_task_runtime.running_task.lock().await;
@@ -270,7 +268,7 @@ impl AppState {
         let api_key = ProviderCredentialService::system()
             .read_provider_api_key(&model_config.provider)
             .await?;
-        let task_id = format!("generation_task_{}", Ulid::new());
+        let task_id = generate_generation_task_id();
         let cancellation_token = CancellationToken::new();
         {
             let mut active_task = self.generation_task_runtime.running_task.lock().await;
@@ -308,7 +306,7 @@ impl AppState {
             return Err(AppError::TaskAlreadyRunning(task_id));
         }
 
-        let task_id = format!("generation_task_{}", Ulid::new());
+        let task_id = generate_generation_task_id();
         let provider = request
             .draft_model_config
             .as_ref()

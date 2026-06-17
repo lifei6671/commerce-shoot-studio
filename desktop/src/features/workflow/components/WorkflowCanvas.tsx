@@ -263,6 +263,12 @@ import {
 } from "./combinationSummaries";
 import { buildAssetImageSources } from "./assetImageSource";
 import {
+  buildTaskHistoryDetailPreviews,
+  collectTaskHistoryInputAssetIds,
+  getTaskHistoryCoverImageSrc,
+  type TaskHistoryAssetLookup,
+} from "./taskHistoryPreviewSources";
+import {
   DEFAULT_PROMPT_WORKBENCH_STATE,
   buildOutputPlanPreviewClipboardText,
   buildPromptBindingFromWorkbench,
@@ -2444,6 +2450,7 @@ export function WorkflowCanvas() {
                 currentCombinationId={currentCombination?.id ?? null}
                 modelConfig={modelConfig}
                 modelDefinitions={modelDefinitions}
+                workspaceRoot={systemSettingsView.currentWorkspaceRoot}
                 onNotifyError={(message) => {
                   setActionMessage(null);
                   setActionError(message);
@@ -4502,12 +4509,14 @@ function TaskHistorySettingsPage({
   currentCombinationId,
   modelConfig,
   modelDefinitions,
+  workspaceRoot,
   onNotifyError,
   onNotifyMessage,
 }: {
   currentCombinationId: string | null;
   modelConfig: SaveModelConfigRequest;
   modelDefinitions: ModelDefinition[];
+  workspaceRoot: string;
   onNotifyError: (message: string) => void;
   onNotifyMessage: (message: string) => void;
 }) {
@@ -4526,7 +4535,7 @@ function TaskHistorySettingsPage({
   const [openFilterMenu, setOpenFilterMenu] = useState<TaskHistoryFilterKey | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [previewAssets, setPreviewAssets] = useState<AssetFileView[]>([]);
+  const [historyAssetViews, setHistoryAssetViews] = useState<TaskHistoryAssetLookup>({});
   const [isRerunning, setIsRerunning] = useState(false);
   const selectedDetail =
     historyPage?.items.find((detail) => detail.task.id === selectedTaskId) ??
@@ -4622,36 +4631,37 @@ function TaskHistorySettingsPage({
 
   useEffect(() => {
     if (!isTauriRuntime()) {
-      setPreviewAssets([]);
+      setHistoryAssetViews({});
       return;
     }
-    const snapshot = selectedDetail?.task.inputSnapshotJson ?? {};
-    const assetIds = [
-      typeof snapshot.personAssetId === "string" ? snapshot.personAssetId : null,
-      ...(Array.isArray(snapshot.garmentAssetIds)
-        ? snapshot.garmentAssetIds.filter((value): value is string => typeof value === "string")
-        : []),
-    ].filter((value): value is string => Boolean(value));
+    const assetIds = Array.from(
+      new Set((historyPage?.items ?? []).flatMap(collectTaskHistoryInputAssetIds)),
+    );
     if (!assetIds.length) {
-      setPreviewAssets([]);
+      setHistoryAssetViews({});
       return;
     }
     let alive = true;
-    Promise.all(assetIds.map((assetId) => getAsset(assetId)))
-      .then((assets) => {
-        if (alive) {
-          setPreviewAssets(assets.filter((asset): asset is AssetFileView => Boolean(asset)));
+    Promise.all(assetIds.map(async (assetId) => [assetId, await getAsset(assetId)] as const))
+      .then((entries) => {
+        if (!alive) {
+          return;
         }
+        setHistoryAssetViews(
+          Object.fromEntries(
+            entries.filter((entry): entry is readonly [string, AssetFileView] => Boolean(entry[1])),
+          ),
+        );
       })
       .catch(() => {
         if (alive) {
-          setPreviewAssets([]);
+          setHistoryAssetViews({});
         }
       });
     return () => {
       alive = false;
     };
-  }, [selectedDetail]);
+  }, [historyPage?.items]);
 
   function runTaskHistorySearch() {
     setOpenFilterMenu(null);
@@ -4892,42 +4902,48 @@ function TaskHistorySettingsPage({
               <span>创建时间</span>
               <span>操作</span>
             </div>
-            {(historyPage?.items ?? []).map((detail) => (
-              <button
-                className={`task-history-row${selectedDetail?.task.id === detail.task.id ? " is-selected" : ""}`}
-                key={detail.task.id}
-                onClick={() => setSelectedTaskId(detail.task.id)}
-                type="button"
-              >
-                <span className="task-history-thumb-strip">
-                  {detail.results.slice(0, 3).map((result) => (
-                    <img
-                      alt="任务结果缩略图"
-                      key={result.assetId}
-                      src={convertFileSrc(result.thumbFilePath)}
-                    />
-                  ))}
-                  {!detail.results.length ? (
-                    <i>
-                      <ImageIcon size={15} />
-                    </i>
-                  ) : null}
-                </span>
-                <span>{getTaskCombinationName(detail)}</span>
-                <span>{detail.task.provider} / {detail.task.modelId}</span>
-                <span>
-                  <Badge className={`task-status-badge is-${detail.task.status}`}>
-                    {getGenerationTaskStatusLabel(detail.task.status)}
-                  </Badge>
-                </span>
-                <span>{formatTaskDuration(detail.task.startedAt, detail.task.finishedAt)}</span>
-                <span>{detail.task.errorCode ?? detail.task.errorMessage ?? "--"}</span>
-                <span>{formatTaskTime(detail.task.createdAt)}</span>
-                <span className="task-history-actions">
-                  {detail.task.status === "succeeded" ? "查看结果" : "查看详情"}
-                </span>
-              </button>
-            ))}
+            {(historyPage?.items ?? []).map((detail) => {
+              const coverSrc = getTaskHistoryCoverImageSrc(
+                detail,
+                historyAssetViews,
+                convertFileSrc,
+                workspaceRoot,
+              );
+              return (
+                <button
+                  className={`task-history-row${selectedDetail?.task.id === detail.task.id ? " is-selected" : ""}`}
+                  key={detail.task.id}
+                  onClick={() => setSelectedTaskId(detail.task.id)}
+                  type="button"
+                >
+                  <span className="task-history-thumb-strip">
+                    {coverSrc ? (
+                      <img
+                        alt={detail.results.length ? "任务结果缩略图" : "任务输入缩略图"}
+                        src={coverSrc}
+                      />
+                    ) : (
+                      <i>
+                        <ImageIcon size={15} />
+                      </i>
+                    )}
+                  </span>
+                  <span>{getTaskCombinationName(detail)}</span>
+                  <span>{detail.task.provider} / {detail.task.modelId}</span>
+                  <span>
+                    <Badge className={`task-status-badge is-${detail.task.status}`}>
+                      {getGenerationTaskStatusLabel(detail.task.status)}
+                    </Badge>
+                  </span>
+                  <span>{formatTaskDuration(detail.task.startedAt, detail.task.finishedAt)}</span>
+                  <span>{detail.task.errorCode ?? detail.task.errorMessage ?? "--"}</span>
+                  <span>{formatTaskTime(detail.task.createdAt)}</span>
+                  <span className="task-history-actions">
+                    {detail.task.status === "succeeded" ? "查看结果" : "查看详情"}
+                  </span>
+                </button>
+              );
+            })}
             {!historyPage?.items.length ? (
               <div className="task-history-empty">{isLoading ? "加载中" : "暂无任务历史"}</div>
             ) : null}
@@ -4971,21 +4987,18 @@ function TaskHistorySettingsPage({
               </dl>
               <h4>预览</h4>
               <div className="task-history-preview-grid">
-                {previewAssets.slice(0, 3).map((asset) => (
+                {buildTaskHistoryDetailPreviews(
+                  selectedDetail,
+                  historyAssetViews,
+                  convertFileSrc,
+                  workspaceRoot,
+                ).map((preview, index) => (
                   <TaskHistoryPreview
-                    key={asset.asset.id}
-                    label={asset.asset.assetType === "person" ? "人物图" : "服装图"}
-                    src={convertFileSrc(asset.thumbFilePath)}
+                    key={`${preview.role}-${preview.assetId}-${index}`}
+                    label={preview.label}
+                    src={preview.src}
                   />
                 ))}
-                {selectedDetail.results[0] ? (
-                  <TaskHistoryPreview
-                    label="结果图"
-                    src={convertFileSrc(selectedDetail.results[0].thumbFilePath)}
-                  />
-                ) : (
-                  <TaskHistoryPreview label="结果图" />
-                )}
               </div>
               <h4>输入快照</h4>
               <pre className="task-history-json">{formatJsonForDisplay(selectedDetail.task.assetSnapshotJson)}</pre>

@@ -6,6 +6,7 @@ const tauriConfigSource = readFileSync(
   new URL("../src-tauri/tauri.conf.json", import.meta.url),
   "utf8",
 );
+const infoPlistSource = readFileSync(new URL("../src-tauri/Info.plist", import.meta.url), "utf8");
 const tauriLibSource = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const workflowCanvasSource = readFileSync(
   new URL("../src/features/workflow/components/WorkflowCanvas.tsx", import.meta.url),
@@ -30,6 +31,11 @@ test("macOS app menu uses Chinese labels and exposes navigation entries", () => 
   ]) {
     assert.match(tauriLibSource, new RegExp(menuLabel.replaceAll(".", String.raw`\.`)));
   }
+});
+
+test("macOS bundle declares Simplified Chinese localization for native dialogs", () => {
+  assert.match(infoPlistSource, /<key>CFBundleDevelopmentRegion<\/key>\s*<string>zh-Hans<\/string>/);
+  assert.match(infoPlistSource, /<key>CFBundleLocalizations<\/key>\s*<array>\s*<string>zh-Hans<\/string>/);
 });
 
 test("macOS menu opens the requested workbench destination", () => {
