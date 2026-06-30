@@ -34,3 +34,4 @@ desktop/src-tauri/target/
 
 # Local code intelligence cache
 .codegraph/
+docs/
