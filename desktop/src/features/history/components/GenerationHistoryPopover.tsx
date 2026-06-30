@@ -89,7 +89,7 @@ export function GenerationHistoryPopover({
     <div
       aria-label="生成记录"
       aria-modal="false"
-      className="absolute right-0 top-[42px] z-[90] w-[386px] rounded-[18px] border border-white/80 bg-white/88 p-3 text-app-text shadow-[0_22px_52px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-2xl"
+      className="fixed right-[72px] top-[64px] z-[130] w-[386px] max-w-[calc(100vw-96px)] rounded-[18px] border border-white/90 bg-white p-3 text-app-text shadow-[0_22px_52px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.95)]"
       data-window-interactive
       ref={popoverRef}
       role="dialog"
@@ -170,7 +170,8 @@ function GenerationHistoryRow({
   record: GenerationRecord;
 }) {
   const Icon = record.workspace === "product" ? PackageCheck : Shirt;
-  const completedCount = record.images.filter((image) => image.status === "complete").length;
+  const generatedItems = record.images.filter((image) => image.kind !== "source-image");
+  const completedCount = generatedItems.filter((image) => image.status === "complete").length;
 
   return (
     <div
@@ -192,7 +193,7 @@ function GenerationHistoryRow({
             <Clock3 className="size-3" />
             <span>{formatRecordTime(record.createdAt)}</span>
             <span>·</span>
-            <span>{record.images.length} 张</span>
+            <span>{generatedItems.length} 张</span>
             {record.status === "complete" ? <span>· 完成 {completedCount} 张</span> : null}
           </div>
           <div className="mt-1 truncate text-[11px] text-slate-400">{record.inputSummary}</div>
@@ -264,7 +265,10 @@ function GenerationHistoryEmptyState({ activeFilter }: { activeFilter: HistoryFi
   const text = activeFilter === "all" ? "暂无生成记录" : activeFilter === "product" ? "暂无商品记录" : "暂无服饰记录";
 
   return (
-    <div className="grid min-h-[150px] place-items-center rounded-[16px] border border-dashed border-slate-200 bg-slate-50/72 px-6 text-center">
+    <div
+      className="grid min-h-[150px] place-items-center rounded-[16px] border border-dashed border-slate-200 bg-slate-50 px-6 text-center"
+      data-testid="generation-history-empty-state"
+    >
       <div>
         <div className="mx-auto grid size-10 place-items-center rounded-full bg-white text-slate-400 shadow-[0_1px_4px_rgba(15,23,42,0.06)]">
           <Images className="size-4" />

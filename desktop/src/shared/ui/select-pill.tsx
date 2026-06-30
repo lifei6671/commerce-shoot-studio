@@ -11,13 +11,14 @@ export type SelectPillOption = {
 };
 
 type SelectPillProps = {
+  ariaLabel?: string;
   className?: string;
   options?: SelectPillOption[];
   value: string;
   onChange?: (value: string) => void;
 };
 
-export function SelectPill({ className, options = [], value, onChange }: SelectPillProps) {
+export function SelectPill({ ariaLabel, className, options = [], value, onChange }: SelectPillProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selectedOption = options.find((option) => option.value === value);
@@ -40,14 +41,16 @@ export function SelectPill({ className, options = [], value, onChange }: SelectP
   }, [open]);
 
   function handleSelect(optionValue: string) {
-    onChange?.(optionValue);
     setOpen(false);
+    onChange?.(optionValue);
   }
 
   return (
     <div ref={rootRef} className={cn("relative", className)}>
       <button
         aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={ariaLabel ? `${ariaLabel} ${label}` : undefined}
         className={cn(
           "inline-flex h-8 w-full items-center justify-between gap-2 rounded-control border border-white/60 bg-slate-100/70 px-3 text-[12px] font-medium text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.76)] transition-all duration-200 ease-out hover:border-white hover:bg-white/90 hover:shadow-control active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-app-blue/25",
           open && "border-blue-200 bg-white shadow-control ring-2 ring-blue-100/70",
@@ -65,7 +68,10 @@ export function SelectPill({ className, options = [], value, onChange }: SelectP
       </button>
 
       {open ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 rounded-panel border border-white/80 bg-white/95 p-1.5 shadow-[0_18px_42px_rgba(15,23,42,0.16),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl">
+        <div
+          className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 rounded-panel border border-white/80 bg-white/95 p-1.5 shadow-[0_18px_42px_rgba(15,23,42,0.16),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl"
+          role="listbox"
+        >
           {options.map((option) => {
             const selected = option.value === value;
 
@@ -78,7 +84,15 @@ export function SelectPill({ className, options = [], value, onChange }: SelectP
                   option.tone === "group" && "bg-slate-100/80",
                   selected && "text-slate-950",
                 )}
-                onClick={() => handleSelect(option.value)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleSelect(option.value);
+                }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  handleSelect(option.value);
+                }}
                 type="button"
               >
                 <span

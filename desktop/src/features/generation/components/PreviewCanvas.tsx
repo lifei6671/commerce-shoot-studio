@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -7,7 +7,10 @@ import {
   ArrowRight,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
+  Eye,
+  Languages,
   Maximize2,
   MoreHorizontal,
   Pencil,
@@ -19,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../../../shared/lib/cn";
+import type { ProductImageAsset } from "../lib/productImagePicker";
 
 export type PreviewBoard = {
   id: string;
@@ -33,8 +37,26 @@ type PreviewCanvasProps = {
 };
 
 export type GeneratedDetailImage = {
+  errorMessage?: string;
+  groupId?: string;
+  groupTitle?: string;
   id: string;
-  status: "generating" | "complete";
+  kind?: "image" | "listing-copy" | "source-image";
+  listingCopy?: ProductListingCopy;
+  prompt?: string;
+  ratio?: string;
+  sourceImages?: ProductImageAsset[];
+  src?: string;
+  status: "generating" | "complete" | "failed";
+  title: string;
+};
+
+export type ProductListingCopy = {
+  detailCopy: string;
+  keywords: string;
+  sellingPoints: string[];
+  shootingPlan: string[];
+  sourcePrompt: string;
   title: string;
 };
 
@@ -95,12 +117,18 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
   const [imageRewriteTargetId, setImageRewriteTargetId] = useState<string | null>(null);
   const [imageRewritePrompt, setImageRewritePrompt] = useState("");
   const [textEditTargetId, setTextEditTargetId] = useState<string | null>(null);
+  const [listingCopyTargetId, setListingCopyTargetId] = useState<string | null>(null);
   const [textEditValues, setTextEditValues] = useState(() => defaultEditableTexts);
   const [longPreviewOpen, setLongPreviewOpen] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const visibleImages = detailImages
     .filter((image) => !removedImageIds.has(image.id))
     .map((image) => (regeneratingImageIds.has(image.id) ? { ...image, status: "generating" as const } : image));
-  const completedImages = visibleImages.filter((image) => image.status === "complete");
+  const visibleImageItems = visibleImages.filter((image) => image.kind !== "listing-copy" && image.kind !== "source-image");
+  const groupedResultSections = createGeneratedResultGroups(visibleImages);
+  const hasGroupedResults = groupedResultSections.length > 0;
+  const completedImages = visibleImageItems.filter((image) => image.status === "complete");
   const selectedImages = completedImages.filter((image) => selectedImageIds.has(image.id));
   const allCompletedSelected = completedImages.length > 0 && completedImages.every((image) => selectedImageIds.has(image.id));
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
@@ -109,6 +137,9 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
   const previewImageIndex = previewImage ? completedImages.findIndex((image) => image.id === previewImage.id) : -1;
   const imageRewriteTarget = completedImages.find((image) => image.id === imageRewriteTargetId) ?? null;
   const textEditTarget = completedImages.find((image) => image.id === textEditTargetId) ?? null;
+  const listingCopyTarget =
+    visibleImages.find((image) => image.id === listingCopyTargetId && image.kind === "listing-copy" && image.status === "complete") ??
+    null;
 
   function openImagePreview(image: GeneratedDetailImage) {
     if (image.status !== "complete") {
@@ -154,6 +185,24 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     setSelectedImageIds(selected ? new Set(completedImages.map((image) => image.id)) : new Set());
   }
 
+  function toggleGeneratedGroupSelection(images: GeneratedDetailImage[], selected: boolean) {
+    const groupImageIds = images
+      .filter((image) => image.kind !== "source-image" && image.kind !== "listing-copy" && image.status === "complete")
+      .map((image) => image.id);
+
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      for (const imageId of groupImageIds) {
+        if (selected) {
+          nextIds.add(imageId);
+        } else {
+          nextIds.delete(imageId);
+        }
+      }
+      return nextIds;
+    });
+  }
+
   function deleteSelectedImages() {
     if (selectedImageIds.size === 0) {
       return;
@@ -162,6 +211,18 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     setRemovedImageIds((currentIds) => new Set([...currentIds, ...selectedImageIds]));
     setSelectedImageIds(new Set());
     if (previewImageId && selectedImageIds.has(previewImageId)) {
+      closeImagePreview();
+    }
+  }
+
+  function deleteImageById(imageId: string) {
+    setRemovedImageIds((currentIds) => new Set([...currentIds, imageId]));
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(imageId);
+      return nextIds;
+    });
+    if (previewImageId === imageId) {
       closeImagePreview();
     }
   }
@@ -210,6 +271,44 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     setTextEditValues(defaultEditableTexts);
   }
 
+  function openListingCopyDialog(image: GeneratedDetailImage) {
+    if (image.kind !== "listing-copy" || image.status !== "complete") {
+      return;
+    }
+
+    setListingCopyTargetId(image.id);
+  }
+
+  function closeListingCopyDialog() {
+    setListingCopyTargetId(null);
+  }
+
+  function showCopyToast(message: string) {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    setToastMessage(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 1800);
+  }
+
+  async function copyProductListingCopy(copy: ProductListingCopy) {
+    const clipboard = window.navigator?.clipboard;
+    if (!clipboard?.writeText) {
+      showCopyToast("当前环境不支持复制");
+      return;
+    }
+
+    try {
+      await clipboard.writeText(formatProductListingCopy(copy));
+      showCopyToast("已复制商品上架文案");
+    } catch {
+      showCopyToast("复制失败，请重试");
+    }
+  }
+
   function closeTextEditDialog() {
     setTextEditTargetId(null);
     setTextEditValues(defaultEditableTexts);
@@ -239,11 +338,20 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     setImageRewriteTargetId(null);
     setImageRewritePrompt("");
     setTextEditTargetId(null);
+    setListingCopyTargetId(null);
     setTextEditValues(defaultEditableTexts);
     setLongPreviewOpen(false);
     setPreviewImageId(null);
     setPreviewZoom(1);
   }, [detailImages]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   async function saveBytes(defaultPath: string, bytes: Uint8Array, extension: string) {
     const path = await save({
@@ -282,6 +390,52 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
       })),
     );
     await saveBytes(`${generatedResultFilePrefix}-${zipLabel}.zip`, createZipBytes(files), "zip");
+  }
+
+  function renderGeneratedResultCard(image: GeneratedDetailImage) {
+    if (image.kind === "source-image") {
+      return <GeneratedSourceImageCard image={image} key={image.id} />;
+    }
+
+    if (image.status === "failed") {
+      return (
+        <GeneratedFailedResultCard
+          image={image}
+          key={image.id}
+          onDelete={() => deleteImageById(image.id)}
+          onRetry={() => regenerateImageById(image.id)}
+          onSelect={(selected) => toggleImageSelection(image.id, selected)}
+          selected={selectedImageIds.has(image.id)}
+        />
+      );
+    }
+
+    if (image.kind === "listing-copy") {
+      return (
+        <GeneratedListingCopyCard
+          image={image}
+          key={image.id}
+          onCopy={(copy) => void copyProductListingCopy(copy)}
+          onOpen={() => openListingCopyDialog(image)}
+        />
+      );
+    }
+
+    const imageIndex = visibleImageItems.findIndex((visibleImage) => visibleImage.id === image.id);
+
+    return (
+      <GeneratedDetailImageCard
+        image={image}
+        index={imageIndex}
+        key={image.id}
+        onOpenPreview={openImagePreview}
+        onSelect={(selected) => toggleImageSelection(image.id, selected)}
+        onDownload={() => void downloadImage(image, imageIndex)}
+        onRewrite={() => openImageRewriteDialog(image)}
+        onEditText={() => openTextEditDialog(image)}
+        selected={selectedImageIds.has(image.id)}
+      />
+    );
   }
 
   useEffect(() => {
@@ -347,7 +501,7 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
         <div className="mb-8 flex items-start justify-between gap-6">
           <div className="min-w-0">
             <h1 className="text-[18px] font-semibold text-slate-950">生成结果:</h1>
-            <div className="mt-7 flex items-center gap-2 text-[13px] font-medium text-slate-700">
+            <div className={cn("mt-7 flex items-center gap-2 text-[13px] font-medium text-slate-700", hasGroupedResults && "hidden")}>
               <input
                 aria-label="选择本次生成结果"
                 className="size-3.5 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/20"
@@ -370,15 +524,17 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                     <Trash2 className="size-3.5" />
                     删除
                   </button>
-                  <button
-                    aria-label="批量下载所选图片"
-                    className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[#1f1f21] px-2.5 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.16)] transition-colors hover:bg-black"
-                    onClick={() => void downloadImagesZip(selectedImages, "已选图片")}
-                    type="button"
-                  >
-                    <Download className="size-3.5" />
-                    批量下载
-                  </button>
+                  {selectedImages.length > 0 ? (
+                    <button
+                      aria-label="批量下载所选图片"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[#1f1f21] px-2.5 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.16)] transition-colors hover:bg-black"
+                      onClick={() => void downloadImagesZip(selectedImages, "已选图片")}
+                      type="button"
+                    >
+                      <Download className="size-3.5" />
+                      批量下载
+                    </button>
+                  ) : null}
                 </>
               ) : null}
               <label className="inline-flex items-center gap-1.5 text-[12px] text-slate-600">
@@ -392,50 +548,112 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                 全选
               </label>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="h-8 rounded-[8px] bg-white px-3 text-[12px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors hover:bg-slate-50"
-                onClick={() => setLongPreviewOpen(true)}
-                type="button"
-              >
-                预览长图
-              </button>
-              <button
-                aria-label="下载全部"
-                className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
-                onClick={() => void downloadImagesZip(completedImages, "全部图片")}
-                type="button"
-              >
-                <Download className="size-3.5" />
-                下载
-              </button>
-              <button
-                aria-label="更多生成结果操作"
-                className="grid size-8 place-items-center rounded-[8px] bg-[#1f1f21] text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
-                type="button"
-              >
-                <MoreHorizontal className="size-4" />
-              </button>
-            </div>
+            {!hasGroupedResults ? (
+              <div className="flex items-center gap-2">
+                <button
+                  className="h-8 rounded-[8px] bg-white px-3 text-[12px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors hover:bg-slate-50"
+                  onClick={() => setLongPreviewOpen(true)}
+                  type="button"
+                >
+                  预览长图
+                </button>
+                <button
+                  aria-label="下载全部"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                  onClick={() => void downloadImagesZip(completedImages, "全部图片")}
+                  type="button"
+                >
+                  <Download className="size-3.5" />
+                  下载
+                </button>
+                <button
+                  aria-label="更多生成结果操作"
+                  className="grid size-8 place-items-center rounded-[8px] bg-[#1f1f21] text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                  type="button"
+                >
+                  <MoreHorizontal className="size-4" />
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
 
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-4">
-          {visibleImages.map((image, index) => (
-            <GeneratedDetailImageCard
-              image={image}
-              index={index}
-              key={image.id}
-              onOpenPreview={openImagePreview}
-              onSelect={(selected) => toggleImageSelection(image.id, selected)}
-              onDownload={() => void downloadImage(image, index)}
-              onRewrite={() => openImageRewriteDialog(image)}
-              onEditText={() => openTextEditDialog(image)}
-              selected={selectedImageIds.has(image.id)}
-            />
-          ))}
-        </div>
+        {hasGroupedResults ? (
+          <div className="space-y-10">
+            {groupedResultSections.map((group) => {
+              const groupCompletedImages = group.images.filter(
+                (image) => image.kind !== "source-image" && image.kind !== "listing-copy" && image.status === "complete",
+              );
+              const allGroupImagesSelected =
+                groupCompletedImages.length > 0 && groupCompletedImages.every((image) => selectedImageIds.has(image.id));
+
+              return (
+                <section className="space-y-4" data-testid="generated-result-group" key={group.id}>
+                  <div className="flex items-center justify-between gap-4">
+                    <label className="inline-flex min-w-0 items-center gap-2 text-[13px] font-semibold text-slate-700">
+                      <input
+                        aria-label={`选择 ${group.title} 分组`}
+                        checked={allGroupImagesSelected}
+                        className="size-3.5 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/20"
+                        disabled={groupCompletedImages.length === 0}
+                        onChange={(event) => toggleGeneratedGroupSelection(group.images, event.currentTarget.checked)}
+                        type="checkbox"
+                      />
+                      <span className="shrink-0">2026-06-30 16:53</span>
+                      <span className="truncate">{group.title}</span>
+                      <Pencil className="size-3.5 shrink-0 text-slate-500" />
+                    </label>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        aria-label={`下载 ${group.title}`}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                        disabled={groupCompletedImages.length === 0}
+                        onClick={() => void downloadImagesZip(groupCompletedImages, group.title)}
+                        type="button"
+                      >
+                        <Download className="size-3.5" />
+                        下载
+                      </button>
+                      <button
+                        aria-label={`更多 ${group.title} 操作`}
+                        className="grid size-8 place-items-center rounded-[8px] bg-[#1f1f21] text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                        type="button"
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-4">
+                    {group.images.map((image) => renderGeneratedResultCard(image))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-4" data-testid="generated-result-grid">
+            {visibleImages.map((image) => renderGeneratedResultCard(image))}
+          </div>
+        )}
       </section>
+      {toastMessage ? (
+        <div
+          className="fixed left-1/2 top-[72px] z-[140] -translate-x-1/2 rounded-full bg-slate-950 px-4 py-2 text-[13px] font-medium text-white shadow-[0_12px_30px_rgba(15,23,42,0.22)]"
+          role="status"
+        >
+          {toastMessage}
+        </div>
+      ) : null}
+      {listingCopyTarget?.listingCopy
+        ? createPortal(
+            <ProductListingCopyDialog
+              copy={listingCopyTarget.listingCopy}
+              onClose={closeListingCopyDialog}
+              onCopy={(copy) => void copyProductListingCopy(copy)}
+            />,
+            document.body,
+          )
+        : null}
       {imageRewriteTarget
         ? createPortal(
             <div
@@ -724,6 +942,262 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
   );
 }
 
+function GeneratedSourceImageCard({ image }: { image: GeneratedDetailImage }) {
+  const sourceImages = image.sourceImages ?? [];
+
+  return (
+    <article
+      className="relative aspect-square overflow-hidden rounded-[8px] border-2 border-white/80 bg-slate-100 shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
+      data-testid="generated-source-image-card"
+    >
+      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/72 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+        原图
+      </div>
+      {sourceImages.length > 0 ? (
+        <div className={cn("h-full w-full", sourceImages.length === 1 ? "block" : "grid grid-cols-2 gap-px bg-white")}>
+          {sourceImages.map((sourceImage) => (
+            <img
+              alt={sourceImage.name}
+              className="h-full w-full object-cover"
+              draggable={false}
+              key={sourceImage.id}
+              src={sourceImage.src}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="h-full w-full bg-[linear-gradient(135deg,#f8fafc,#dbe3ee)]" />
+      )}
+    </article>
+  );
+}
+
+function GeneratedListingCopyCard({
+  image,
+  onCopy,
+  onOpen,
+}: {
+  image: GeneratedDetailImage;
+  onCopy: (copy: ProductListingCopy) => void;
+  onOpen: () => void;
+}) {
+  const complete = image.status === "complete";
+  const copy = image.listingCopy;
+
+  return (
+    <article
+      className="group relative aspect-square cursor-default overflow-hidden rounded-[8px] border-2 border-white/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all duration-200 hover:shadow-[0_10px_22px_rgba(15,23,42,0.14)]"
+      data-testid="listing-copy-result-card"
+    >
+      {complete && copy ? (
+        <div className="flex h-full w-full flex-col bg-white p-4 text-left">
+          <div className="flex items-center justify-between gap-3">
+            <span className="rounded-[6px] bg-blue-50 px-1.5 py-1 text-[12px] font-medium leading-none text-app-blue">
+              商品上架文案
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                aria-label="查看商品上架文案"
+                className="grid size-7 place-items-center rounded-[7px] text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-950"
+                onClick={onOpen}
+                type="button"
+              >
+                <Eye className="size-4" />
+              </button>
+              <button
+                aria-label="复制商品上架文案卡片"
+                className="grid size-7 place-items-center rounded-[7px] text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-950"
+                onClick={() => onCopy(copy)}
+                type="button"
+              >
+                <Copy className="size-4" />
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 h-px bg-slate-100" />
+          <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-hidden">
+            <ListingCopyPreviewSection title="宝贝标题" value={copy.title} />
+            <ListingCopyPreviewSection title="核心卖点/促销利益点" value={copy.sellingPoints[0] ?? ""} />
+            <ListingCopyPreviewSection title="详情页文案" value={copy.detailCopy} />
+            <ListingCopyPreviewSection title="搜索关键词/属性词" value={copy.keywords} />
+          </div>
+        </div>
+      ) : (
+        <div className="absolute inset-0 grid place-items-center bg-[linear-gradient(135deg,#eef2f7,#e2e8f0)] text-slate-500">
+          <div className="flex flex-col items-center gap-3">
+            <div className="flex items-center gap-2" aria-hidden="true">
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:120ms]" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:240ms]" />
+            </div>
+            <span className="text-[13px] font-semibold">AI 生成中</span>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ListingCopyPreviewSection({ title, value }: { title: string; value: string }) {
+  return (
+    <section>
+      <h3 className="text-[12px] font-semibold leading-5 text-slate-950">{title}</h3>
+      <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-slate-400">{value}</p>
+    </section>
+  );
+}
+
+function GeneratedFailedResultCard({
+  image,
+  onDelete,
+  onRetry,
+  onSelect,
+  selected,
+}: {
+  image: GeneratedDetailImage;
+  onDelete: () => void;
+  onRetry: () => void;
+  onSelect: (selected: boolean) => void;
+  selected: boolean;
+}) {
+  return (
+    <article
+      className={cn(
+        "group relative aspect-square cursor-default overflow-hidden rounded-[8px] border-2 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all duration-200 hover:border-slate-950/90 hover:shadow-[0_10px_22px_rgba(15,23,42,0.14)]",
+        selected ? "border-slate-950" : "border-transparent",
+      )}
+      data-testid="failed-result-card"
+    >
+      <div className={cn("absolute left-2 top-2 z-10 transition-opacity duration-200 group-hover:opacity-100", selected ? "opacity-100" : "opacity-0")}>
+        <input
+          aria-label={`选择 ${image.title}`}
+          checked={selected}
+          className="size-3.5 rounded-[4px] border-slate-300 bg-white text-app-blue shadow-sm focus:ring-app-blue/20"
+          onChange={(event) => onSelect(event.currentTarget.checked)}
+          type="checkbox"
+        />
+      </div>
+      <div className="absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+        <IconActionButton icon={Trash2} label={`删除 ${image.title}`} onClick={onDelete} />
+      </div>
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,#ffffff_0%,#eeeeef_46%,#a6a6a6_100%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_13%,rgba(255,255,255,0.72),transparent_42%)]" />
+      <div className="relative flex h-full flex-col items-center justify-center px-5 pb-14 pt-8 text-center">
+        <div className="grid size-11 place-items-center rounded-full border-[3px] border-slate-500/70 text-[28px] font-semibold leading-none text-slate-500/80">
+          !
+        </div>
+        <h2 className="mt-4 text-[15px] font-medium text-slate-500">生成失败</h2>
+      </div>
+      <div className="absolute inset-x-2.5 bottom-2.5 translate-y-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100">
+        <button
+          aria-label={`重试 ${image.title}`}
+          className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-slate-950/72 px-2 text-[11px] font-medium text-white backdrop-blur-md transition-colors hover:bg-slate-950/82"
+          onClick={onRetry}
+          type="button"
+        >
+          重新生成
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function ProductListingCopyDialog({
+  copy,
+  onClose,
+  onCopy,
+}: {
+  copy: ProductListingCopy;
+  onClose: () => void;
+  onCopy: (copy: ProductListingCopy) => void;
+}) {
+  return (
+    <div
+      aria-label="商品上架文案"
+      aria-modal="true"
+      className="fixed inset-0 z-[115] flex items-center justify-center bg-black/42 p-6"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+      role="dialog"
+    >
+      <div className="flex max-h-[88vh] w-[min(96vw,1120px)] flex-col rounded-[26px] bg-white p-5 shadow-[0_28px_90px_rgba(15,23,42,0.28)]">
+        <header className="mb-4 flex shrink-0 items-center justify-between gap-4">
+          <h2 className="text-[18px] font-semibold text-slate-950">商品上架文案</h2>
+          <div className="flex items-center gap-2">
+            <button
+              aria-label="翻译"
+              className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-slate-100 px-4 text-[14px] font-medium text-slate-700 transition-colors hover:bg-slate-200/80"
+              type="button"
+            >
+              <Languages className="size-4" />
+              翻译
+              <span className="relative h-5 w-9 rounded-full bg-white shadow-inner">
+                <span className="absolute left-0.5 top-1/2 size-4 -translate-y-1/2 rounded-full bg-white shadow-[0_1px_4px_rgba(15,23,42,0.22)]" />
+              </span>
+            </button>
+            <button
+              aria-label="复制商品上架文案"
+              className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-slate-100 px-4 text-[14px] font-medium text-slate-700 transition-colors hover:bg-slate-200/80"
+              onClick={() => onCopy(copy)}
+              type="button"
+            >
+              <Copy className="size-4" />
+              复制
+            </button>
+            <button
+              aria-label="关闭商品上架文案"
+              className="grid size-9 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+              onClick={onClose}
+              type="button"
+            >
+              <X className="size-6" />
+            </button>
+          </div>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-[18px] bg-slate-100 px-5 py-4 text-slate-700 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.48)_transparent]">
+          <ListingCopySection title="宝贝标题" value={copy.title} />
+          <ListingCopySection title="核心卖点/促销利益点" value={copy.sellingPoints.join("\n")} />
+          <ListingCopySection title="详情页文案" value={copy.detailCopy} />
+          <ListingCopySection title="搜索关键词/属性词" value={copy.keywords} />
+          <ListingCopySection title="主图拍摄规划" value={copy.shootingPlan.map((plan, index) => `${index + 1}. ${plan}`).join("\n")} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatProductListingCopy(copy: ProductListingCopy) {
+  return [
+    `宝贝标题\n${copy.title}`,
+    `核心卖点/促销利益点\n${copy.sellingPoints.join("\n")}`,
+    `详情页文案\n${copy.detailCopy}`,
+    `搜索关键词/属性词\n${copy.keywords}`,
+    `主图拍摄规划\n${copy.shootingPlan.map((plan, index) => `${index + 1}. ${plan}`).join("\n")}`,
+  ].join("\n\n");
+}
+
+function ListingCopySection({ title, value }: { title: string; value: string }) {
+  return (
+    <section className="py-4 first:pt-1">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <h3 className="text-[17px] font-semibold text-slate-950">{title}</h3>
+        <button
+          aria-label={`复制 ${title}`}
+          className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-[13px] font-medium text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
+          type="button"
+        >
+          <Copy className="size-4" />
+          复制
+        </button>
+      </div>
+      <p className="whitespace-pre-line text-[15px] leading-8 text-slate-600">{value}</p>
+    </section>
+  );
+}
+
 function GeneratedDetailImageCard({
   image,
   index,
@@ -786,12 +1260,20 @@ function GeneratedDetailImageCard({
             <IconActionButton icon={Download} label={`下载 ${image.title}`} onClick={onDownload} />
             <IconActionButton icon={Trash2} label={`删除 ${image.title}`} />
           </div>
-          <div className="absolute inset-x-0 bottom-0 bg-[linear-gradient(180deg,transparent,rgba(15,23,42,0.64)_24%,rgba(15,23,42,0.86))] px-2.5 pb-2.5 pt-10 text-white">
-            <h2 className="truncate text-[12px] font-medium">{image.title}：{generatedImageSubtitles[index % generatedImageSubtitles.length]}</h2>
-            <div className="mt-2 grid grid-cols-2 gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+          <div className="absolute inset-x-0 bottom-0 h-[104px] bg-[linear-gradient(180deg,transparent,rgba(15,23,42,0.58)_24%,rgba(15,23,42,0.88))] px-2.5 pb-2.5 text-white">
+            <h2
+              className="absolute inset-x-2.5 bottom-10 translate-y-8 truncate text-[12px] font-medium transition-transform duration-300 ease-out group-hover:translate-y-0"
+              data-testid="generated-image-title"
+            >
+              {image.title}：{generatedImageSubtitles[index % generatedImageSubtitles.length]}
+            </h2>
+            <div
+              className="absolute inset-x-2.5 bottom-2.5 grid translate-y-2 grid-cols-2 gap-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100"
+              data-testid="generated-image-card-actions"
+            >
               <button
                 aria-label={`AI改图 ${image.title}`}
-                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-white/18 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-white/28"
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-slate-950/58 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-slate-950/72"
                 onClick={(event) => {
                   event.stopPropagation();
                   onRewrite();
@@ -803,7 +1285,7 @@ function GeneratedDetailImageCard({
               </button>
               <button
                 aria-label={`编辑文字 ${image.title}`}
-                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-white/18 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-white/28"
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-slate-950/58 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-slate-950/72"
                 onClick={(event) => {
                   event.stopPropagation();
                   onEditText();
@@ -1111,6 +1593,30 @@ function crc32(bytes: Uint8Array) {
     }
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createGeneratedResultGroups(images: GeneratedDetailImage[]) {
+  const groupedImages = images.filter((image) => image.groupId);
+  if (groupedImages.length === 0) {
+    return [];
+  }
+
+  const groupMap = new Map<string, { id: string; images: GeneratedDetailImage[]; title: string }>();
+  for (const image of groupedImages) {
+    const groupId = image.groupId ?? image.id;
+    const currentGroup = groupMap.get(groupId);
+    if (currentGroup) {
+      currentGroup.images.push(image);
+    } else {
+      groupMap.set(groupId, {
+        id: groupId,
+        images: [image],
+        title: image.groupTitle ?? "生成结果",
+      });
+    }
+  }
+
+  return Array.from(groupMap.values());
 }
 
 function PreviewTile({ board, size }: { board: PreviewBoard; size: "small" | "tall" | "wide" }) {

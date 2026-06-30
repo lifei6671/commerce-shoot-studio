@@ -5,6 +5,7 @@ type AppShellProps = {
   navigation: ReactNode;
   configPanel: ReactNode;
   canvas: ReactNode;
+  workspaceContent?: ReactNode;
 };
 
 const studioLayoutVars = {
@@ -13,7 +14,9 @@ const studioLayoutVars = {
   "--studio-side-width": "calc(var(--studio-nav-width) + var(--studio-panel-width))",
 } as CSSProperties;
 
-export function AppShell({ toolbar, navigation, configPanel, canvas }: AppShellProps) {
+export function AppShell({ toolbar, navigation, configPanel, canvas, workspaceContent }: AppShellProps) {
+  const hasWorkspaceContent = Boolean(workspaceContent);
+
   return (
     <div className="h-screen overflow-hidden bg-transparent text-app-text">
       <div
@@ -23,15 +26,26 @@ export function AppShell({ toolbar, navigation, configPanel, canvas }: AppShellP
         <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.96),transparent_62%)]" />
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 left-[var(--studio-side-width)] z-30 w-px bg-slate-200/70 shadow-[1px_0_0_rgba(255,255,255,0.72)]"
+          className={
+            hasWorkspaceContent
+              ? "pointer-events-none absolute bottom-0 left-[var(--studio-nav-width)] top-[52px] z-30 w-px bg-slate-200/70 shadow-[1px_0_0_rgba(255,255,255,0.72)] [@media(platform:windows)]:top-11"
+              : "pointer-events-none absolute inset-y-0 left-[var(--studio-side-width)] z-30 w-px bg-slate-200/70 shadow-[1px_0_0_rgba(255,255,255,0.72)]"
+          }
           data-testid="studio-side-divider"
         />
         {toolbar}
-        <div className="grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_var(--studio-panel-width)_minmax(0,1fr)]">
-          {navigation}
-          {configPanel}
-          {canvas}
-        </div>
+        {hasWorkspaceContent ? (
+          <div className="grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_minmax(0,1fr)]">
+            {navigation}
+            {workspaceContent}
+          </div>
+        ) : (
+          <div className="grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_var(--studio-panel-width)_minmax(0,1fr)]">
+            {navigation}
+            {configPanel}
+            {canvas}
+          </div>
+        )}
       </div>
     </div>
   );

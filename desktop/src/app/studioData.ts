@@ -1,4 +1,4 @@
-import { Image, Images, PackageCheck, Shirt, Sparkles, TextCursorInput } from "lucide-react";
+import { Cpu, Image, Images, PackageCheck, Settings, Shirt, Sparkles, TextCursorInput } from "lucide-react";
 import type { NavigationItem } from "./components/NavigationRail";
 import type { ModuleOption } from "../features/generation/components/GenerationConfigPanel";
 import type { PreviewBoard } from "../features/generation/components/PreviewCanvas";
@@ -6,6 +6,9 @@ import type { PreviewBoard } from "../features/generation/components/PreviewCanv
 export const navItems: NavigationItem[] = [
   { id: "product", label: "商品", icon: PackageCheck },
   { id: "clothing", label: "服饰", icon: Shirt },
+  { id: "scene", label: "场景", icon: Images },
+  { id: "model", label: "模型", icon: Cpu },
+  { id: "settings", label: "设置", icon: Settings },
 ];
 
 export const moduleOptions: ModuleOption[] = [

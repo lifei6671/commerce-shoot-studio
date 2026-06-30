@@ -9,16 +9,20 @@ const interactiveSelector =
   "button, a, input, textarea, select, [role='button'], [data-window-interactive]";
 
 type StudioToolbarProps = {
+  hidePrimaryAction?: boolean;
   historyCount?: number;
   historyOpen?: boolean;
   historyPopover?: ReactNode;
+  onOpenSettings?: () => void;
   onToggleHistory?: () => void;
 };
 
 export function StudioToolbar({
+  hidePrimaryAction = false,
   historyCount = 0,
   historyOpen = false,
   historyPopover = null,
+  onOpenSettings,
   onToggleHistory,
 }: StudioToolbarProps) {
   function isInteractiveTarget(target: EventTarget | null) {
@@ -62,10 +66,14 @@ export function StudioToolbar({
         aria-label="任务操作区"
         className="flex h-full min-w-0 items-center justify-between gap-3 pl-4 pr-3 [@media(platform:windows)]:gap-2 [@media(platform:windows)]:pr-0"
       >
-        <Button data-window-interactive size="sm" variant="soft">
-          <FolderPlus className="size-3.5" />
-          新建任务
-        </Button>
+        {hidePrimaryAction ? (
+          <div />
+        ) : (
+          <Button data-window-interactive size="sm" variant="soft">
+            <FolderPlus className="size-3.5" />
+            新建任务
+          </Button>
+        )}
         <div className="flex items-center gap-2 [@media(platform:windows)]:h-full [@media(platform:windows)]:gap-1">
           <Button data-window-interactive size="sm" variant="ghost">
             <Clock3 className="size-3.5 text-amber-500" />
@@ -91,7 +99,7 @@ export function StudioToolbar({
             </Button>
             {historyPopover}
           </div>
-          <IconButton data-window-interactive label="设置">
+          <IconButton data-window-interactive label="设置" onClick={onOpenSettings}>
             <Settings className="size-4" />
           </IconButton>
           <div className="size-7 rounded-full border border-white bg-[linear-gradient(135deg,#111827,#64748b)] shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_4px_10px_rgba(15,23,42,0.16)]" />

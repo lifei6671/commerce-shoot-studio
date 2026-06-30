@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { App } from "./App";
 import { selectProductImages } from "../features/generation/lib/productImagePicker";
+import { PreviewCanvas } from "../features/generation/components/PreviewCanvas";
+import { sceneTemplates } from "../features/scenes/lib/sceneImagePlan";
 
 vi.mock("../features/generation/lib/productImagePicker", () => ({
   selectProductImages: vi.fn(),
@@ -20,24 +22,79 @@ const selectProductImagesMock = vi.mocked(selectProductImages);
 const invokeMock = vi.mocked(invoke);
 const saveMock = vi.mocked(save);
 
+const audioContextInstances: MockAudioContext[] = [];
+
+class MockAudioParam {
+  setValueAtTime = vi.fn();
+  linearRampToValueAtTime = vi.fn();
+  exponentialRampToValueAtTime = vi.fn();
+}
+
+class MockAudioNode {
+  connect = vi.fn(() => this);
+}
+
+class MockOscillatorNode extends MockAudioNode {
+  frequency = new MockAudioParam();
+  type: OscillatorType = "sine";
+  start = vi.fn();
+  stop = vi.fn();
+}
+
+class MockGainNode extends MockAudioNode {
+  gain = new MockAudioParam();
+}
+
+class MockAudioContext {
+  currentTime = 0;
+  destination = new MockAudioNode();
+  state: AudioContextState = "running";
+  close = vi.fn();
+  createGain = vi.fn(() => new MockGainNode());
+  createOscillator = vi.fn(() => new MockOscillatorNode());
+  resume = vi.fn(() => Promise.resolve());
+
+  constructor() {
+    audioContextInstances.push(this);
+  }
+}
+
 describe("App shell", () => {
   beforeEach(() => {
     selectProductImagesMock.mockReset();
     invokeMock.mockReset();
     saveMock.mockReset();
+    audioContextInstances.length = 0;
+    Object.defineProperty(window, "AudioContext", {
+      configurable: true,
+      value: MockAudioContext,
+    });
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => Promise.resolve(),
+      },
+    });
+    vi.spyOn(Math, "random").mockReturnValue(0.99);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("renders a native-feeling workspace with reusable layout regions", () => {
     render(<App />);
 
     expect(screen.getByRole("banner", { name: "应用工具栏" })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /商品/ })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: /商品/ })).toHaveAttribute("aria-pressed", "true");
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+
+    expect(navigation).toBeInTheDocument();
+    expect(within(navigation).getAllByRole("button", { name: /商品/ })).toHaveLength(1);
+    expect(within(navigation).getByRole("button", { name: /商品/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(navigation).getByRole("button", { name: /场景/ })).toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: /模型/ })).toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: /设置/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /详情/ })).not.toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "生成配置" })).toBeInTheDocument();
     expect(screen.getByRole("main", { name: "生成预览画布" })).toBeInTheDocument();
@@ -49,11 +106,307 @@ describe("App shell", () => {
     );
   });
 
+  it("opens model configuration workspace with model cards and default summary", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    await user.click(within(navigation).getByRole("button", { name: /模型/ }));
+    const toolbar = screen.getByRole("banner", { name: "应用工具栏" });
+
+    expect(screen.getByRole("main", { name: "AI 模型配置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI 模型配置" })).toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: /模型/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(toolbar).queryByRole("button", { name: "新建任务" })).not.toBeInTheDocument();
+    expect(screen.getByText("1 文生文")).toBeInTheDocument();
+    expect(screen.getByText("2 文生图")).toBeInTheDocument();
+    expect(screen.getByText("3 图生图")).toBeInTheDocument();
+    expect(screen.getByText("4 图生文")).toBeInTheDocument();
+    expect(screen.getAllByText("可用").length).toBeGreaterThanOrEqual(4);
+    expect(screen.queryByRole("combobox", { name: "文生文 Provider" })).not.toBeInTheDocument();
+    const providerTrigger = screen.getByRole("button", { name: /文生文 Provider.*OpenAI/ });
+    expect(providerTrigger).toHaveClass(
+      "inline-flex",
+      "h-8",
+      "rounded-control",
+      "bg-slate-100/70",
+      "border-white/60",
+      "text-[12px]",
+      "shadow-[inset_0_1px_0_rgba(255,255,255,0.76)]",
+    );
+    const modelInput = screen.getByRole("textbox", { name: "文生文 模型" });
+    expect(modelInput).toHaveValue("gpt-5.5");
+    const modelTrigger = screen.getByRole("button", { name: "展开文生文 模型选项" });
+    await user.click(modelTrigger);
+    expect(modelTrigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "gpt-5.5-pro" })).toHaveClass(
+      "flex",
+      "h-9",
+      "rounded-[10px]",
+      "text-[12px]",
+    );
+    expect(screen.getAllByTestId("model-status-badge")[0]).toHaveClass("whitespace-nowrap", "rounded-full");
+    expect(screen.getByText("当前默认配置")).toBeInTheDocument();
+    expect(screen.getByText("模型类别说明")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑默认" })).not.toBeInTheDocument();
+    expect(screen.queryByText("设为默认")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看接入文档" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存配置" })).toBeInTheDocument();
+  });
+
+  it("links model options to provider selection, closes menus after selection, and allows custom model input", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
+
+    const providerTrigger = screen.getByRole("button", { name: /文生文 Provider.*OpenAI/ });
+    await user.click(providerTrigger);
+    await user.click(screen.getByRole("button", { name: "火山引擎" }));
+
+    expect(providerTrigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "OpenAI" })).not.toBeInTheDocument();
+
+    const modelInput = screen.getByRole("textbox", { name: "文生文 模型" });
+    expect(modelInput).toHaveValue("doubao-seed-2-1-pro-260628");
+
+    await user.click(screen.getByRole("button", { name: "展开文生文 模型选项" }));
+    expect(screen.getByRole("button", { name: "doubao-seed-2-1-turbo-260628" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "gpt-5.5" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "doubao-seed-2-0-mini-260428" }));
+
+    expect(screen.getByRole("button", { name: "展开文生文 模型选项" })).toHaveAttribute("aria-expanded", "false");
+    expect(modelInput).toHaveValue("doubao-seed-2-0-mini-260428");
+
+    await user.clear(modelInput);
+    await user.type(modelInput, "custom-doubao-routing-model");
+
+    expect(modelInput).toHaveValue("custom-doubao-routing-model");
+    expect(screen.getByText("火山引擎 / custom-doubao-routing-model")).toBeInTheDocument();
+  });
+
+  it("supports DeepSeek provider for text-to-text models", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
+
+    const providerTrigger = screen.getByRole("button", { name: /文生文 Provider.*OpenAI/ });
+    await user.click(providerTrigger);
+    await user.click(screen.getByRole("button", { name: "DeepSeek" }));
+
+    expect(providerTrigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    const modelInput = screen.getByRole("textbox", { name: "文生文 模型" });
+    expect(modelInput).toHaveValue("deepseek-v4-flash");
+
+    await user.click(screen.getByRole("button", { name: "展开文生文 模型选项" }));
+
+    expect(screen.getByRole("button", { name: "deepseek-v4-flash" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "deepseek-v4-pro" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "gpt-5.5" })).not.toBeInTheDocument();
+    expect(screen.getByText("DeepSeek / deepseek-v4-flash")).toBeInTheDocument();
+  });
+
+  it("limits DeepSeek to text-to-text provider choices and closes provider menus after picking", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
+
+    const textToImageProviderTrigger = screen.getByRole("button", { name: /文生图 Provider.*OpenAI/ });
+    await user.click(textToImageProviderTrigger);
+
+    expect(screen.getByRole("button", { name: "OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "火山引擎" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "DeepSeek" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "OpenAI" }));
+
+    expect(textToImageProviderTrigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("toggles API key visibility in model cards", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
+
+    const apiKeyInput = screen.getByRole("textbox", { name: "文生文 API Key" });
+    expect(apiKeyInput).toHaveValue("sk-••••••••••••••••••••••••1234");
+
+    await user.click(screen.getByRole("button", { name: "显示文生文 API Key" }));
+
+    expect(apiKeyInput).toHaveValue("sk-demo-text-1234");
+
+    await user.click(screen.getByRole("button", { name: "隐藏文生文 API Key" }));
+
+    expect(apiKeyInput).toHaveValue("sk-••••••••••••••••••••••••1234");
+  });
+
+  it("opens settings workspace and previews notification sound with Web Audio", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    const toolbar = screen.getByRole("banner", { name: "应用工具栏" });
+    await user.click(within(toolbar).getByRole("button", { name: "设置" }));
+
+    expect(screen.getByRole("main", { name: "设置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    expect(within(navigation).getByRole("button", { name: /设置/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(toolbar).queryByRole("button", { name: "新建任务" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("studio-side-divider")).toHaveClass(
+      "top-[52px]",
+      "bottom-0",
+      "left-[var(--studio-nav-width)]",
+    );
+    expect(screen.getByTestId("studio-side-divider")).not.toHaveClass("inset-y-0");
+    expect(screen.getByText("通用设置")).toBeInTheDocument();
+    expect(screen.getByText("存储与输出")).toBeInTheDocument();
+    expect(screen.getByText("提醒与通知")).toBeInTheDocument();
+    expect(screen.getByText("缓存与清理")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/Users/demo/Documents/商拍工坊/outputs")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "提示音" })).not.toBeInTheDocument();
+    const soundTrigger = screen.getByRole("button", { name: /提示音.*清脆音效/ });
+    expect(soundTrigger).toHaveClass(
+      "inline-flex",
+      "h-8",
+      "rounded-control",
+      "bg-slate-100/70",
+      "border-white/60",
+      "text-[12px]",
+      "shadow-[inset_0_1px_0_rgba(255,255,255,0.76)]",
+    );
+    expect(screen.getByTestId("general-settings-restore-row")).toHaveClass("grid-cols-1");
+
+    const launchToggle = screen.getByRole("button", { name: "开机自动启动" });
+    const launchToggleThumb = launchToggle.querySelector("span");
+    expect(launchToggle).toHaveClass("h-[18px]", "w-[34px]");
+    expect(launchToggleThumb).not.toBeNull();
+    expect(launchToggleThumb).toHaveClass("left-0.5", "top-1/2", "-translate-y-1/2", "translate-x-4");
+
+    await user.click(soundTrigger);
+    const successSoundOption = screen.getByRole("button", { name: "完成音效" });
+    expect(successSoundOption).toHaveClass("flex", "h-9", "rounded-[10px]", "text-[12px]");
+    await user.click(successSoundOption);
+    expect(screen.getByRole("button", { name: /提示音.*完成音效/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "试听提示音" }));
+
+    expect(audioContextInstances).toHaveLength(1);
+    expect(audioContextInstances[0].createOscillator).toHaveBeenCalled();
+    expect(audioContextInstances[0].createGain).toHaveBeenCalled();
+  });
+
+  it("maps every scene template to the source ecom-details-image template ids", () => {
+    expect(sceneTemplates.map((template) => template.sourceTemplateId)).toEqual([
+      "hero-image",
+      "lifestyle-scene",
+      "flat-lay",
+      "detail-macro",
+      "poster-banner",
+      "social-media",
+      "ugc-style",
+      "model-showcase",
+      "before-after",
+      "packaging",
+      "infographic",
+      "creative-concept",
+      "size-spec",
+      "multi-product",
+      "livestream",
+      "try-on-virtual",
+      "exploded-view",
+      "ghost-mannequin",
+      "multi-angle-grid",
+      "magazine-editorial",
+      "seasonal-campaign",
+      "luxury-atmospherics",
+      "device-mockup",
+      "storefront",
+      "sports-campaign",
+    ]);
+  });
+
   it("keeps the first UI slice free of right inspector and bottom status regions", () => {
     render(<App />);
 
     expect(screen.queryByRole("complementary", { name: "右侧属性区" })).not.toBeInTheDocument();
     expect(screen.queryByRole("contentinfo", { name: "底部状态栏" })).not.toBeInTheDocument();
+  });
+
+  it("keeps failed result cards selectable but out of download and preview actions", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PreviewCanvas
+        boards={[]}
+        detailImages={[
+          {
+            errorMessage: "生成失败",
+            id: "failed-image",
+            status: "failed",
+            title: "商品主图",
+          },
+          {
+            id: "complete-image",
+            status: "complete",
+            title: "核心卖点图",
+          },
+          {
+            errorMessage: "生成失败",
+            id: "failed-copy",
+            kind: "listing-copy",
+            status: "failed",
+            title: "商品上架文案",
+          },
+        ]}
+      />,
+    );
+
+    const failedCards = screen.getAllByTestId("failed-result-card");
+    expect(failedCards).toHaveLength(2);
+    for (const failedCard of failedCards) {
+      expect(failedCard).toHaveTextContent("生成失败");
+      expect(failedCard).not.toHaveTextContent("美豆不足");
+      expect(failedCard).toHaveClass("border-transparent", "hover:border-slate-950/90");
+      expect(failedCard).not.toHaveClass("border-slate-950/90");
+      const checkbox = within(failedCard).getByRole("checkbox");
+      expect(checkbox.parentElement).toHaveClass("opacity-0", "group-hover:opacity-100");
+      const retryButton = within(failedCard).getByRole("button", { name: /重试/ });
+      expect(retryButton).toHaveTextContent(/^重新生成$/);
+      expect(retryButton.parentElement).toHaveClass("opacity-0", "group-hover:opacity-100");
+      expect(retryButton).toHaveClass("h-7", "rounded-[6px]", "bg-slate-950/72", "backdrop-blur-md", "hover:bg-slate-950/82");
+      const deleteButton = within(failedCard).getByRole("button", { name: /删除/ });
+      expect(deleteButton).toHaveClass("size-7", "rounded-[7px]", "bg-white/86", "backdrop-blur-md");
+      expect(deleteButton.parentElement).toHaveClass("opacity-0", "group-hover:opacity-100");
+      expect(deleteButton.querySelector(".lucide-trash2")).toBeInTheDocument();
+      expect(deleteButton.querySelector(".lucide-ellipsis")).not.toBeInTheDocument();
+    }
+
+    await user.click(within(failedCards[0]).getByRole("checkbox"));
+
+    expect(within(failedCards[0]).getByRole("checkbox")).toBeChecked();
+    expect(screen.getByRole("button", { name: "删除所选图片" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批量下载所选图片" })).not.toBeInTheDocument();
+
+    await user.click(failedCards[0]);
+
+    expect(screen.queryByRole("dialog", { name: "图片相册预览" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "预览长图" }));
+
+    expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "查看商品上架文案" })).not.toBeInTheDocument();
   });
 
   it("exposes the primary product workflow modules as reusable option tiles", () => {
@@ -102,8 +455,12 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "生成记录" }));
 
-    expect(screen.getByRole("dialog", { name: "生成记录" })).toBeInTheDocument();
-    expect(screen.getByText("暂无生成记录")).toBeInTheDocument();
+    const emptyHistoryDialog = screen.getByRole("dialog", { name: "生成记录" });
+    expect(emptyHistoryDialog).toBeInTheDocument();
+    expect(emptyHistoryDialog).toHaveClass("fixed", "z-[130]", "bg-white");
+    expect(emptyHistoryDialog).not.toHaveClass("bg-white/96", "backdrop-blur-2xl");
+    expect(screen.getByTestId("generation-history-empty-state")).toHaveClass("bg-slate-50");
+    expect(screen.getByTestId("generation-history-empty-state")).not.toHaveClass("bg-slate-50/95");
 
     await user.click(screen.getByRole("button", { name: "生成记录" }));
     expect(screen.queryByRole("dialog", { name: "生成记录" })).not.toBeInTheDocument();
@@ -111,7 +468,7 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "生成记录" }));
     await user.click(screen.getByRole("button", { name: "关闭生成记录" }));
     await user.click(screen.getByRole("button", { name: "上传图片" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "9:16" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "网面人像印花无袖运动T恤");
 
@@ -152,9 +509,13 @@ describe("App shell", () => {
     const restoredHistoryDialog = screen.getByRole("dialog", { name: "生成记录" });
     await user.click(within(restoredHistoryDialog).getAllByRole("button", { name: /商品详情图/ })[0]);
 
-    expect(screen.getByRole("button", { name: /商品/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /商品/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(screen.getByText("生成结果:")).toBeInTheDocument();
-    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(2);
+    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(1);
+    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
   });
 
   it("opens product image selection, previews selected images, and removes them", async () => {
@@ -523,7 +884,8 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "生成场景图片（3张）" })).toBeEnabled();
     expect(screen.getByRole("checkbox", { name: "街角咖啡" })).toBeEnabled();
     expect(screen.getAllByRole("button", { name: "画幅 全身" })[0]).toBeEnabled();
-    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(3);
+    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(2);
+    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
   });
 
   it("guides clothing generation through image, model, and scene requirements", async () => {
@@ -588,11 +950,6 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
 
-    expect(await screen.findByRole("button", { name: "请选择生成设置" })).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
-    await user.click(screen.getByRole("button", { name: "9:16" }));
-
     expect(screen.getByRole("button", { name: "请补充商品卖点" })).toBeDisabled();
 
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "防晒透气，适合户外骑行。");
@@ -623,7 +980,7 @@ describe("App shell", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "9:16" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "网面人像印花无袖运动T恤");
 
@@ -760,7 +1117,7 @@ describe("App shell", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "9:16" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "网面人像印花无袖运动T恤");
 
@@ -804,11 +1161,24 @@ describe("App shell", () => {
 
     expect(firstDetailImage).toHaveTextContent("首屏主视觉");
     expect(firstDetailImage).toHaveClass("border-2");
+    expect(within(firstDetailImage).getByTestId("generated-image-title")).toHaveClass(
+      "translate-y-8",
+      "group-hover:translate-y-0",
+      "transition-transform",
+    );
+    expect(within(firstDetailImage).getByTestId("generated-image-card-actions")).toHaveClass(
+      "translate-y-2",
+      "opacity-0",
+      "group-hover:translate-y-0",
+      "group-hover:opacity-100",
+    );
     expect(within(firstDetailImage).getByRole("button", { name: /修改尺寸/ })).toBeInTheDocument();
     expect(within(firstDetailImage).getByRole("button", { name: /下载/ })).toBeInTheDocument();
     expect(within(firstDetailImage).getByRole("button", { name: /删除/ })).toBeInTheDocument();
-    expect(within(firstDetailImage).getByRole("button", { name: "AI改图 首屏主视觉" })).toBeInTheDocument();
-    expect(within(firstDetailImage).getByRole("button", { name: "编辑文字 首屏主视觉" })).toBeInTheDocument();
+    const rewriteImageButton = within(firstDetailImage).getByRole("button", { name: "AI改图 首屏主视觉" });
+    const editTextButton = within(firstDetailImage).getByRole("button", { name: "编辑文字 首屏主视觉" });
+    expect(rewriteImageButton).toHaveClass("bg-slate-950/58", "backdrop-blur-md", "hover:bg-slate-950/72");
+    expect(editTextButton).toHaveClass("bg-slate-950/58", "backdrop-blur-md", "hover:bg-slate-950/72");
 
     await user.click(within(firstDetailImage).getByRole("button", { name: "AI改图 首屏主视觉" }));
 
@@ -877,7 +1247,7 @@ describe("App shell", () => {
 
     const longPreviewDialog = screen.getByRole("dialog", { name: "长图预览" });
     expect(longPreviewDialog).toBeInTheDocument();
-    expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(3);
+    expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(2);
     expect(within(longPreviewDialog).queryByText("首屏主视觉")).not.toBeInTheDocument();
     expect(within(longPreviewDialog).queryByText("突出商品核心卖点，强化购买决策")).not.toBeInTheDocument();
 
@@ -925,14 +1295,14 @@ describe("App shell", () => {
     expect(firstDetailImage).not.toHaveClass("border-slate-950");
     expect(within(firstDetailImage).getByRole("checkbox", { name: "选择 首屏主视觉" })).not.toBeChecked();
     expect(screen.getByRole("dialog", { name: "图片相册预览" })).toHaveClass("fixed", "inset-0");
-    expect(screen.getByText("1 / 3")).toBeInTheDocument();
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
     expect(screen.getByLabelText("预览 首屏主视觉")).toBeInTheDocument();
     expect(screen.getByTestId("image-lightbox-thumbnail-strip")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看缩略图 使用场景图" })).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "ArrowRight" });
 
-    expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
     expect(screen.getByLabelText("预览 使用场景图")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "放大图片" }));
@@ -980,6 +1350,82 @@ describe("App shell", () => {
     expect(screen.getAllByText("AI 生成中")).toHaveLength(3);
   });
 
+  it("adds a listing copy result card and opens the listing copy dialog when enabled", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/jacket.png",
+        name: "jacket.png",
+        path: "/Users/demo/Pictures/jacket.png",
+        src: "asset://jacket.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
+    await user.click(screen.getByRole("button", { name: "9:16" }));
+    await user.click(screen.getByRole("button", { name: "商品上架文案生成" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "黑色宽松落肩夹克，双面领设计，通勤防风。");
+
+    for (const moduleName of ["核心卖点图", "多角度图", "场景氛围图", "商品细节图"]) {
+      await user.click(screen.getByRole("checkbox", { name: moduleName }));
+    }
+
+    vi.mocked(Math.random).mockReturnValue(0);
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    vi.useRealTimers();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "生成详情图（2张）" }));
+
+    expect(screen.getByTestId("listing-copy-result-card")).toHaveTextContent("AI 生成中");
+
+    act(() => {
+      vi.advanceTimersByTime(3200);
+    });
+    vi.useRealTimers();
+
+    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(1);
+    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
+    const listingCopyCard = screen.getByTestId("listing-copy-result-card");
+    expect(listingCopyCard).toHaveTextContent("商品上架文案");
+    expect(within(listingCopyCard).getByText("商品上架文案")).toHaveClass("bg-blue-50", "text-app-blue");
+    expect(within(listingCopyCard).getByText("宝贝标题")).toBeInTheDocument();
+    expect(within(listingCopyCard).getByText("核心卖点/促销利益点")).toBeInTheDocument();
+    expect(within(listingCopyCard).getByText("详情页文案")).toBeInTheDocument();
+    expect(within(listingCopyCard).getByText("搜索关键词/属性词")).toBeInTheDocument();
+    expect(within(listingCopyCard).getByRole("button", { name: "查看商品上架文案" })).toBeInTheDocument();
+    expect(within(listingCopyCard).getByRole("button", { name: "复制商品上架文案卡片" })).toBeInTheDocument();
+
+    await user.click(within(listingCopyCard).getByRole("button", { name: "复制商品上架文案卡片" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("已复制商品上架文案");
+
+    await user.click(within(listingCopyCard).getByRole("button", { name: "查看商品上架文案" }));
+
+    const listingDialog = screen.getByRole("dialog", { name: "商品上架文案" });
+    expect(listingDialog).toBeInTheDocument();
+    expect(within(listingDialog).getByText("宝贝标题")).toBeInTheDocument();
+    expect(within(listingDialog).getByText("核心卖点/促销利益点")).toBeInTheDocument();
+    expect(within(listingDialog).getByText("详情页文案")).toBeInTheDocument();
+    expect(within(listingDialog).getByText("搜索关键词/属性词")).toBeInTheDocument();
+    expect(within(listingDialog).getByText("主图拍摄规划")).toBeInTheDocument();
+    expect(within(listingDialog).getByRole("button", { name: "翻译" })).toBeInTheDocument();
+    expect(within(listingDialog).getByRole("button", { name: "复制商品上架文案" })).toBeInTheDocument();
+
+    await user.click(within(listingDialog).getByRole("button", { name: "关闭商品上架文案" }));
+
+    expect(screen.queryByRole("dialog", { name: "商品上架文案" })).not.toBeInTheDocument();
+  });
+
   it("asks users to select product modules when all modules are unchecked", async () => {
     const user = userEvent.setup();
 
@@ -995,7 +1441,7 @@ describe("App shell", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "16:9" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "防晒透气，适合户外骑行。");
 
@@ -1017,7 +1463,7 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "淘宝天猫" }));
     await user.click(screen.getByRole("button", { name: "亚马逊" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
 
     expect(screen.getByRole("button", { name: /高级A\+（Web端）/ })).toHaveTextContent("1464:600");
     expect(screen.getByRole("button", { name: /高级A\+（移动端）/ })).toHaveTextContent("600:450");
@@ -1037,14 +1483,27 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "中文" })).toBeInTheDocument();
   });
 
-  it("defaults domestic platforms to China and hides advanced A+ format options", async () => {
+  it("only shows ordinary and advanced A+ formats for Amazon", async () => {
     const user = userEvent.setup();
 
     render(<App />);
 
+    await user.click(screen.getByTestId("product-format-select-trigger"));
+
+    expect(screen.queryByRole("button", { name: "普通A+" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "高级A+" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /高级A\+（Web端）/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /高级A\+（移动端）/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "1:1" }).length).toBeGreaterThanOrEqual(1);
+
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "淘宝天猫" }));
     await user.click(screen.getByRole("button", { name: "亚马逊" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
+
+    expect(screen.getAllByRole("button", { name: /普通A\+/ }).some((button) => button.textContent?.includes("970:600"))).toBe(true);
+    expect(screen.getByRole("button", { name: "高级A+" })).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "高级A+" }));
 
     expect(screen.getByTestId("product-format-select-trigger")).toHaveTextContent("高级A+（Web端）");
@@ -1055,14 +1514,14 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "京东" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "中国" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "中文" })).toBeInTheDocument();
-    expect(screen.getByTestId("product-format-select-trigger")).toHaveTextContent("普通A+");
+    expect(screen.getByTestId("product-format-select-trigger")).toHaveTextContent("1:1");
 
     await user.click(screen.getByTestId("product-format-select-trigger"));
 
+    expect(screen.queryByRole("button", { name: "普通A+" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "高级A+" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /高级A\+（Web端）/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /高级A\+（移动端）/ })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /普通A\+/ }).some((button) => button.textContent?.includes("970:600"))).toBe(true);
   });
 
   it("keeps the format dropdown open for advanced A+ and supports web plus mobile selections", async () => {
@@ -1072,7 +1531,7 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "淘宝天猫" }));
     await user.click(screen.getByRole("button", { name: "亚马逊" }));
-    await user.click(screen.getByRole("button", { name: "普通A+" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
     await user.click(screen.getByRole("button", { name: "高级A+" }));
 
     expect(screen.getByTestId("product-format-select-trigger")).toHaveTextContent("高级A+（Web端）");
@@ -1114,6 +1573,208 @@ describe("App shell", () => {
     await user.click(brandModuleText);
 
     expect(screen.getByRole("checkbox", { name: "品牌故事图" })).not.toBeChecked();
+  });
+
+  it("runs viral style analysis after product images are uploaded", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/helmet.png",
+        name: "helmet.png",
+        path: "/Users/demo/Pictures/helmet.png",
+        src: "asset://helmet.png",
+      },
+    ]);
+
+    render(<App />);
+
+    expect(screen.getByText("附加功能")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "商品上架文案生成" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: "开始爆款风格分析" })).not.toBeInTheDocument();
+    expect(screen.queryByText("限免")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("商品上架文案生成说明")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "爆款风格分析" }));
+
+    expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+
+    expect(await screen.findByAltText("helmet.png")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeEnabled();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+
+    expect(screen.getByText("正在分析爆款风格...")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1800);
+    });
+    vi.useRealTimers();
+
+    expect(screen.getByRole("checkbox", { name: "街头潮酷风" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "通勤质感风" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "换一批风格" })).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "换一批风格" }));
+
+    expect(screen.getByText("正在分析爆款风格...")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1800);
+    });
+    vi.useRealTimers();
+
+    expect(screen.getByRole("checkbox", { name: "轻奢极简风" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "商品上架文案生成" }));
+
+    expect(screen.getByRole("button", { name: "商品上架文案生成" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: /服饰/ }));
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /商品/ }));
+
+    expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "商品上架文案生成" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeEnabled();
+  });
+
+  it("groups generated product results by selected viral styles with a source image card", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/helmet-front.png",
+        name: "helmet-front.png",
+        path: "/Users/demo/Pictures/helmet-front.png",
+        src: "asset://helmet-front.png",
+      },
+      {
+        id: "/Users/demo/Pictures/helmet-side.png",
+        name: "helmet-side.png",
+        path: "/Users/demo/Pictures/helmet-side.png",
+        src: "asset://helmet-side.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "爆款风格分析" }));
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByTestId("product-format-select-trigger"));
+    await user.click(screen.getByRole("button", { name: "9:16" }));
+    await user.click(screen.getByRole("button", { name: "商品上架文案生成" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "红黑潮玩摆件，电竞桌搭，适合社媒种草。");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+
+    act(() => {
+      vi.advanceTimersByTime(1800);
+    });
+    vi.useRealTimers();
+
+    await user.click(screen.getByRole("checkbox", { name: "街头潮酷风" }));
+    await user.click(screen.getByRole("checkbox", { name: "通勤质感风" }));
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    vi.useRealTimers();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "生成详情图（12张）" }));
+
+    vi.mocked(Math.random).mockReturnValue(0.1);
+    act(() => {
+      vi.advanceTimersByTime(3200);
+    });
+    vi.useRealTimers();
+
+    const resultGroups = screen.getAllByTestId("generated-result-group");
+    expect(resultGroups).toHaveLength(2);
+    expect(resultGroups[0]).toHaveTextContent("街头潮酷风");
+    expect(resultGroups[1]).toHaveTextContent("通勤质感风");
+    expect(screen.queryByRole("button", { name: "预览长图" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载全部" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "更多生成结果操作" })).not.toBeInTheDocument();
+
+    for (const resultGroup of resultGroups) {
+      const sourceCard = within(resultGroup).getByTestId("generated-source-image-card");
+      expect(sourceCard).toHaveTextContent("原图");
+      expect(within(sourceCard).getAllByRole("img")).toHaveLength(2);
+      expect(within(sourceCard).queryByRole("checkbox")).not.toBeInTheDocument();
+      expect(within(sourceCard).queryByRole("button")).not.toBeInTheDocument();
+      expect(within(resultGroup).getByTestId("listing-copy-result-card")).toBeInTheDocument();
+    }
+  });
+
+  it("renders uploaded product images as one source card before flat generated results", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/helmet-front.png",
+        name: "helmet-front.png",
+        path: "/Users/demo/Pictures/helmet-front.png",
+        src: "asset://helmet-front.png",
+      },
+      {
+        id: "/Users/demo/Pictures/helmet-side.png",
+        name: "helmet-side.png",
+        path: "/Users/demo/Pictures/helmet-side.png",
+        src: "asset://helmet-side.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "红黑潮玩摆件，电竞桌搭，适合社媒种草。");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    vi.mocked(Math.random).mockReturnValue(0.99);
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    vi.useRealTimers();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "生成详情图（6张）" }));
+
+    act(() => {
+      vi.advanceTimersByTime(3200);
+    });
+    vi.useRealTimers();
+
+    const resultGrid = screen.getByTestId("generated-result-grid");
+    const firstResultCard = within(resultGrid).getAllByRole("article")[0];
+    const sourceCard = within(resultGrid).getByTestId("generated-source-image-card");
+
+    expect(firstResultCard).toBe(sourceCard);
+    expect(sourceCard).toHaveTextContent("原图");
+    expect(sourceCard).not.toHaveTextContent("首屏主视觉");
+    expect(within(sourceCard).getAllByRole("img")).toHaveLength(2);
+    expect(within(sourceCard).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(sourceCard).queryByRole("button")).not.toBeInTheDocument();
+
+    await user.click(sourceCard);
+
+    expect(screen.queryByRole("dialog", { name: "图片相册预览" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "预览长图" }));
+
+    expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(screen.getAllByTestId("generated-detail-image-card").length);
   });
 
   it("opens a non-editable AI writing dialog and confirms the suggestion", async () => {
@@ -1162,7 +1823,7 @@ describe("App shell", () => {
     );
 
     await user.click(screen.getByRole("button", { name: /服饰/ }));
-    await user.click(screen.getByRole("button", { name: /商品/ }));
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /商品/ }));
 
     expect(screen.getByAltText("helmet.png")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "品牌故事图" })).toBeChecked();
@@ -1181,7 +1842,7 @@ describe("App shell", () => {
     await user.type(screen.getByPlaceholderText(/描述你想要的场景/), "保留服饰场景");
     await user.click(screen.getByRole("button", { name: "AI推荐" }));
 
-    await user.click(screen.getByRole("button", { name: /商品/ }));
+    await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /商品/ }));
     await user.click(screen.getByRole("button", { name: /服饰/ }));
 
     expect(screen.getByRole("button", { name: "AI 生成" })).toHaveAttribute("aria-pressed", "true");
@@ -1196,12 +1857,117 @@ describe("App shell", () => {
     expect(screen.getByPlaceholderText(/描述你想要的场景/)).toHaveValue("保留服饰场景");
   });
 
+  it("guides scene generation through reference images, prompt review, and image results", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/cup.png",
+        name: "cup.png",
+        path: "/Users/demo/Pictures/cup.png",
+        src: "asset://cup.png",
+      },
+    ]);
+
+    render(<App />);
+
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    const sceneNavigationButton = within(navigation).getByRole("button", { name: /场景/ });
+
+    await user.click(sceneNavigationButton);
+
+    expect(sceneNavigationButton).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("complementary", { name: "场景配置" })).toBeInTheDocument();
+    expect(screen.getByRole("main", { name: "场景预览画布" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请上传参考图" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "单张场景图" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "3:4" })).toHaveAttribute("aria-pressed", "true");
+    const sceneCategoryTabs = screen.getByRole("tablist", { name: "场景分类" });
+    const baseProductSceneTab = screen.getByRole("tab", { name: "基础商品" });
+
+    expect(sceneCategoryTabs).toHaveClass("grid", "grid-cols-5");
+    expect(sceneCategoryTabs).not.toHaveClass("overflow-x-auto");
+    expect(baseProductSceneTab).toHaveClass("min-w-0", "truncate", "px-0.5", "text-[11px]");
+    expect(baseProductSceneTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "内容营销" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getAllByRole("radio")).toHaveLength(5);
+    expect(screen.getByRole("radio", { name: "白底主图" })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: "运动 Campaign" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "极简电商" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "内容营销" }));
+
+    expect(screen.getByRole("tab", { name: "内容营销" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getAllByRole("radio")).toHaveLength(6);
+    expect(screen.getByRole("radio", { name: "运动 Campaign" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "运动 Campaign" }));
+
+    expect(screen.getByRole("radio", { name: "运动 Campaign" })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+
+    expect(selectProductImagesMock).toHaveBeenCalledWith(3);
+    expect(await screen.findByAltText("cup.png")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "完整图片包" }));
+
+    expect(screen.queryByRole("tablist", { name: "场景分类" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "白底主图" })).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "极简电商" })).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "1:1" }));
+    await user.type(
+      screen.getByPlaceholderText(/建议补充产品名称/),
+      "陶瓷保温杯，卖点是防滑杯套和通勤便携。",
+    );
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "生成图片方案" }));
+
+    expect(screen.getByRole("complementary", { name: "场景方案与 Prompt" })).toBeInTheDocument();
+    expect(screen.getByText("方案生成中...")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(2600);
+    });
+    vi.useRealTimers();
+
+    expect(screen.getByText("统一风格锁定")).toBeInTheDocument();
+    expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14);
+    expect(screen.getByText("H1 首屏主视觉")).toBeInTheDocument();
+    expect(screen.getByText("D9 FAQ / 风险逆转 / CTA")).toBeInTheDocument();
+    expect(screen.getAllByText(/陶瓷保温杯/).length).toBeGreaterThan(0);
+
+    const firstPrompt = screen.getByRole("textbox", { name: "改写 H1 首屏主视觉 Prompt" });
+    expect((firstPrompt as HTMLTextAreaElement).value).toContain("统一风格锁定：");
+    await user.clear(firstPrompt);
+    await user.type(firstPrompt, "统一风格锁定：固定色板。主图居中，留白至少 45%。");
+
+    expect(firstPrompt).toHaveValue("统一风格锁定：固定色板。主图居中，留白至少 45%。");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成图片" }));
+
+    expect(screen.getByText("生成结果:")).toBeInTheDocument();
+    expect(screen.getAllByText("AI 生成中")).toHaveLength(14);
+
+    act(() => {
+      vi.advanceTimersByTime(3200);
+    });
+    vi.useRealTimers();
+
+    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(13);
+    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
+    expect(screen.getByText("H1 首屏主视觉")).toBeInTheDocument();
+  });
+
   it("switches from detail generation to the clothing try-on workspace", async () => {
     const user = userEvent.setup();
 
     render(<App />);
 
-    expect(screen.queryByRole("button", { name: /场景/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /场景/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /详情/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /服饰/ }));

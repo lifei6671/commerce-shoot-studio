@@ -6,8 +6,12 @@ import {
   defaultProductGenerationSettings,
   GenerationConfigPanel,
 } from "../features/generation/components/GenerationConfigPanel";
-import type { StrategyModuleDraft } from "../features/generation/components/GenerationConfigPanel";
-import { PreviewCanvas, type GeneratedDetailImage } from "../features/generation/components/PreviewCanvas";
+import type { StrategyModuleDraft, ViralStyleAnalysisResult } from "../features/generation/components/GenerationConfigPanel";
+import {
+  PreviewCanvas,
+  type GeneratedDetailImage,
+  type ProductListingCopy,
+} from "../features/generation/components/PreviewCanvas";
 import {
   ClothingConfigPanel,
   ClothingSceneSelectionPanel,
@@ -19,10 +23,21 @@ import {
   GenerationHistoryPopover,
   type GenerationRecord,
 } from "../features/history/components/GenerationHistoryPopover";
+import { SceneConfigPanel } from "../features/scenes/components/SceneConfigPanel";
+import { ScenePreviewCanvas } from "../features/scenes/components/ScenePreviewCanvas";
+import { ScenePromptReviewPanel } from "../features/scenes/components/ScenePromptReviewPanel";
+import {
+  createSceneImagePlans,
+  defaultSceneConfig,
+  type SceneImagePlan,
+} from "../features/scenes/lib/sceneImagePlan";
+import { ModelConfigPage } from "../features/model-config/components/ModelConfigPage";
+import { SettingsPage } from "../features/settings/components/SettingsPage";
 import { moduleOptions, navItems, previewBoards } from "./studioData";
 import type { ProductImageAsset } from "../features/generation/lib/productImagePicker";
 
 const generationCompleteDelayMs = 3000;
+const scenePlanDraftDelayMs = 2500;
 
 export function App() {
   const [activeWorkspace, setActiveWorkspace] = useState("product");
@@ -31,6 +46,7 @@ export function App() {
   const [productGenerationSettingsTouched, setProductGenerationSettingsTouched] = useState(false);
   const [productModules, setProductModules] = useState(() => moduleOptions);
   const [productPrompt, setProductPrompt] = useState("");
+  const [selectedProductViralStyles, setSelectedProductViralStyles] = useState<ViralStyleAnalysisResult[]>([]);
   const [productStrategyDrafting, setProductStrategyDrafting] = useState(false);
   const [productDetailImages, setProductDetailImages] = useState<GeneratedDetailImage[]>([]);
   const [productDetailGenerating, setProductDetailGenerating] = useState(false);
@@ -38,12 +54,21 @@ export function App() {
   const [clothingSceneDrafting, setClothingSceneDrafting] = useState(false);
   const [clothingSceneImages, setClothingSceneImages] = useState<GeneratedDetailImage[]>([]);
   const [clothingSceneGenerating, setClothingSceneGenerating] = useState(false);
+  const [sceneConfig, setSceneConfig] = useState(defaultSceneConfig);
+  const [scenePromptReviewing, setScenePromptReviewing] = useState(false);
+  const [scenePlanGenerating, setScenePlanGenerating] = useState(false);
+  const [sceneImagePlans, setSceneImagePlans] = useState<SceneImagePlan[]>([]);
+  const [sceneImages, setSceneImages] = useState<GeneratedDetailImage[]>([]);
+  const [sceneImageGenerating, setSceneImageGenerating] = useState(false);
   const [generationRecords, setGenerationRecords] = useState<GenerationRecord[]>([]);
   const [activeGenerationRecordId, setActiveGenerationRecordId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [productGeneratingRecordId, setProductGeneratingRecordId] = useState<string | null>(null);
   const [clothingGeneratingRecordId, setClothingGeneratingRecordId] = useState<string | null>(null);
   const isClothingWorkspace = activeWorkspace === "clothing";
+  const isModelWorkspace = activeWorkspace === "model";
+  const isSceneWorkspace = activeWorkspace === "scene";
+  const isSettingsWorkspace = activeWorkspace === "settings";
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
 
   function handleProductGenerationSettingsChange(settings: typeof productGenerationSettings) {
@@ -59,16 +84,58 @@ export function App() {
 
   function handleGenerateDetails(drafts: StrategyModuleDraft[]) {
     const recordId = createGenerationRecordId("product");
-    const images = drafts.map((draft) => ({
-      id: `${recordId}-${draft.id}`,
-      status: "generating" as const,
-      title: draft.title,
-    }));
+    const activeViralStyles = productGenerationSettings.viralStyleAnalysisEnabled ? selectedProductViralStyles : [];
+    const resultItems =
+      activeViralStyles.length > 0
+        ? activeViralStyles.flatMap((style) => {
+            const groupId = `${recordId}-${createResultGroupSlug(style.title)}`;
+            const images: GeneratedDetailImage[] = drafts.map((draft) => ({
+              groupId,
+              groupTitle: style.title,
+              id: `${groupId}-${draft.id}`,
+              status: "generating" as const,
+              title: draft.title,
+            }));
+            const sourceImage: GeneratedDetailImage = {
+              groupId,
+              groupTitle: style.title,
+              id: `${groupId}-source`,
+              kind: "source-image" as const,
+              sourceImages: productImages,
+              status: "complete" as const,
+              title: "原图",
+            };
+            const listingCopy: GeneratedDetailImage[] = productGenerationSettings.listingCopyGenerationEnabled
+              ? [
+                  {
+                    groupId,
+                    groupTitle: style.title,
+                    id: `${groupId}-listing-copy`,
+                    kind: "listing-copy" as const,
+                    listingCopy: createProductListingCopy(`${style.title} ${productPrompt}`),
+                    status: "generating" as const,
+                    title: "商品上架文案",
+                  },
+                ]
+              : [];
+
+            return [sourceImage, ...images, ...listingCopy];
+          })
+        : createFlatProductResultItems(
+            recordId,
+            drafts,
+            productGenerationSettings.listingCopyGenerationEnabled,
+            productPrompt,
+            productImages,
+          );
     const record: GenerationRecord = {
       createdAt: Date.now(),
       id: recordId,
-      images,
-      inputSummary: createProductHistorySummary(productGenerationSettings, drafts.length),
+      images: resultItems,
+      inputSummary: createProductHistorySummary(
+        productGenerationSettings,
+        resultItems.filter((image) => image.kind !== "source-image").length,
+      ),
       kind: "product-detail",
       status: "generating",
       title: "商品详情图",
@@ -78,7 +145,7 @@ export function App() {
     setGenerationRecords((currentRecords) => [record, ...currentRecords]);
     setActiveGenerationRecordId(recordId);
     setProductGeneratingRecordId(recordId);
-    setProductDetailImages(images);
+    setProductDetailImages(resultItems);
     setProductDetailGenerating(true);
     setHistoryOpen(false);
   }
@@ -149,6 +216,34 @@ export function App() {
     setHistoryOpen(false);
   }
 
+  function handleGenerateScenePlan() {
+    setScenePromptReviewing(true);
+    setScenePlanGenerating(true);
+    setSceneImagePlans([]);
+    setSceneImages([]);
+  }
+
+  function handleBackToSceneConfig() {
+    setScenePromptReviewing(false);
+    setScenePlanGenerating(false);
+    setSceneImageGenerating(false);
+    setSceneImagePlans([]);
+    setSceneImages([]);
+  }
+
+  function handleGenerateSceneImages(plans: SceneImagePlan[]) {
+    setSceneImages(
+      plans.map((plan) => ({
+        id: `scene-${plan.id}`,
+        prompt: plan.prompt,
+        ratio: plan.ratio,
+        status: "generating",
+        title: plan.title,
+      })),
+    );
+    setSceneImageGenerating(true);
+  }
+
   useEffect(() => {
     function disableContextMenu(event: MouseEvent) {
       event.preventDefault();
@@ -165,22 +260,24 @@ export function App() {
     }
 
     const generationTimer = window.setTimeout(() => {
-      setProductDetailImages((currentImages) =>
-        currentImages.map((image) => ({ ...image, status: "complete" })),
-      );
-      if (productGeneratingRecordId) {
-        setGenerationRecords((currentRecords) =>
-          currentRecords.map((record) =>
-            record.id === productGeneratingRecordId
-              ? {
-                  ...record,
-                  images: record.images.map((image) => ({ ...image, status: "complete" })),
-                  status: "complete",
-                }
-              : record,
-          ),
-        );
-      }
+      setProductDetailImages((currentImages) => {
+        const failedImageId = pickRandomFailedImageId(currentImages);
+        const completedImages = completeGeneratedImages(currentImages, failedImageId);
+        if (productGeneratingRecordId) {
+          setGenerationRecords((currentRecords) =>
+            currentRecords.map((record) =>
+              record.id === productGeneratingRecordId
+                ? {
+                    ...record,
+                    images: completeGeneratedImages(record.images, failedImageId),
+                    status: "complete",
+                  }
+                : record,
+            ),
+          );
+        }
+        return completedImages;
+      });
       setProductDetailGenerating(false);
       setProductGeneratingRecordId(null);
     }, generationCompleteDelayMs);
@@ -194,22 +291,24 @@ export function App() {
     }
 
     const generationTimer = window.setTimeout(() => {
-      setClothingSceneImages((currentImages) =>
-        currentImages.map((image) => ({ ...image, status: "complete" })),
-      );
-      if (clothingGeneratingRecordId) {
-        setGenerationRecords((currentRecords) =>
-          currentRecords.map((record) =>
-            record.id === clothingGeneratingRecordId
-              ? {
-                  ...record,
-                  images: record.images.map((image) => ({ ...image, status: "complete" })),
-                  status: "complete",
-                }
-              : record,
-          ),
-        );
-      }
+      setClothingSceneImages((currentImages) => {
+        const failedImageId = pickRandomFailedImageId(currentImages);
+        const completedImages = completeGeneratedImages(currentImages, failedImageId);
+        if (clothingGeneratingRecordId) {
+          setGenerationRecords((currentRecords) =>
+            currentRecords.map((record) =>
+              record.id === clothingGeneratingRecordId
+                ? {
+                    ...record,
+                    images: completeGeneratedImages(record.images, failedImageId),
+                    status: "complete",
+                  }
+                : record,
+            ),
+          );
+        }
+        return completedImages;
+      });
       setClothingSceneGenerating(false);
       setClothingGeneratingRecordId(null);
     }, generationCompleteDelayMs);
@@ -217,10 +316,37 @@ export function App() {
     return () => window.clearTimeout(generationTimer);
   }, [clothingSceneGenerating, clothingGeneratingRecordId]);
 
+  useEffect(() => {
+    if (!scenePlanGenerating) {
+      return;
+    }
+
+    const planTimer = window.setTimeout(() => {
+      setSceneImagePlans(createSceneImagePlans(sceneConfig));
+      setScenePlanGenerating(false);
+    }, scenePlanDraftDelayMs);
+
+    return () => window.clearTimeout(planTimer);
+  }, [sceneConfig, scenePlanGenerating]);
+
+  useEffect(() => {
+    if (!sceneImageGenerating) {
+      return;
+    }
+
+    const generationTimer = window.setTimeout(() => {
+      setSceneImages((currentImages) => completeGeneratedImages(currentImages, pickRandomFailedImageId(currentImages)));
+      setSceneImageGenerating(false);
+    }, generationCompleteDelayMs);
+
+    return () => window.clearTimeout(generationTimer);
+  }, [sceneImageGenerating]);
+
   return (
     <AppShell
       toolbar={
         <StudioToolbar
+          hidePrimaryAction={isModelWorkspace || isSettingsWorkspace}
           historyCount={generationRecords.length}
           historyOpen={historyOpen}
           historyPopover={
@@ -234,6 +360,10 @@ export function App() {
               records={generationRecords}
             />
           }
+          onOpenSettings={() => {
+            setActiveWorkspace("settings");
+            setHistoryOpen(false);
+          }}
           onToggleHistory={() => setHistoryOpen((open) => !open)}
         />
       }
@@ -245,7 +375,25 @@ export function App() {
         />
       }
       configPanel={
-        isClothingWorkspace ? (
+        isSceneWorkspace ? (
+          scenePromptReviewing ? (
+            <ScenePromptReviewPanel
+              config={sceneConfig}
+              imageGenerating={sceneImageGenerating}
+              onBack={handleBackToSceneConfig}
+              onGenerateImages={handleGenerateSceneImages}
+              onPlansChange={setSceneImagePlans}
+              planGenerating={scenePlanGenerating}
+              plans={sceneImagePlans}
+            />
+          ) : (
+            <SceneConfigPanel
+              config={sceneConfig}
+              onChange={setSceneConfig}
+              onGeneratePlan={handleGenerateScenePlan}
+            />
+          )
+        ) : isClothingWorkspace ? (
           clothingSceneDrafting ? (
             <ClothingSceneSelectionPanel
               onBack={() => setClothingSceneDrafting(false)}
@@ -272,6 +420,7 @@ export function App() {
             onModuleCheckedChange={handleModuleCheckedChange}
             onProductImagesChange={setProductImages}
             onProductPromptChange={setProductPrompt}
+            onViralStylesChange={setSelectedProductViralStyles}
             productImages={productImages}
             productPrompt={productPrompt}
             strategyDrafting={productStrategyDrafting}
@@ -279,7 +428,13 @@ export function App() {
         )
       }
       canvas={
-        isClothingWorkspace ? (
+        isSceneWorkspace ? (
+          sceneImages.length > 0 ? (
+            <PreviewCanvas boards={previewBoards} detailImages={sceneImages} />
+          ) : (
+            <ScenePreviewCanvas />
+          )
+        ) : isClothingWorkspace ? (
           clothingSceneImages.length > 0 ? (
             <PreviewCanvas boards={previewBoards} detailImages={clothingSceneImages} />
           ) : (
@@ -289,6 +444,7 @@ export function App() {
           <PreviewCanvas boards={previewBoards} detailImages={productDetailImages} />
         )
       }
+      workspaceContent={isModelWorkspace ? <ModelConfigPage /> : isSettingsWorkspace ? <SettingsPage /> : null}
     />
   );
 }
@@ -302,6 +458,105 @@ function createProductHistorySummary(settings: typeof defaultProductGenerationSe
     settings.advancedFormats.length > 0 ? settings.advancedFormats.join("、") : settings.format;
 
   return `${settings.platform} · ${settings.market} · ${settings.language} · ${formatLabel} · ${imageCount} 张`;
+}
+
+function pickRandomFailedImageId(images: GeneratedDetailImage[]) {
+  const failureCandidates = images.filter((image) => image.kind !== "source-image");
+  if (failureCandidates.length === 0) {
+    return null;
+  }
+
+  return failureCandidates[Math.floor(Math.random() * failureCandidates.length)]?.id ?? null;
+}
+
+function completeGeneratedImages(images: GeneratedDetailImage[], failedImageId: string | null): GeneratedDetailImage[] {
+  return images.map((image) =>
+    image.kind === "source-image"
+      ? {
+          ...image,
+          status: "complete",
+        }
+      : image.id === failedImageId
+        ? {
+            ...image,
+            errorMessage: "生成失败",
+            status: "failed",
+          }
+        : {
+            ...image,
+            status: "complete",
+          },
+  );
+}
+
+function createFlatProductResultItems(
+  recordId: string,
+  drafts: StrategyModuleDraft[],
+  listingCopyGenerationEnabled: boolean,
+  productPrompt: string,
+  productImages: ProductImageAsset[],
+) {
+  const sourceImage: GeneratedDetailImage = {
+    id: `${recordId}-source`,
+    kind: "source-image",
+    sourceImages: productImages,
+    status: "complete",
+    title: "原图",
+  };
+  const images: GeneratedDetailImage[] = drafts.map((draft) => ({
+    id: `${recordId}-${draft.id}`,
+    status: "generating" as const,
+    title: draft.title,
+  }));
+
+  return listingCopyGenerationEnabled
+    ? [
+        sourceImage,
+        ...images,
+        {
+          id: `${recordId}-listing-copy`,
+          kind: "listing-copy" as const,
+          listingCopy: createProductListingCopy(productPrompt),
+          status: "generating" as const,
+          title: "商品上架文案",
+        },
+      ]
+    : [sourceImage, ...images];
+}
+
+function createResultGroupSlug(title: string) {
+  return title
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\u4e00-\u9fa5-]/g, "")
+    .toLowerCase();
+}
+
+function createProductListingCopy(productPrompt: string): ProductListingCopy {
+  const productName = productPrompt.trim() || "黑色宽松落肩夹克，双面领设计，通勤防风。";
+
+  return {
+    title: "Men's Japanese Style Loose Drop Shoulder Black Reversible Collar Casual Jacket",
+    sellingPoints: [
+      "Micro-silhouette cut, fits neatly and hides excess body fat for a crisp look",
+      "Premium matte woven fabric, windproof, durable, anti-wrinkle and non-deformable",
+      "2-way wearable stand/lapel collar, matches various styling for versatile daily wear",
+    ],
+    detailCopy:
+      "This all-black casual jacket is designed for trend-focused commuters, street fashion enthusiasts and people looking for reliable daily outerwear. It fits perfectly for multiple scenarios including city daily commuting, offline friend gatherings and casual street shooting. No more trouble of messy wrinkles after long hours of wearing, no more limited outfit collocation options, this timeless basic piece will become your go-to staple for all daily occasions.",
+    keywords:
+      "men black jacket japanese style loose outerwear windproof anti wrinkle reversible collar jacket streetwear casual commuter jacket drop shoulder jacket",
+    shootingPlan: [
+      "White background image: Full front shot of the product, no extra elements, clearly shows the full outline and loose drop shoulder silhouette",
+      "Scene image 1: Model wearing the jacket walking on busy city downtown street, showing the effect for daily commuting scenario",
+      "Scene image 2: Model posing for photos at the trendy street corner, demonstrating the stylish street shooting effect",
+      "Selling point image 1: Close-up shot of the matte woven fabric, showing the fine material texture with mark of windproof and anti-wrinkle performance",
+      "Selling point image 2: Double angle shot showing both stand collar and lapel collar wearing effect, clearly display the 2-way wearing feature",
+      "Other image 1: Model full-body matching display, showing how to pair the jacket with casual pants and sneakers for full daily styling",
+      "Other image 2: Size chart display, clearly mark the detailed size parameters of the jacket for customers to choose proper fit",
+    ],
+    sourcePrompt: productName,
+  };
 }
 
 function createClothingHistorySummary(drafts: ClothingSceneDraft[]) {

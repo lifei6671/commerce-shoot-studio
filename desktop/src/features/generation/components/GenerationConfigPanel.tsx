@@ -1,6 +1,6 @@
-import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, GripVertical, Trash2, UploadCloud, WandSparkles, X } from "lucide-react";
+import { Check, ChevronDown, GripVertical, HelpCircle, Loader2, RefreshCw, Trash2, UploadCloud, WandSparkles, X } from "lucide-react";
 import { Button } from "../../../shared/ui/button";
 import { ControlGroup } from "../../../shared/ui/control-group";
 import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
@@ -33,6 +33,7 @@ type GenerationConfigPanelProps = {
   onModuleCheckedChange: (moduleId: string, checked: boolean) => void;
   onProductImagesChange: (images: ProductImageAsset[]) => void;
   onProductPromptChange: (prompt: string) => void;
+  onViralStylesChange?: (styles: ViralStyleAnalysisResult[]) => void;
   productImages: ProductImageAsset[];
   productPrompt: string;
   strategyDrafting: boolean;
@@ -40,6 +41,7 @@ type GenerationConfigPanelProps = {
 
 const maxProductImageCount = 3;
 const strategyDraftDelayMs = 2500;
+const viralStyleAnalysisDelayMs = 1800;
 const aiWritingSuggestion =
   "1、产品名称：黑色休闲翻领长袖衬衫 2、核心卖点：纯黑百搭、后背创意印花、宽松翻领剪裁 3、适用人群：日常通勤青年、潮流穿搭爱好者、休闲出行人群 4、使用场景：日常街头出行、朋友休闲聚会、居家外出随性穿搭 5、规格参数：颜色：纯黑 外观：后背带有创意印花装饰 版型：翻领长袖休闲款";
 const platformOptions = [
@@ -77,6 +79,7 @@ const formatOptions = [
 ];
 const advancedFormatValues = ["高级A+（Web端）", "高级A+（移动端）"];
 const defaultAdvancedFormat = "高级A+（Web端）";
+const amazonPlatform = "亚马逊";
 const marketLanguageMap: Record<string, string> = {
   中国: "中文",
   美国: "英文",
@@ -86,26 +89,50 @@ const marketLanguageMap: Record<string, string> = {
   墨西哥: "西班牙文",
 };
 
+const viralStyleBatches = [
+  [
+    { colors: ["bg-black", "bg-slate-100", "bg-rose-500"], description: "契合街头爱好者穿搭调性", title: "街头潮酷风" },
+    { colors: ["bg-black", "bg-slate-100", "bg-blue-600"], description: "凸显面料高级通穿属性", title: "通勤质感风" },
+    { colors: ["bg-black", "bg-stone-100", "bg-amber-500"], description: "突出两穿随性穿搭优势", title: "随性格调风" },
+    { colors: ["bg-black", "bg-emerald-50", "bg-emerald-500"], description: "适配日常出街阳光属性", title: "运动活力风" },
+  ],
+  [
+    { colors: ["bg-slate-950", "bg-white", "bg-stone-300"], description: "压低色彩噪音，突出商品轮廓", title: "轻奢极简风" },
+    { colors: ["bg-zinc-900", "bg-sky-100", "bg-cyan-500"], description: "强调清爽质感与平台主图效率", title: "清透电商风" },
+    { colors: ["bg-neutral-950", "bg-orange-100", "bg-orange-500"], description: "放大促销氛围与点击吸引力", title: "热卖冲击风" },
+    { colors: ["bg-slate-900", "bg-purple-100", "bg-violet-500"], description: "适合社媒种草与人群标签表达", title: "潮流种草风" },
+  ],
+];
+
+export type ViralStyleAnalysisResult = {
+  colors: string[];
+  description: string;
+  title: string;
+};
+
 export type ProductGenerationSettings = {
   advancedFormats: string[];
   format: string;
   language: string;
+  listingCopyGenerationEnabled: boolean;
   market: string;
   platform: string;
+  viralStyleAnalysisEnabled: boolean;
 };
 
 export const defaultProductGenerationSettings: ProductGenerationSettings = {
   advancedFormats: [],
-  format: "普通A+",
+  format: "1:1",
   language: "中文",
+  listingCopyGenerationEnabled: false,
   market: "中国",
   platform: "淘宝天猫",
+  viralStyleAnalysisEnabled: false,
 };
 
 export function GenerationConfigPanel({
   detailGenerating,
   generationSettings,
-  generationSettingsTouched,
   modules,
   onBackToProductInputs,
   onGenerateDetails,
@@ -114,6 +141,7 @@ export function GenerationConfigPanel({
   onModuleCheckedChange,
   onProductImagesChange,
   onProductPromptChange,
+  onViralStylesChange,
   productImages,
   productPrompt,
   strategyDrafting,
@@ -122,17 +150,25 @@ export function GenerationConfigPanel({
   const hasProductPrompt = productPrompt.trim().length > 0;
   const hasSelectedModules = modules.some((module) => module.checked);
   const [aiWritingOpen, setAiWritingOpen] = useState(false);
-  const generationReady =
-    hasProductImages && generationSettingsTouched && hasProductPrompt && hasSelectedModules;
+  const [viralStyleBatchIndex, setViralStyleBatchIndex] = useState(0);
+  const [selectedViralStyleTitles, setSelectedViralStyleTitles] = useState<Set<string>>(() => new Set());
+  const [viralStyleStatus, setViralStyleStatus] = useState<"idle" | "loading" | "ready">("idle");
+  const activeViralStyles = viralStyleBatches[viralStyleBatchIndex];
+  const selectedViralStyles = useMemo(
+    () =>
+      generationSettings.viralStyleAnalysisEnabled
+        ? activeViralStyles.filter((style) => selectedViralStyleTitles.has(style.title))
+        : [],
+    [activeViralStyles, generationSettings.viralStyleAnalysisEnabled, selectedViralStyleTitles],
+  );
+  const generationReady = hasProductImages && hasProductPrompt && hasSelectedModules;
   const generationCtaLabel = !hasProductImages
     ? "请上传产品图"
-    : !generationSettingsTouched
-      ? "请选择生成设置"
-      : !hasProductPrompt
-        ? "请补充商品卖点"
-        : !hasSelectedModules
-          ? "请选择商品模块"
-          : "开始生成";
+    : !hasProductPrompt
+      ? "请补充商品卖点"
+      : !hasSelectedModules
+        ? "请选择商品模块"
+        : "开始生成";
 
   function handleMarketChange(market: string) {
     onGenerationSettingsChange({
@@ -143,11 +179,13 @@ export function GenerationConfigPanel({
   }
 
   function handlePlatformChange(platform: string) {
+    const nextFormat = supportsAPlusFormats(platform) || !isAPlusFormat(generationSettings.format) ? generationSettings.format : "1:1";
+
     if (chinaOnlyPlatforms.has(platform)) {
       onGenerationSettingsChange({
         ...generationSettings,
         advancedFormats: [],
-        format: generationSettings.format === "高级A+" ? "普通A+" : generationSettings.format,
+        format: nextFormat,
         language: "中文",
         market: "中国",
         platform,
@@ -155,7 +193,12 @@ export function GenerationConfigPanel({
       return;
     }
 
-    onGenerationSettingsChange({ ...generationSettings, platform });
+    onGenerationSettingsChange({
+      ...generationSettings,
+      advancedFormats: supportsAPlusFormats(platform) ? generationSettings.advancedFormats : [],
+      format: nextFormat,
+      platform,
+    });
   }
 
   async function handleSelectProductImages() {
@@ -177,6 +220,45 @@ export function GenerationConfigPanel({
     setAiWritingOpen(false);
   }
 
+  function handleAdditionalFeatureChange(
+    feature: "listingCopyGenerationEnabled" | "viralStyleAnalysisEnabled",
+    enabled: boolean,
+  ) {
+    onGenerationSettingsChange({ ...generationSettings, [feature]: enabled });
+    if (feature === "viralStyleAnalysisEnabled" && !enabled) {
+      setViralStyleStatus("idle");
+      setSelectedViralStyleTitles(new Set());
+    }
+  }
+
+  function startViralStyleAnalysis(nextBatchIndex = viralStyleBatchIndex) {
+    if (!hasProductImages) {
+      return;
+    }
+
+    setViralStyleBatchIndex(nextBatchIndex);
+    setSelectedViralStyleTitles(new Set());
+    setViralStyleStatus("loading");
+  }
+
+  function refreshViralStyleAnalysis() {
+    startViralStyleAnalysis((viralStyleBatchIndex + 1) % viralStyleBatches.length);
+  }
+
+  useEffect(() => {
+    if (viralStyleStatus !== "loading") {
+      return;
+    }
+
+    const analysisTimer = window.setTimeout(() => setViralStyleStatus("ready"), viralStyleAnalysisDelayMs);
+
+    return () => window.clearTimeout(analysisTimer);
+  }, [viralStyleStatus, viralStyleBatchIndex]);
+
+  useEffect(() => {
+    onViralStylesChange?.(selectedViralStyles);
+  }, [onViralStylesChange, selectedViralStyles]);
+
   if (strategyDrafting) {
     return (
       <ProductStrategyDraftingPanel
@@ -186,6 +268,7 @@ export function GenerationConfigPanel({
         onBack={onBackToProductInputs}
         onGenerateDetails={onGenerateDetails}
         productPrompt={productPrompt}
+        selectedViralStyleCount={selectedViralStyles.length}
       />
     );
   }
@@ -314,6 +397,45 @@ export function GenerationConfigPanel({
             ))}
           </div>
         </ControlGroup>
+
+        <ControlGroup title="附加功能">
+          <div className="space-y-3">
+            <ProductExtraFeatureCard
+              checked={generationSettings.viralStyleAnalysisEnabled}
+              label="爆款风格分析"
+              onCheckedChange={(checked) => handleAdditionalFeatureChange("viralStyleAnalysisEnabled", checked)}
+            >
+              {generationSettings.viralStyleAnalysisEnabled ? (
+                <ViralStyleAnalysisPanel
+                  disabled={!hasProductImages}
+                  onAnalyze={() => startViralStyleAnalysis()}
+                  onRefresh={refreshViralStyleAnalysis}
+                  status={viralStyleStatus}
+                  selectedStyleTitles={selectedViralStyleTitles}
+                  styles={activeViralStyles}
+                  onStyleCheckedChange={(styleTitle, checked) =>
+                    setSelectedViralStyleTitles((currentTitles) => {
+                      const nextTitles = new Set(currentTitles);
+                      if (checked) {
+                        nextTitles.add(styleTitle);
+                      } else {
+                        nextTitles.delete(styleTitle);
+                      }
+                      return nextTitles;
+                    })
+                  }
+                />
+              ) : null}
+            </ProductExtraFeatureCard>
+
+            <ProductExtraFeatureCard
+              checked={generationSettings.listingCopyGenerationEnabled}
+              label="商品上架文案生成"
+              onCheckedChange={(checked) => handleAdditionalFeatureChange("listingCopyGenerationEnabled", checked)}
+              showHelp
+            />
+          </div>
+        </ControlGroup>
       </div>
 
       <div className="relative border-t border-white/70 bg-white/70 p-4 shadow-[0_-14px_28px_rgba(248,250,252,0.72)] backdrop-blur-2xl">
@@ -332,6 +454,188 @@ export function GenerationConfigPanel({
         </Button>
       </div>
     </aside>
+  );
+}
+
+function ProductExtraFeatureCard({
+  badge,
+  checked,
+  children,
+  label,
+  onCheckedChange,
+  showHelp = false,
+}: {
+  badge?: string;
+  checked: boolean;
+  children?: ReactNode;
+  label: string;
+  onCheckedChange: (checked: boolean) => void;
+  showHelp?: boolean;
+}) {
+  return (
+    <div className="rounded-[11px] bg-slate-100/80 px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.82)]">
+      <div className="flex min-h-7 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[14px] font-medium text-slate-800">{label}</span>
+          {showHelp ? <ListingCopyTooltip /> : null}
+          {badge ? (
+            <span className="shrink-0 rounded-[6px] bg-orange-100 px-1.5 py-0.5 text-[11px] font-semibold text-orange-600">
+              {badge}
+            </span>
+          ) : null}
+        </div>
+        <ProductExtraFeatureSwitch checked={checked} label={label} onCheckedChange={onCheckedChange} />
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ListingCopyTooltip() {
+  return (
+    <span className="group relative inline-flex">
+      <HelpCircle
+        aria-label="商品上架文案生成说明"
+        className="size-3.5 shrink-0 cursor-help text-slate-400 transition-colors group-hover:text-slate-600"
+      />
+      <span
+        className="pointer-events-none absolute left-1/2 top-[calc(100%+10px)] z-50 w-[260px] -translate-x-1/2 rounded-[8px] bg-slate-800/88 px-3 py-2 text-center text-[12px] font-medium leading-5 text-white opacity-0 shadow-[0_10px_24px_rgba(15,23,42,0.18)] transition-opacity group-hover:opacity-100"
+        role="tooltip"
+      >
+        根据所选平台规范，智能生成符合上架要求的商品文案
+      </span>
+    </span>
+  );
+}
+
+function ViralStyleAnalysisPanel({
+  disabled,
+  onAnalyze,
+  onRefresh,
+  onStyleCheckedChange,
+  selectedStyleTitles,
+  status,
+  styles,
+}: {
+  disabled: boolean;
+  onAnalyze: () => void;
+  onRefresh: () => void;
+  onStyleCheckedChange: (styleTitle: string, checked: boolean) => void;
+  selectedStyleTitles: Set<string>;
+  status: "idle" | "loading" | "ready";
+  styles: ViralStyleAnalysisResult[];
+}) {
+  if (status === "loading") {
+    return (
+      <div className="mt-4 rounded-[11px] border border-white/70 bg-white/70 px-4 py-5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.82)]">
+        <Loader2 className="mx-auto size-5 animate-spin text-app-blue" />
+        <div className="mt-2 text-[13px] font-medium text-slate-800">正在分析爆款风格...</div>
+        <p className="mt-1 text-[12px] text-slate-500">根据商品图提取色彩、调性与平台表达方式</p>
+      </div>
+    );
+  }
+
+  if (status === "ready") {
+    return (
+      <div className="mt-4">
+        <div className="grid grid-cols-2 gap-3">
+          {styles.map((style) => (
+            <ViralStyleCard
+              checked={selectedStyleTitles.has(style.title)}
+              key={style.title}
+              onCheckedChange={(checked) => onStyleCheckedChange(style.title, checked)}
+              style={style}
+            />
+          ))}
+        </div>
+        <button
+          className="mt-3 flex h-9 w-full items-center justify-center gap-1.5 rounded-[10px] border border-slate-200/90 bg-white text-[13px] font-medium text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.82),0_1px_2px_rgba(15,23,42,0.04)] transition hover:border-slate-300 hover:bg-white/95"
+          onClick={onRefresh}
+          type="button"
+        >
+          <RefreshCw className="size-3.5" />
+          换一批风格
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      aria-label="开始爆款风格分析"
+      className={cn(
+        "mt-4 flex h-10 w-full items-center justify-center gap-1.5 rounded-[11px] border border-slate-200/90 bg-white text-[13px] font-medium text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.82),0_1px_2px_rgba(15,23,42,0.04)] transition hover:border-slate-300 hover:bg-white/95 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-white/60 disabled:text-slate-400 disabled:shadow-none",
+      )}
+      disabled={disabled}
+      onClick={onAnalyze}
+      type="button"
+    >
+      <WandSparkles className={cn("size-4", disabled ? "text-slate-400" : "text-app-blue")} />
+      爆款风格分析
+    </button>
+  );
+}
+
+function ViralStyleCard({
+  checked,
+  onCheckedChange,
+  style,
+}: {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  style: ViralStyleAnalysisResult;
+}) {
+  return (
+    <label className="min-h-[104px] rounded-[10px] bg-white px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.86),0_1px_2px_rgba(15,23,42,0.04)]">
+      <div className="flex items-start gap-2">
+        <input
+          aria-label={style.title}
+          checked={checked}
+          className="mt-0.5 size-4 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/30"
+          onChange={(event) => onCheckedChange(event.currentTarget.checked)}
+          type="checkbox"
+        />
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-slate-900">{style.title}</div>
+          <p className="mt-1 text-[12px] leading-5 text-slate-500">{style.description}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex justify-end gap-1.5">
+        {style.colors.map((color, index) => (
+          <span className={cn("size-4 rounded-full", color)} key={`${style.title}-${index}`} />
+        ))}
+      </div>
+    </label>
+  );
+}
+
+function ProductExtraFeatureSwitch({
+  checked,
+  label,
+  onCheckedChange,
+}: {
+  checked: boolean;
+  label: string;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={checked}
+      className={cn(
+        "relative h-5 w-9 shrink-0 overflow-hidden rounded-full shadow-[inset_0_1px_2px_rgba(15,23,42,0.14)] transition-colors",
+        checked ? "bg-app-blue" : "bg-slate-500",
+      )}
+      onClick={() => onCheckedChange(!checked)}
+      type="button"
+    >
+      <span
+        className={cn(
+          "absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(15,23,42,0.18)] transition-transform",
+          checked ? "translate-x-4" : "translate-x-0",
+        )}
+      />
+    </button>
   );
 }
 
@@ -361,6 +665,7 @@ type ProductStrategyDraftingPanelProps = {
   onBack: () => void;
   onGenerateDetails: (drafts: StrategyModuleDraft[]) => void;
   productPrompt: string;
+  selectedViralStyleCount: number;
 };
 
 function ProductStrategyDraftingPanel({
@@ -370,6 +675,7 @@ function ProductStrategyDraftingPanel({
   onBack,
   onGenerateDetails,
   productPrompt,
+  selectedViralStyleCount,
 }: ProductStrategyDraftingPanelProps) {
   const [draftReady, setDraftReady] = useState(false);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
@@ -382,6 +688,7 @@ function ProductStrategyDraftingPanel({
   const draggingModule = dragPreview
     ? moduleDrafts.find((moduleDraft) => moduleDraft.id === dragPreview.id)
     : undefined;
+  const generationImageCount = moduleDrafts.length * Math.max(selectedViralStyleCount, 1);
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => setDraftReady(true), strategyDraftDelayMs);
@@ -672,7 +979,7 @@ function ProductStrategyDraftingPanel({
           {detailGenerating
             ? "详情图生成中"
             : moduleDrafts.length > 0
-              ? `生成详情图（${moduleDrafts.length}张）`
+              ? `生成详情图（${generationImageCount}张）`
               : "请先选择策略"}
         </Button>
       </div>
@@ -723,12 +1030,12 @@ type ProductFormatSelectProps = {
 function ProductFormatSelect({ className, onChange, settings }: ProductFormatSelectProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const hideAdvancedOptions = chinaOnlyPlatforms.has(settings.platform);
-  const visibleFormatOptions = hideAdvancedOptions
-    ? formatOptions.filter((option) => option.value !== "高级A+" && !advancedFormatValues.includes(option.value))
+  const hideAPlusOptions = !supportsAPlusFormats(settings.platform);
+  const visibleFormatOptions = hideAPlusOptions
+    ? formatOptions.filter((option) => !isAPlusFormat(option.value))
     : formatOptions;
   const selectedAdvancedFormats =
-    !hideAdvancedOptions && settings.format === "高级A+"
+    !hideAPlusOptions && settings.format === "高级A+"
       ? settings.advancedFormats.length > 0
         ? settings.advancedFormats
         : [defaultAdvancedFormat]
@@ -803,7 +1110,7 @@ function ProductFormatSelect({ className, onChange, settings }: ProductFormatSel
         type="button"
       >
         <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
-          {settings.format === "高级A+" ? (
+          {settings.format === "高级A+" && !hideAPlusOptions ? (
             selectedAdvancedFormats.map((format) => (
               <span
                 key={format}
@@ -823,7 +1130,7 @@ function ProductFormatSelect({ className, onChange, settings }: ProductFormatSel
               </span>
             ))
           ) : (
-            <span className="truncate">{hideAdvancedOptions && settings.format === "高级A+" ? "普通A+" : settings.format}</span>
+            <span className="truncate">{hideAPlusOptions && isAPlusFormat(settings.format) ? "1:1" : settings.format}</span>
           )}
         </span>
         <ChevronDown
@@ -889,4 +1196,12 @@ function ProductFormatSelect({ className, onChange, settings }: ProductFormatSel
       ) : null}
     </div>
   );
+}
+
+function supportsAPlusFormats(platform: string) {
+  return platform === amazonPlatform;
+}
+
+function isAPlusFormat(format: string) {
+  return format === "普通A+" || format === "高级A+" || advancedFormatValues.includes(format);
 }
