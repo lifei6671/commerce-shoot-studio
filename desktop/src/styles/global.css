@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --app-bg: 220 20% 96%;
+  --app-panel: 0 0% 100%;
+  --app-canvas: 220 23% 97%;
+  --app-line: 220 16% 90%;
+  --app-muted: 220 8% 54%;
+  --app-text: 222 24% 12%;
+  --app-blue: 217 91% 58%;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+html {
+  height: 100%;
+  overscroll-behavior: none;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1120px;
+  min-height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: transparent;
+}
+
+#root {
+  min-height: 100%;
+  overscroll-behavior: none;
+  background: transparent;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.desktop-grain::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  opacity: 0.32;
+  mix-blend-mode: multiply;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(15, 23, 42, 0.045) 1px, transparent 0);
+  background-size: 18px 18px;
+  mask-image: linear-gradient(to bottom, transparent, black 12%, black 82%, transparent);
+}
+
+.desktop-hairline {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    inset 0 -1px 0 rgba(15, 23, 42, 0.05);
+}
+
+.desktop-raised {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 16px 40px rgba(15, 23, 42, 0.06);
+}

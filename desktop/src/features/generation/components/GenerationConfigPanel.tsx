@@ -1,0 +1,892 @@
+import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, ChevronDown, GripVertical, Trash2, UploadCloud, WandSparkles, X } from "lucide-react";
+import { Button } from "../../../shared/ui/button";
+import { ControlGroup } from "../../../shared/ui/control-group";
+import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
+import { ModuleTile } from "../../../shared/ui/module-tile";
+import { SelectPill } from "../../../shared/ui/select-pill";
+import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
+import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
+import { cn } from "../../../shared/lib/cn";
+import {
+  type ProductImageAsset,
+  selectProductImages,
+} from "../lib/productImagePicker";
+
+export type ModuleOption = {
+  id: string;
+  title: string;
+  description: string;
+  checked: boolean;
+};
+
+type GenerationConfigPanelProps = {
+  detailGenerating: boolean;
+  generationSettings: ProductGenerationSettings;
+  generationSettingsTouched: boolean;
+  modules: ModuleOption[];
+  onBackToProductInputs: () => void;
+  onGenerateDetails: (drafts: StrategyModuleDraft[]) => void;
+  onGenerateStrategy: () => void;
+  onGenerationSettingsChange: (settings: ProductGenerationSettings) => void;
+  onModuleCheckedChange: (moduleId: string, checked: boolean) => void;
+  onProductImagesChange: (images: ProductImageAsset[]) => void;
+  onProductPromptChange: (prompt: string) => void;
+  productImages: ProductImageAsset[];
+  productPrompt: string;
+  strategyDrafting: boolean;
+};
+
+const maxProductImageCount = 3;
+const strategyDraftDelayMs = 2500;
+const aiWritingSuggestion =
+  "1、产品名称：黑色休闲翻领长袖衬衫 2、核心卖点：纯黑百搭、后背创意印花、宽松翻领剪裁 3、适用人群：日常通勤青年、潮流穿搭爱好者、休闲出行人群 4、使用场景：日常街头出行、朋友休闲聚会、居家外出随性穿搭 5、规格参数：颜色：纯黑 外观：后背带有创意印花装饰 版型：翻领长袖休闲款";
+const platformOptions = [
+  { label: "淘宝天猫", value: "淘宝天猫" },
+  { label: "亚马逊", value: "亚马逊" },
+  { label: "拼多多", value: "拼多多" },
+  { label: "抖音电商", value: "抖音电商" },
+  { label: "京东", value: "京东" },
+];
+const chinaOnlyPlatforms = new Set(["淘宝天猫", "拼多多", "抖音电商", "京东"]);
+const marketOptions = [
+  { label: "中国", value: "中国" },
+  { label: "美国", value: "美国" },
+  { label: "东南亚", value: "东南亚" },
+  { label: "日本", value: "日本" },
+  { label: "韩国", value: "韩国" },
+  { label: "墨西哥", value: "墨西哥" },
+];
+const languageOptions = [
+  { label: "中文", value: "中文" },
+  { label: "英文", value: "英文" },
+  { label: "日文", value: "日文" },
+  { label: "韩文", value: "韩文" },
+  { label: "西班牙文", value: "西班牙文" },
+];
+const formatOptions = [
+  { label: "高级A+", tone: "group" as const, value: "高级A+" },
+  { detail: "1464:600", label: "高级A+（Web端）", nested: true, value: "高级A+（Web端）" },
+  { detail: "600:450", label: "高级A+（移动端）", nested: true, value: "高级A+（移动端）" },
+  { detail: "970:600", label: "普通A+", value: "普通A+" },
+  { label: "1:1", value: "1:1" },
+  { label: "3:4", value: "3:4" },
+  { label: "9:16", value: "9:16" },
+  { label: "16:9", value: "16:9" },
+];
+const advancedFormatValues = ["高级A+（Web端）", "高级A+（移动端）"];
+const defaultAdvancedFormat = "高级A+（Web端）";
+const marketLanguageMap: Record<string, string> = {
+  中国: "中文",
+  美国: "英文",
+  东南亚: "英文",
+  日本: "日文",
+  韩国: "韩文",
+  墨西哥: "西班牙文",
+};
+
+export type ProductGenerationSettings = {
+  advancedFormats: string[];
+  format: string;
+  language: string;
+  market: string;
+  platform: string;
+};
+
+export const defaultProductGenerationSettings: ProductGenerationSettings = {
+  advancedFormats: [],
+  format: "普通A+",
+  language: "中文",
+  market: "中国",
+  platform: "淘宝天猫",
+};
+
+export function GenerationConfigPanel({
+  detailGenerating,
+  generationSettings,
+  generationSettingsTouched,
+  modules,
+  onBackToProductInputs,
+  onGenerateDetails,
+  onGenerateStrategy,
+  onGenerationSettingsChange,
+  onModuleCheckedChange,
+  onProductImagesChange,
+  onProductPromptChange,
+  productImages,
+  productPrompt,
+  strategyDrafting,
+}: GenerationConfigPanelProps) {
+  const hasProductImages = productImages.length > 0;
+  const hasProductPrompt = productPrompt.trim().length > 0;
+  const hasSelectedModules = modules.some((module) => module.checked);
+  const [aiWritingOpen, setAiWritingOpen] = useState(false);
+  const generationReady =
+    hasProductImages && generationSettingsTouched && hasProductPrompt && hasSelectedModules;
+  const generationCtaLabel = !hasProductImages
+    ? "请上传产品图"
+    : !generationSettingsTouched
+      ? "请选择生成设置"
+      : !hasProductPrompt
+        ? "请补充商品卖点"
+        : !hasSelectedModules
+          ? "请选择商品模块"
+          : "开始生成";
+
+  function handleMarketChange(market: string) {
+    onGenerationSettingsChange({
+      ...generationSettings,
+      language: marketLanguageMap[market] ?? generationSettings.language,
+      market,
+    });
+  }
+
+  function handlePlatformChange(platform: string) {
+    if (chinaOnlyPlatforms.has(platform)) {
+      onGenerationSettingsChange({
+        ...generationSettings,
+        advancedFormats: [],
+        format: generationSettings.format === "高级A+" ? "普通A+" : generationSettings.format,
+        language: "中文",
+        market: "中国",
+        platform,
+      });
+      return;
+    }
+
+    onGenerationSettingsChange({ ...generationSettings, platform });
+  }
+
+  async function handleSelectProductImages() {
+    const remainingCount = maxProductImageCount - productImages.length;
+    const selectedImages = await selectProductImages(remainingCount);
+
+    const knownPaths = new Set(productImages.map((image) => image.path));
+    const nextImages = selectedImages.filter((image) => !knownPaths.has(image.path));
+
+    onProductImagesChange([...productImages, ...nextImages].slice(0, maxProductImageCount));
+  }
+
+  function handleRemoveProductImage(imageId: string) {
+    onProductImagesChange(productImages.filter((image) => image.id !== imageId));
+  }
+
+  function handleConfirmAiWriting() {
+    onProductPromptChange(aiWritingSuggestion);
+    setAiWritingOpen(false);
+  }
+
+  if (strategyDrafting) {
+    return (
+      <ProductStrategyDraftingPanel
+        generationSettings={generationSettings}
+        detailGenerating={detailGenerating}
+        modules={modules}
+        onBack={onBackToProductInputs}
+        onGenerateDetails={onGenerateDetails}
+        productPrompt={productPrompt}
+      />
+    );
+  }
+
+  return (
+    <aside
+      aria-label="生成配置"
+      className="relative z-40 flex min-h-0 flex-col bg-white/50 shadow-[inset_1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-2xl"
+    >
+      <div
+        className="min-h-0 flex-1 overscroll-none overflow-y-auto px-4 py-5 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.55)_transparent]"
+        data-testid="generation-config-scroll"
+      >
+        <ControlGroup title="商品原图" hint="最多 3 张">
+          {hasProductImages ? (
+            <ImageUploadGrid
+              addLabel="添加商品原图"
+              images={productImages}
+              maxCount={maxProductImageCount}
+              onAdd={handleSelectProductImages}
+              onRemove={handleRemoveProductImage}
+            />
+          ) : (
+            <UploadDropzone
+              actionLabel="上传图片"
+              description="同一产品，多角度图片可提升生成稳定性。"
+              icon={<UploadCloud className="size-4" />}
+              onClick={handleSelectProductImages}
+            />
+          )}
+        </ControlGroup>
+
+        <ControlGroup title="生成设置">
+          <div className="grid grid-cols-3 gap-2">
+            <SelectPill
+              onChange={handlePlatformChange}
+              options={platformOptions}
+              value={generationSettings.platform}
+            />
+            <SelectPill
+              onChange={handleMarketChange}
+              options={marketOptions}
+              value={generationSettings.market}
+            />
+            <SelectPill
+              onChange={(language) => onGenerationSettingsChange({ ...generationSettings, language })}
+              options={languageOptions}
+              value={generationSettings.language}
+            />
+          </div>
+          <ProductFormatSelect
+            className="mt-2"
+            onChange={onGenerationSettingsChange}
+            settings={generationSettings}
+          />
+        </ControlGroup>
+
+        <ControlGroup
+          title="商品卖点&要求"
+          action={
+            <Button onClick={() => setAiWritingOpen(true)} size="xs" type="button" variant="softBlue">
+              <WandSparkles className="size-3" />
+              AI 帮写
+            </Button>
+          }
+        >
+          <TextAreaPanel
+            onChange={(event) => onProductPromptChange(event.target.value)}
+            placeholder={"建议包含以下信息生成更精准：\n1. 产品名称\n2. 核心卖点\n3. 适用人群\n4. 期望场景\n5. 具体参数"}
+            value={productPrompt}
+          />
+        </ControlGroup>
+
+        {aiWritingOpen ? (
+          <div
+            aria-label="AI 帮写"
+            aria-modal="true"
+            className="absolute left-[calc(100%-12px)] top-[330px] z-50 w-[360px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.16),0_8px_18px_rgba(15,23,42,0.08)]"
+            role="dialog"
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-[16px] font-semibold text-slate-950">AI 帮写</h2>
+              <button
+                aria-label="关闭 AI 帮写"
+                className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                onClick={() => setAiWritingOpen(false)}
+                type="button"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="max-h-44 overflow-y-auto rounded-control border border-slate-300 bg-white px-3 py-2.5 text-[13px] leading-6 text-slate-800 shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)]">
+              {aiWritingSuggestion}
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                className="border-slate-100 bg-slate-100 text-slate-800 shadow-none hover:bg-slate-200/80"
+                onClick={() => setAiWritingOpen(true)}
+                size="sm"
+                type="button"
+              >
+                重新帮写
+              </Button>
+              <Button
+                className="border-slate-900 bg-[#1f1f21] text-white shadow-none hover:bg-black"
+                onClick={handleConfirmAiWriting}
+                size="sm"
+                type="button"
+              >
+                确认
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        <ControlGroup title="包含模块（多选）" hint="组件化生成">
+          <div className="grid grid-cols-2 gap-2">
+            {modules.map((module) => (
+              <ModuleTile
+                key={module.id}
+                {...module}
+                onCheckedChange={(checked) => onModuleCheckedChange(module.id, checked)}
+              />
+            ))}
+          </div>
+        </ControlGroup>
+      </div>
+
+      <div className="relative border-t border-white/70 bg-white/70 p-4 shadow-[0_-14px_28px_rgba(248,250,252,0.72)] backdrop-blur-2xl">
+        <Button
+          className={cn(
+            "h-10 w-full justify-center rounded-control border font-semibold",
+            generationReady
+              ? "border-slate-950/10 bg-[linear-gradient(180deg,#111827,#071022)] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_24px_rgba(15,23,42,0.22)] hover:bg-[linear-gradient(180deg,#172033,#0b1220)]"
+              : "cursor-not-allowed border-slate-300 bg-slate-300 text-slate-700 shadow-none hover:bg-slate-300 hover:shadow-none",
+          )}
+          disabled={!generationReady}
+          onClick={onGenerateStrategy}
+          type="button"
+        >
+          {generationCtaLabel}
+        </Button>
+      </div>
+    </aside>
+  );
+}
+
+export type StrategyModuleDraft = {
+  content: string;
+  description: string;
+  id: string;
+  title: string;
+};
+
+type StrategyModuleDragPreview = {
+  currentX: number;
+  currentY: number;
+  height: number;
+  id: string;
+  left: number;
+  offsetX: number;
+  offsetY: number;
+  top: number;
+  width: number;
+};
+
+type ProductStrategyDraftingPanelProps = {
+  detailGenerating: boolean;
+  generationSettings: ProductGenerationSettings;
+  modules: ModuleOption[];
+  onBack: () => void;
+  onGenerateDetails: (drafts: StrategyModuleDraft[]) => void;
+  productPrompt: string;
+};
+
+function ProductStrategyDraftingPanel({
+  detailGenerating,
+  generationSettings,
+  modules,
+  onBack,
+  onGenerateDetails,
+  productPrompt,
+}: ProductStrategyDraftingPanelProps) {
+  const [draftReady, setDraftReady] = useState(false);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [draggingModuleId, setDraggingModuleId] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<StrategyModuleDragPreview | null>(null);
+  const draggingModuleIdRef = useRef<string | null>(null);
+  const [moduleDrafts, setModuleDrafts] = useState<StrategyModuleDraft[]>(() =>
+    modules.filter((module) => module.checked).map((module) => createStrategyModuleDraft(module, generationSettings.language)),
+  );
+  const draggingModule = dragPreview
+    ? moduleDrafts.find((moduleDraft) => moduleDraft.id === dragPreview.id)
+    : undefined;
+
+  useEffect(() => {
+    const readyTimer = window.setTimeout(() => setDraftReady(true), strategyDraftDelayMs);
+
+    return () => window.clearTimeout(readyTimer);
+  }, []);
+
+  useEffect(() => {
+    if (!draggingModuleId || detailGenerating) {
+      return;
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const clientX = Number.isFinite(event.clientX) ? event.clientX : 0;
+      const clientY = Number.isFinite(event.clientY) ? event.clientY : 0;
+
+      setDragPreview((currentPreview) =>
+        currentPreview ? { ...currentPreview, currentX: clientX, currentY: clientY } : currentPreview,
+      );
+
+      const sourceModuleId = draggingModuleIdRef.current;
+      if (!sourceModuleId || typeof document.elementFromPoint !== "function") {
+        return;
+      }
+
+      const targetCard = document
+        .elementFromPoint(clientX, clientY)
+        ?.closest<HTMLElement>("[data-testid='strategy-module-card']");
+      const targetModuleId = targetCard?.dataset.moduleId;
+      if (!targetCard || !targetModuleId || targetModuleId === sourceModuleId) {
+        return;
+      }
+
+      const targetRect = targetCard.getBoundingClientRect();
+      const insertPosition = clientY > targetRect.top + targetRect.height / 2 ? "after" : "before";
+
+      moveModuleRelative(targetModuleId, insertPosition, sourceModuleId, false);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", clearDraggingModule, { once: true });
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", clearDraggingModule);
+    };
+  }, [detailGenerating, draggingModuleId]);
+
+  function removeModule(moduleId: string) {
+    if (detailGenerating) {
+      return;
+    }
+
+    setModuleDrafts((currentDrafts) => currentDrafts.filter((draft) => draft.id !== moduleId));
+  }
+
+  function rewriteModule(moduleId: string, content: string) {
+    if (detailGenerating) {
+      return;
+    }
+
+    setModuleDrafts((currentDrafts) =>
+      currentDrafts.map((draft) => (draft.id === moduleId ? { ...draft, content } : draft)),
+    );
+  }
+
+  function handleModulePointerDown(event: ReactPointerEvent<HTMLElement>, moduleId: string) {
+    if (detailGenerating) {
+      return;
+    }
+
+    const card = event.currentTarget.closest<HTMLElement>("[data-testid='strategy-module-card']");
+    if (!card) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    const rect = card.getBoundingClientRect();
+    const clientX = Number.isFinite(event.clientX) ? event.clientX : rect.left;
+    const clientY = Number.isFinite(event.clientY) ? event.clientY : rect.top;
+    draggingModuleIdRef.current = moduleId;
+    setDragPreview({
+      currentX: clientX,
+      currentY: clientY,
+      height: rect.height,
+      id: moduleId,
+      left: rect.left,
+      offsetX: clientX - rect.left,
+      offsetY: clientY - rect.top,
+      top: rect.top,
+      width: rect.width,
+    });
+    setDraggingModuleId(moduleId);
+  }
+
+  function clearDraggingModule() {
+    draggingModuleIdRef.current = null;
+    setDragPreview(null);
+    setDraggingModuleId(null);
+  }
+
+  function moveModuleRelative(
+    targetModuleId: string,
+    insertPosition: "before" | "after",
+    droppedModuleId?: string,
+    shouldClearDragging = true,
+  ) {
+    if (detailGenerating) {
+      return;
+    }
+
+    const sourceModuleId = droppedModuleId || draggingModuleIdRef.current || draggingModuleId;
+    if (!sourceModuleId || sourceModuleId === targetModuleId) {
+      return;
+    }
+
+    setModuleDrafts((currentDrafts) => {
+      const sourceDraft = currentDrafts.find((draft) => draft.id === sourceModuleId);
+      if (!sourceDraft) {
+        return currentDrafts;
+      }
+
+      const remainingDrafts = currentDrafts.filter((draft) => draft.id !== sourceModuleId);
+      const targetIndex = remainingDrafts.findIndex((draft) => draft.id === targetModuleId);
+      if (targetIndex < 0) {
+        return currentDrafts;
+      }
+      const insertIndex = insertPosition === "after" ? targetIndex + 1 : targetIndex;
+
+      return [
+        ...remainingDrafts.slice(0, insertIndex),
+        sourceDraft,
+        ...remainingDrafts.slice(insertIndex),
+      ];
+    });
+    if (shouldClearDragging) {
+      clearDraggingModule();
+    }
+  }
+
+  if (!draftReady) {
+    return (
+      <aside
+        aria-label="模块策略与设计规范"
+        className="relative z-40 flex min-h-0 flex-col bg-white/70 shadow-[inset_1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-2xl"
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+          <h2 className="text-[14px] font-semibold text-slate-950">模块策略与设计规范</h2>
+          <div className="mt-4 flex h-[330px] items-center justify-center rounded-[14px] bg-slate-100/80">
+            <div className="flex flex-col items-center gap-3 text-slate-400">
+              <div className="flex items-center gap-2" aria-hidden="true">
+                <span className="size-2.5 animate-pulse rounded-full bg-slate-400/70" />
+                <span className="size-2.5 animate-pulse rounded-full bg-slate-400/70 [animation-delay:120ms]" />
+                <span className="size-2.5 animate-pulse rounded-full bg-slate-400/70 [animation-delay:240ms]" />
+              </div>
+              <p className="text-[13px] font-medium">生成中...</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[1fr_2.25fr] gap-3 border-t border-slate-200/70 bg-white/80 p-4 shadow-[0_-10px_24px_rgba(248,250,252,0.78)] backdrop-blur-2xl">
+          <Button
+            className="h-10 justify-center border-slate-100 bg-slate-100 text-slate-800 shadow-none hover:bg-slate-200/80"
+            onClick={onBack}
+            type="button"
+          >
+            上一步
+          </Button>
+          <Button
+            className="h-10 justify-center border-slate-200 bg-slate-200 font-semibold text-white shadow-none"
+            disabled
+            type="button"
+          >
+            请先选择策略
+          </Button>
+        </div>
+      </aside>
+    );
+  }
+
+  return (
+    <aside
+      aria-label="模块策略与设计规范"
+      className="relative z-40 flex min-h-0 flex-col bg-white/70 shadow-[inset_1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-2xl"
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.55)_transparent]">
+        <h2 className="text-[14px] font-semibold text-slate-950">模块策略与设计规范</h2>
+        <div className="mt-4 rounded-[14px] border border-slate-200/80 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.92)]">
+          <h3 className="text-[13px] font-medium text-slate-950">产品与卖点</h3>
+          <p
+            className={cn(
+              "mt-2 whitespace-pre-line text-[12px] leading-6 text-slate-700",
+              !summaryExpanded && "line-clamp-5",
+            )}
+            data-testid="strategy-summary-copy"
+          >
+            产品：{productPrompt || "已上传商品图"}
+            {"\n"}卖点：围绕商品核心利益点、使用场景、视觉层级和平台规范组织内容
+            {"\n"}目标语言：{generationSettings.language}
+          </p>
+          <button
+            className="mx-auto mt-2 block text-[12px] font-medium text-slate-700 transition-colors hover:text-slate-950"
+            onClick={() => setSummaryExpanded((expanded) => !expanded)}
+            type="button"
+          >
+            {summaryExpanded ? "收起" : "展开全部"}
+            <ChevronDown
+              className={cn("ml-1 inline size-3.5 transition-transform duration-200", summaryExpanded && "rotate-180")}
+            />
+          </button>
+        </div>
+
+        <h3 className="mt-5 text-[14px] font-semibold text-slate-950">模块内容</h3>
+        <div className="mt-3 space-y-3">
+          {moduleDrafts.map((moduleDraft) => (
+            <article
+              className={cn(
+                "relative rounded-[14px] bg-slate-100/80 p-4 transition-all duration-300 ease-out hover:bg-slate-100",
+                draggingModuleId === moduleDraft.id &&
+                  "pointer-events-none opacity-35 ring-2 ring-blue-100",
+                detailGenerating && "cursor-default opacity-80",
+              )}
+              data-module-id={moduleDraft.id}
+              data-testid="strategy-module-card"
+              draggable={false}
+              key={moduleDraft.id}
+            >
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <h4 className="min-w-0 text-[13px] font-medium text-slate-950">
+                  {moduleDraft.title}: {moduleDraft.description}
+                </h4>
+                <div className="flex shrink-0 items-center gap-1 text-slate-400">
+                  <button
+                    aria-label={`删除 ${moduleDraft.title}`}
+                    className="grid size-7 place-items-center rounded-full transition-colors hover:bg-white hover:text-slate-700"
+                    disabled={detailGenerating}
+                    onClick={() => removeModule(moduleDraft.id)}
+                    type="button"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
+                  <span
+                    aria-label={`拖动 ${moduleDraft.title}`}
+                    className={cn(
+                      "grid size-7 select-none place-items-center rounded-full transition-colors hover:bg-white hover:text-slate-700",
+                      detailGenerating ? "cursor-not-allowed opacity-50" : "cursor-grab active:cursor-grabbing",
+                    )}
+                    draggable={false}
+                    onPointerDown={(event) => handleModulePointerDown(event, moduleDraft.id)}
+                  >
+                    <GripVertical className="size-4" />
+                  </span>
+                </div>
+              </div>
+              <textarea
+                aria-label={`改写 ${moduleDraft.title}`}
+                className="min-h-20 w-full resize-none bg-transparent pr-6 text-[12px] leading-6 text-slate-600 outline-none [scrollbar-color:rgba(148,163,184,0.6)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
+                disabled={detailGenerating}
+                onChange={(event) => rewriteModule(moduleDraft.id, event.target.value)}
+                value={moduleDraft.content}
+              />
+            </article>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[1fr_2.25fr] gap-3 border-t border-slate-200/70 bg-white/80 p-4 shadow-[0_-10px_24px_rgba(248,250,252,0.78)] backdrop-blur-2xl">
+        <Button
+          className="h-10 justify-center border-slate-100 bg-slate-100 text-slate-800 shadow-none hover:bg-slate-200/80"
+          onClick={onBack}
+          type="button"
+        >
+          上一步
+        </Button>
+        <Button
+          className={cn(
+            "h-10 justify-center font-semibold",
+            moduleDrafts.length > 0 && !detailGenerating
+              ? "border-slate-950/10 bg-[#1f1f21] text-white shadow-none hover:bg-black"
+              : "border-slate-200 bg-slate-200 text-white shadow-none",
+          )}
+          disabled={moduleDrafts.length === 0 || detailGenerating}
+          onClick={() => onGenerateDetails(moduleDrafts)}
+          type="button"
+        >
+          {detailGenerating
+            ? "详情图生成中"
+            : moduleDrafts.length > 0
+              ? `生成详情图（${moduleDrafts.length}张）`
+              : "请先选择策略"}
+        </Button>
+      </div>
+      {dragPreview && draggingModule
+        ? createPortal(
+            <article
+              className="pointer-events-none fixed z-[120] rounded-[14px] bg-white p-4 shadow-[0_24px_54px_rgba(15,23,42,0.24)] ring-1 ring-slate-200/80"
+              data-testid="strategy-module-drag-preview"
+              style={{
+                height: dragPreview.height,
+                left: dragPreview.currentX - dragPreview.offsetX,
+                top: dragPreview.currentY - dragPreview.offsetY,
+                width: dragPreview.width,
+              }}
+            >
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <h4 className="min-w-0 text-[13px] font-medium text-slate-950">
+                  {draggingModule.title}: {draggingModule.description}
+                </h4>
+                <GripVertical className="mt-1 size-4 shrink-0 text-slate-400" />
+              </div>
+              <p className="line-clamp-4 whitespace-pre-line text-[12px] leading-6 text-slate-600">
+                {draggingModule.content}
+              </p>
+            </article>,
+            document.body,
+          )
+        : null}
+    </aside>
+  );
+}
+
+function createStrategyModuleDraft(module: ModuleOption, language: string): StrategyModuleDraft {
+  return {
+    content: `主标题: "${module.title}"，排版: 粗圆润无衬线体，画面层级清晰\n副标题: "${module.description}"，排版: 中等干净无衬线体\n目标语言: ${language}`,
+    description: module.description,
+    id: module.id,
+    title: module.title,
+  };
+}
+
+type ProductFormatSelectProps = {
+  className?: string;
+  onChange: (settings: ProductGenerationSettings) => void;
+  settings: ProductGenerationSettings;
+};
+
+function ProductFormatSelect({ className, onChange, settings }: ProductFormatSelectProps) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const hideAdvancedOptions = chinaOnlyPlatforms.has(settings.platform);
+  const visibleFormatOptions = hideAdvancedOptions
+    ? formatOptions.filter((option) => option.value !== "高级A+" && !advancedFormatValues.includes(option.value))
+    : formatOptions;
+  const selectedAdvancedFormats =
+    !hideAdvancedOptions && settings.format === "高级A+"
+      ? settings.advancedFormats.length > 0
+        ? settings.advancedFormats
+        : [defaultAdvancedFormat]
+      : [];
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", closeOnOutsideClick);
+
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  function selectAdvancedRoot() {
+    onChange({
+      ...settings,
+      advancedFormats: selectedAdvancedFormats.length > 0 ? selectedAdvancedFormats : [defaultAdvancedFormat],
+      format: "高级A+",
+    });
+  }
+
+  function toggleAdvancedFormat(format: string) {
+    const currentFormats = selectedAdvancedFormats.length > 0 ? selectedAdvancedFormats : [defaultAdvancedFormat];
+    const nextFormats = currentFormats.includes(format)
+      ? currentFormats.filter((currentFormat) => currentFormat !== format)
+      : [...currentFormats, format];
+
+    onChange({
+      ...settings,
+      advancedFormats: nextFormats.length > 0 ? nextFormats : [defaultAdvancedFormat],
+      format: "高级A+",
+    });
+  }
+
+  function removeAdvancedFormat(format: string) {
+    const nextFormats = selectedAdvancedFormats.filter((currentFormat) => currentFormat !== format);
+
+    onChange({
+      ...settings,
+      advancedFormats: nextFormats.length > 0 ? nextFormats : [],
+      format: nextFormats.length > 0 ? "高级A+" : "普通A+",
+    });
+  }
+
+  function selectSimpleFormat(format: string) {
+    onChange({
+      ...settings,
+      advancedFormats: [],
+      format,
+    });
+    setOpen(false);
+  }
+
+  return (
+    <div ref={rootRef} className={cn("relative", className)}>
+      <button
+        aria-expanded={open}
+        className={cn(
+          "inline-flex min-h-8 w-full items-center justify-between gap-2 rounded-control border border-white/60 bg-slate-100/70 px-3 py-1.5 text-[12px] font-medium text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.76)] transition-all duration-200 ease-out hover:border-white hover:bg-white/90 hover:shadow-control active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-app-blue/25",
+          open && "border-blue-200 bg-white shadow-control ring-2 ring-blue-100/70",
+        )}
+        data-testid="product-format-select-trigger"
+        onClick={() => setOpen((currentOpen) => !currentOpen)}
+        type="button"
+      >
+        <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+          {settings.format === "高级A+" ? (
+            selectedAdvancedFormats.map((format) => (
+              <span
+                key={format}
+                className="inline-flex h-6 max-w-full items-center gap-1 rounded-[8px] bg-blue-50 px-2 text-[12px] font-medium text-slate-800"
+              >
+                <span className="truncate">{format}</span>
+                <span
+                  className="grid size-4 place-items-center rounded-full text-slate-400 transition-colors hover:bg-blue-100 hover:text-slate-700"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeAdvancedFormat(format);
+                  }}
+                  title={`移除 ${format}`}
+                >
+                  <X className="size-3" />
+                </span>
+              </span>
+            ))
+          ) : (
+            <span className="truncate">{hideAdvancedOptions && settings.format === "高级A+" ? "普通A+" : settings.format}</span>
+          )}
+        </span>
+        <ChevronDown
+          className={cn(
+            "size-3.5 shrink-0 text-app-muted transition-transform duration-200",
+            open && "rotate-180 text-slate-800",
+          )}
+        />
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 rounded-panel border border-white/80 bg-white/95 p-1.5 shadow-[0_18px_42px_rgba(15,23,42,0.16),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl">
+          {visibleFormatOptions.map((option) => {
+            const advancedChild = advancedFormatValues.includes(option.value);
+            const selected =
+              option.value === "高级A+"
+                ? settings.format === "高级A+"
+                : advancedChild
+                  ? selectedAdvancedFormats.includes(option.value)
+                  : settings.format === option.value;
+
+            return (
+              <button
+                key={option.value}
+                className={cn(
+                  "flex h-9 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[12px] font-semibold text-slate-800 transition-all duration-150 ease-out hover:bg-slate-100 active:scale-[0.99]",
+                  option.nested && "pl-6",
+                  option.tone === "group" && "bg-slate-100/80",
+                  selected && "text-slate-950",
+                )}
+                onClick={() => {
+                  if (option.value === "高级A+") {
+                    selectAdvancedRoot();
+                    return;
+                  }
+
+                  if (advancedChild) {
+                    toggleAdvancedFormat(option.value);
+                    return;
+                  }
+
+                  selectSimpleFormat(option.value);
+                }}
+                type="button"
+              >
+                <span
+                  className={cn(
+                    "grid size-4 shrink-0 place-items-center rounded-full border border-slate-300 bg-white transition-all duration-150",
+                    option.nested && "rounded-[5px]",
+                    selected && "border-app-blue bg-app-blue text-white shadow-[0_2px_6px_rgba(59,130,246,0.22)]",
+                  )}
+                >
+                  {selected ? <Check className="size-3" /> : null}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                {option.detail ? (
+                  <span className="shrink-0 text-[12px] font-medium text-slate-400">{option.detail}</span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
