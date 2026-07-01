@@ -48,6 +48,17 @@ describe("StudioToolbar", () => {
     expect(startDragging).not.toHaveBeenCalled();
   });
 
+  it("starts a new task from the primary action", async () => {
+    const user = userEvent.setup();
+    const onNewTask = vi.fn();
+
+    render(<StudioToolbar onNewTask={onNewTask} />);
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(onNewTask).toHaveBeenCalledTimes(1);
+  });
+
   it("toggles maximize state when the draggable toolbar is double clicked", async () => {
     const user = userEvent.setup();
 

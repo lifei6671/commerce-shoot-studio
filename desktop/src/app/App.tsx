@@ -6,7 +6,11 @@ import {
   defaultProductGenerationSettings,
   GenerationConfigPanel,
 } from "../features/generation/components/GenerationConfigPanel";
-import type { StrategyModuleDraft, ViralStyleAnalysisResult } from "../features/generation/components/GenerationConfigPanel";
+import type {
+  ProductGenerationSettings,
+  StrategyModuleDraft,
+  ViralStyleAnalysisResult,
+} from "../features/generation/components/GenerationConfigPanel";
 import {
   PreviewCanvas,
   type GeneratedDetailImage,
@@ -17,7 +21,7 @@ import {
   ClothingSceneSelectionPanel,
   defaultClothingConfig,
 } from "../features/clothing/components/ClothingConfigPanel";
-import type { ClothingSceneDraft } from "../features/clothing/components/ClothingConfigPanel";
+import type { ClothingConfigState, ClothingSceneDraft } from "../features/clothing/components/ClothingConfigPanel";
 import { ClothingPreviewCanvas } from "../features/clothing/components/ClothingPreviewCanvas";
 import {
   GenerationHistoryPopover,
@@ -29,6 +33,7 @@ import { ScenePromptReviewPanel } from "../features/scenes/components/ScenePromp
 import {
   createSceneImagePlans,
   defaultSceneConfig,
+  type SceneConfigState,
   type SceneImagePlan,
 } from "../features/scenes/lib/sceneImagePlan";
 import { ModelConfigPage } from "../features/model-config/components/ModelConfigPage";
@@ -39,22 +44,49 @@ import type { ProductImageAsset } from "../features/generation/lib/productImageP
 const generationCompleteDelayMs = 3000;
 const scenePlanDraftDelayMs = 2500;
 
+function createDefaultProductGenerationSettings(): ProductGenerationSettings {
+  return {
+    ...defaultProductGenerationSettings,
+    advancedFormats: [...defaultProductGenerationSettings.advancedFormats],
+  };
+}
+
+function createDefaultProductModules() {
+  return moduleOptions.map((module) => ({ ...module }));
+}
+
+function createDefaultClothingConfig(): ClothingConfigState {
+  return {
+    ...defaultClothingConfig,
+    clothingImages: [],
+    modelImages: [],
+    sceneIds: [...defaultClothingConfig.sceneIds],
+  };
+}
+
+function createDefaultSceneConfig(): SceneConfigState {
+  return {
+    ...defaultSceneConfig,
+    referenceImages: [],
+  };
+}
+
 export function App() {
   const [activeWorkspace, setActiveWorkspace] = useState("product");
   const [productImages, setProductImages] = useState<ProductImageAsset[]>([]);
-  const [productGenerationSettings, setProductGenerationSettings] = useState(defaultProductGenerationSettings);
+  const [productGenerationSettings, setProductGenerationSettings] = useState(createDefaultProductGenerationSettings);
   const [productGenerationSettingsTouched, setProductGenerationSettingsTouched] = useState(false);
-  const [productModules, setProductModules] = useState(() => moduleOptions);
+  const [productModules, setProductModules] = useState(createDefaultProductModules);
   const [productPrompt, setProductPrompt] = useState("");
   const [selectedProductViralStyles, setSelectedProductViralStyles] = useState<ViralStyleAnalysisResult[]>([]);
   const [productStrategyDrafting, setProductStrategyDrafting] = useState(false);
   const [productDetailImages, setProductDetailImages] = useState<GeneratedDetailImage[]>([]);
   const [productDetailGenerating, setProductDetailGenerating] = useState(false);
-  const [clothingConfig, setClothingConfig] = useState(defaultClothingConfig);
+  const [clothingConfig, setClothingConfig] = useState(createDefaultClothingConfig);
   const [clothingSceneDrafting, setClothingSceneDrafting] = useState(false);
   const [clothingSceneImages, setClothingSceneImages] = useState<GeneratedDetailImage[]>([]);
   const [clothingSceneGenerating, setClothingSceneGenerating] = useState(false);
-  const [sceneConfig, setSceneConfig] = useState(defaultSceneConfig);
+  const [sceneConfig, setSceneConfig] = useState(createDefaultSceneConfig);
   const [scenePromptReviewing, setScenePromptReviewing] = useState(false);
   const [scenePlanGenerating, setScenePlanGenerating] = useState(false);
   const [sceneImagePlans, setSceneImagePlans] = useState<SceneImagePlan[]>([]);
@@ -74,6 +106,68 @@ export function App() {
   function handleProductGenerationSettingsChange(settings: typeof productGenerationSettings) {
     setProductGenerationSettings(settings);
     setProductGenerationSettingsTouched(true);
+  }
+
+  function clearActiveGenerationRecordForWorkspace(workspace: "clothing" | "product") {
+    if (!activeGenerationRecordId) {
+      return;
+    }
+
+    const activeRecord = generationRecords.find((record) => record.id === activeGenerationRecordId);
+    if (activeRecord?.workspace === workspace) {
+      setActiveGenerationRecordId(null);
+    }
+  }
+
+  function resetProductWorkspace() {
+    setProductImages([]);
+    setProductGenerationSettings(createDefaultProductGenerationSettings());
+    setProductGenerationSettingsTouched(false);
+    setProductModules(createDefaultProductModules());
+    setProductPrompt("");
+    setSelectedProductViralStyles([]);
+    setProductStrategyDrafting(false);
+    setProductDetailImages([]);
+    setProductDetailGenerating(false);
+    setProductGeneratingRecordId(null);
+    setHistoryOpen(false);
+    clearActiveGenerationRecordForWorkspace("product");
+  }
+
+  function resetClothingWorkspace() {
+    setClothingConfig(createDefaultClothingConfig());
+    setClothingSceneDrafting(false);
+    setClothingSceneImages([]);
+    setClothingSceneGenerating(false);
+    setClothingGeneratingRecordId(null);
+    setHistoryOpen(false);
+    clearActiveGenerationRecordForWorkspace("clothing");
+  }
+
+  function resetSceneWorkspace() {
+    setSceneConfig(createDefaultSceneConfig());
+    setScenePromptReviewing(false);
+    setScenePlanGenerating(false);
+    setSceneImagePlans([]);
+    setSceneImages([]);
+    setSceneImageGenerating(false);
+    setHistoryOpen(false);
+  }
+
+  function handleNewTask() {
+    if (activeWorkspace === "product") {
+      resetProductWorkspace();
+      return;
+    }
+
+    if (activeWorkspace === "clothing") {
+      resetClothingWorkspace();
+      return;
+    }
+
+    if (activeWorkspace === "scene") {
+      resetSceneWorkspace();
+    }
   }
 
   function handleModuleCheckedChange(moduleId: string, checked: boolean) {
@@ -364,6 +458,7 @@ export function App() {
             setActiveWorkspace("settings");
             setHistoryOpen(false);
           }}
+          onNewTask={handleNewTask}
           onToggleHistory={() => setHistoryOpen((open) => !open)}
         />
       }

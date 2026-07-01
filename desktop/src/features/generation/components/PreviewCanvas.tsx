@@ -950,7 +950,7 @@ function GeneratedSourceImageCard({ image }: { image: GeneratedDetailImage }) {
       className="relative aspect-square overflow-hidden rounded-[8px] border-2 border-white/80 bg-slate-100 shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
       data-testid="generated-source-image-card"
     >
-      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/72 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-black/64 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
         原图
       </div>
       {sourceImages.length > 0 ? (
@@ -1091,7 +1091,7 @@ function GeneratedFailedResultCard({
       <div className="absolute inset-x-2.5 bottom-2.5 translate-y-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100">
         <button
           aria-label={`重试 ${image.title}`}
-          className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-slate-950/72 px-2 text-[11px] font-medium text-white backdrop-blur-md transition-colors hover:bg-slate-950/82"
+          className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
           onClick={onRetry}
           type="button"
         >
@@ -1273,7 +1273,7 @@ function GeneratedDetailImageCard({
             >
               <button
                 aria-label={`AI改图 ${image.title}`}
-                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-slate-950/58 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-slate-950/72"
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
                 onClick={(event) => {
                   event.stopPropagation();
                   onRewrite();
@@ -1285,7 +1285,7 @@ function GeneratedDetailImageCard({
               </button>
               <button
                 aria-label={`编辑文字 ${image.title}`}
-                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-slate-950/58 px-2 text-[11px] font-medium backdrop-blur-md transition-colors hover:bg-slate-950/72"
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
                 onClick={(event) => {
                   event.stopPropagation();
                   onEditText();

@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const selectProductImagesMock = vi.mocked(selectProductImages);
 const invokeMock = vi.mocked(invoke);
 const saveMock = vi.mocked(save);
+const aiWritingSuggestionPattern = /产品名称：黑色休闲翻领长袖衬衫/;
 
 const audioContextInstances: MockAudioContext[] = [];
 
@@ -385,7 +386,16 @@ describe("App shell", () => {
       const retryButton = within(failedCard).getByRole("button", { name: /重试/ });
       expect(retryButton).toHaveTextContent(/^重新生成$/);
       expect(retryButton.parentElement).toHaveClass("opacity-0", "group-hover:opacity-100");
-      expect(retryButton).toHaveClass("h-7", "rounded-[6px]", "bg-slate-950/72", "backdrop-blur-md", "hover:bg-slate-950/82");
+      expect(retryButton).toHaveClass(
+        "h-7",
+        "rounded-[6px]",
+        "bg-[#e4e4e4]",
+        "text-slate-700",
+        "transition-colors",
+        "duration-300",
+        "hover:bg-[#3f3f3f]",
+        "hover:text-white",
+      );
       const deleteButton = within(failedCard).getByRole("button", { name: /删除/ });
       expect(deleteButton).toHaveClass("size-7", "rounded-[7px]", "bg-white/86", "backdrop-blur-md");
       expect(deleteButton.parentElement).toHaveClass("opacity-0", "group-hover:opacity-100");
@@ -1177,8 +1187,20 @@ describe("App shell", () => {
     expect(within(firstDetailImage).getByRole("button", { name: /删除/ })).toBeInTheDocument();
     const rewriteImageButton = within(firstDetailImage).getByRole("button", { name: "AI改图 首屏主视觉" });
     const editTextButton = within(firstDetailImage).getByRole("button", { name: "编辑文字 首屏主视觉" });
-    expect(rewriteImageButton).toHaveClass("bg-slate-950/58", "backdrop-blur-md", "hover:bg-slate-950/72");
-    expect(editTextButton).toHaveClass("bg-slate-950/58", "backdrop-blur-md", "hover:bg-slate-950/72");
+    expect(rewriteImageButton).toHaveClass(
+      "bg-[#e4e4e4]",
+      "text-slate-700",
+      "duration-300",
+      "hover:bg-[#3f3f3f]",
+      "hover:text-white",
+    );
+    expect(editTextButton).toHaveClass(
+      "bg-[#e4e4e4]",
+      "text-slate-700",
+      "duration-300",
+      "hover:bg-[#3f3f3f]",
+      "hover:text-white",
+    );
 
     await user.click(within(firstDetailImage).getByRole("button", { name: "AI改图 首屏主视觉" }));
 
@@ -1710,6 +1732,7 @@ describe("App shell", () => {
     for (const resultGroup of resultGroups) {
       const sourceCard = within(resultGroup).getByTestId("generated-source-image-card");
       expect(sourceCard).toHaveTextContent("原图");
+      expect(within(sourceCard).getByText("原图")).toHaveClass("bg-black/64", "text-white");
       expect(within(sourceCard).getAllByRole("img")).toHaveLength(2);
       expect(within(sourceCard).queryByRole("checkbox")).not.toBeInTheDocument();
       expect(within(sourceCard).queryByRole("button")).not.toBeInTheDocument();
@@ -1763,6 +1786,7 @@ describe("App shell", () => {
 
     expect(firstResultCard).toBe(sourceCard);
     expect(sourceCard).toHaveTextContent("原图");
+    expect(within(sourceCard).getByText("原图")).toHaveClass("bg-black/64", "text-white");
     expect(sourceCard).not.toHaveTextContent("首屏主视觉");
     expect(within(sourceCard).getAllByRole("img")).toHaveLength(2);
     expect(within(sourceCard).queryByRole("checkbox")).not.toBeInTheDocument();
@@ -1778,22 +1802,43 @@ describe("App shell", () => {
   });
 
   it("opens a non-editable AI writing dialog and confirms the suggestion", async () => {
-    const user = userEvent.setup();
+    vi.useFakeTimers();
 
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI 帮写" }));
 
     const dialog = screen.getByRole("dialog", { name: "AI 帮写" });
 
     expect(screen.getByRole("complementary", { name: "生成配置" })).toHaveClass("z-40");
     expect(dialog).toHaveClass("w-[360px]", "p-5");
-    expect(within(dialog).getByRole("button", { name: "确认" })).toHaveClass("h-8", "px-3");
-    expect(within(dialog).getByText(/产品名称：黑色休闲翻领长袖衬衫/)).toBeInTheDocument();
+    const writingButton = within(dialog).getByRole("button", { name: "正在改写中" });
+    expect(writingButton).toBeDisabled();
+    expect(writingButton).toHaveClass("h-8", "px-3");
+    expect(within(dialog).queryByRole("button", { name: "重新帮写" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(aiWritingSuggestionPattern)).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue("");
 
-    await user.click(within(dialog).getByRole("button", { name: "确认" }));
+    act(() => {
+      vi.advanceTimersByTime(5200);
+    });
+
+    expect(within(dialog).getByText(aiWritingSuggestionPattern)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "重新帮写" })).toHaveClass("h-8", "px-3");
+    expect(within(dialog).getByRole("button", { name: "确认" })).toHaveClass("h-8", "px-3");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新帮写" }));
+
+    expect(within(dialog).getByRole("button", { name: "正在改写中" })).toBeDisabled();
+    expect(within(dialog).queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(5200);
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认" }));
 
     expect(screen.queryByRole("dialog", { name: "AI 帮写" })).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue(
@@ -1855,6 +1900,100 @@ describe("App shell", () => {
 
     expect(screen.getByRole("button", { name: "都市街头" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByPlaceholderText(/描述你想要的场景/)).toHaveValue("保留服饰场景");
+  });
+
+  it("starts a fresh product task from the first step without clearing other workspaces", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/helmet.png",
+        name: "helmet.png",
+        path: "/Users/demo/Pictures/helmet.png",
+        src: "asset://helmet.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "防晒透气，适合户外骑行。");
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(screen.getByText("模块策略与设计规范")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(screen.getByRole("complementary", { name: "生成配置" })).toBeInTheDocument();
+    expect(screen.queryByText("模块策略与设计规范")).not.toBeInTheDocument();
+    expect(screen.queryByAltText("helmet.png")).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue("");
+    expect(screen.getByRole("button", { name: "请上传产品图" })).toBeDisabled();
+  });
+
+  it("starts a fresh clothing task from the first step", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(screen.getByRole("complementary", { name: "服饰配置" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "选择场景" })).not.toBeInTheDocument();
+    expect(screen.queryByAltText("dress.png")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请上传服饰图片" })).toBeDisabled();
+  });
+
+  it("starts a fresh scene task from the first step", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/cup.png",
+        name: "cup.png",
+        path: "/Users/demo/Pictures/cup.png",
+        src: "asset://cup.png",
+      },
+    ]);
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "场景" }));
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+    expect(await screen.findByAltText("cup.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "完整图片包" }));
+    await user.click(screen.getByRole("button", { name: "1:1" }));
+    await user.type(screen.getByPlaceholderText(/建议补充产品名称/), "陶瓷保温杯");
+    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+
+    expect(screen.getByRole("complementary", { name: "场景方案与 Prompt" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(screen.getByRole("complementary", { name: "场景配置" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "场景方案与 Prompt" })).not.toBeInTheDocument();
+    expect(screen.queryByAltText("cup.png")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "单张场景图" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "3:4" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByPlaceholderText(/建议补充产品名称/)).toHaveValue("");
+    expect(screen.getByRole("button", { name: "请上传参考图" })).toBeDisabled();
   });
 
   it("guides scene generation through reference images, prompt review, and image results", async () => {

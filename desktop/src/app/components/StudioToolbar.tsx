@@ -13,6 +13,7 @@ type StudioToolbarProps = {
   historyCount?: number;
   historyOpen?: boolean;
   historyPopover?: ReactNode;
+  onNewTask?: () => void;
   onOpenSettings?: () => void;
   onToggleHistory?: () => void;
 };
@@ -22,6 +23,7 @@ export function StudioToolbar({
   historyCount = 0,
   historyOpen = false,
   historyPopover = null,
+  onNewTask,
   onOpenSettings,
   onToggleHistory,
 }: StudioToolbarProps) {
@@ -69,7 +71,7 @@ export function StudioToolbar({
         {hidePrimaryAction ? (
           <div />
         ) : (
-          <Button data-window-interactive size="sm" variant="soft">
+          <Button data-window-interactive onClick={onNewTask} size="sm" variant="soft">
             <FolderPlus className="size-3.5" />
             新建任务
           </Button>

@@ -42,6 +42,7 @@ type GenerationConfigPanelProps = {
 const maxProductImageCount = 3;
 const strategyDraftDelayMs = 2500;
 const viralStyleAnalysisDelayMs = 1800;
+const aiWritingTypingDelayMs = 16;
 const aiWritingSuggestion =
   "1、产品名称：黑色休闲翻领长袖衬衫 2、核心卖点：纯黑百搭、后背创意印花、宽松翻领剪裁 3、适用人群：日常通勤青年、潮流穿搭爱好者、休闲出行人群 4、使用场景：日常街头出行、朋友休闲聚会、居家外出随性穿搭 5、规格参数：颜色：纯黑 外观：后背带有创意印花装饰 版型：翻领长袖休闲款";
 const platformOptions = [
@@ -150,6 +151,9 @@ export function GenerationConfigPanel({
   const hasProductPrompt = productPrompt.trim().length > 0;
   const hasSelectedModules = modules.some((module) => module.checked);
   const [aiWritingOpen, setAiWritingOpen] = useState(false);
+  const [aiWritingRunId, setAiWritingRunId] = useState(0);
+  const [aiWritingStatus, setAiWritingStatus] = useState<"ready" | "writing">("ready");
+  const [aiWritingText, setAiWritingText] = useState(aiWritingSuggestion);
   const [viralStyleBatchIndex, setViralStyleBatchIndex] = useState(0);
   const [selectedViralStyleTitles, setSelectedViralStyleTitles] = useState<Set<string>>(() => new Set());
   const [viralStyleStatus, setViralStyleStatus] = useState<"idle" | "loading" | "ready">("idle");
@@ -215,6 +219,13 @@ export function GenerationConfigPanel({
     onProductImagesChange(productImages.filter((image) => image.id !== imageId));
   }
 
+  function startAiWriting() {
+    setAiWritingOpen(true);
+    setAiWritingStatus("writing");
+    setAiWritingText("");
+    setAiWritingRunId((currentRunId) => currentRunId + 1);
+  }
+
   function handleConfirmAiWriting() {
     onProductPromptChange(aiWritingSuggestion);
     setAiWritingOpen(false);
@@ -254,6 +265,25 @@ export function GenerationConfigPanel({
 
     return () => window.clearTimeout(analysisTimer);
   }, [viralStyleStatus, viralStyleBatchIndex]);
+
+  useEffect(() => {
+    if (!aiWritingOpen || aiWritingStatus !== "writing") {
+      return;
+    }
+
+    let nextLength = 0;
+    const typingTimer = window.setInterval(() => {
+      nextLength += 1;
+      setAiWritingText(aiWritingSuggestion.slice(0, nextLength));
+
+      if (nextLength >= aiWritingSuggestion.length) {
+        window.clearInterval(typingTimer);
+        setAiWritingStatus("ready");
+      }
+    }, aiWritingTypingDelayMs);
+
+    return () => window.clearInterval(typingTimer);
+  }, [aiWritingOpen, aiWritingRunId, aiWritingStatus]);
 
   useEffect(() => {
     onViralStylesChange?.(selectedViralStyles);
@@ -329,7 +359,7 @@ export function GenerationConfigPanel({
         <ControlGroup
           title="商品卖点&要求"
           action={
-            <Button onClick={() => setAiWritingOpen(true)} size="xs" type="button" variant="softBlue">
+            <Button onClick={startAiWriting} size="xs" type="button" variant="softBlue">
               <WandSparkles className="size-3" />
               AI 帮写
             </Button>
@@ -362,26 +392,39 @@ export function GenerationConfigPanel({
             </div>
 
             <div className="max-h-44 overflow-y-auto rounded-control border border-slate-300 bg-white px-3 py-2.5 text-[13px] leading-6 text-slate-800 shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)]">
-              {aiWritingSuggestion}
+              {aiWritingText}
             </div>
 
             <div className="mt-4 flex justify-end gap-2">
-              <Button
-                className="border-slate-100 bg-slate-100 text-slate-800 shadow-none hover:bg-slate-200/80"
-                onClick={() => setAiWritingOpen(true)}
-                size="sm"
-                type="button"
-              >
-                重新帮写
-              </Button>
-              <Button
-                className="border-slate-900 bg-[#1f1f21] text-white shadow-none hover:bg-black"
-                onClick={handleConfirmAiWriting}
-                size="sm"
-                type="button"
-              >
-                确认
-              </Button>
+              {aiWritingStatus === "writing" ? (
+                <Button
+                  className="border-slate-100 bg-slate-100 text-slate-500 shadow-none"
+                  disabled
+                  size="sm"
+                  type="button"
+                >
+                  正在改写中
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    className="border-slate-100 bg-slate-100 text-slate-800 shadow-none hover:bg-slate-200/80"
+                    onClick={startAiWriting}
+                    size="sm"
+                    type="button"
+                  >
+                    重新帮写
+                  </Button>
+                  <Button
+                    className="border-slate-900 bg-[#1f1f21] text-white shadow-none hover:bg-black"
+                    onClick={handleConfirmAiWriting}
+                    size="sm"
+                    type="button"
+                  >
+                    确认
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         ) : null}
