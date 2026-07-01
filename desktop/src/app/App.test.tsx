@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,6 +7,7 @@ import { App } from "./App";
 import { selectProductImages } from "../features/generation/lib/productImagePicker";
 import { PreviewCanvas } from "../features/generation/components/PreviewCanvas";
 import { sceneTemplates } from "../features/scenes/lib/sceneImagePlan";
+import { ToastProvider } from "../shared/ui/toast";
 
 vi.mock("../features/generation/lib/productImagePicker", () => ({
   selectProductImages: vi.fn(),
@@ -23,7 +24,122 @@ const invokeMock = vi.mocked(invoke);
 const saveMock = vi.mocked(save);
 const aiWritingSuggestionPattern = /产品名称：黑色休闲翻领长袖衬衫/;
 
+const appTestProviderProfiles = [
+  {
+    baseUrl: "mock://local",
+    customEnabled: false,
+    displayName: "Mock Local",
+    providerLabel: "Mock Local",
+    id: "mock-local",
+    protocol: "openai-compatible",
+    supportedCapabilities: [
+      "listing-copy",
+      "prompt-plan",
+      "viral-style-analysis",
+      "scene-image-generation",
+      "product-detail-generation",
+      "clothing-tryon-generation",
+      "image-edit",
+    ],
+    supportedCategories: ["text-to-text", "image-to-text", "text-to-image", "image-to-image"],
+  },
+  {
+    baseUrl: "https://api.openai.com/v1",
+    customEnabled: false,
+    defaultEndpointPath: "/responses",
+    displayName: "OpenAI",
+    providerLabel: "OpenAI",
+    id: "openai",
+    protocol: "openai",
+    supportedCapabilities: [
+      "listing-copy",
+      "prompt-plan",
+      "viral-style-analysis",
+      "scene-image-generation",
+      "product-detail-generation",
+      "clothing-tryon-generation",
+      "image-edit",
+    ],
+    supportedCategories: ["text-to-text", "image-to-text", "text-to-image", "image-to-image"],
+  },
+  {
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    customEnabled: false,
+    defaultEndpointPath: "/responses",
+    displayName: "火山引擎",
+    providerLabel: "火山引擎",
+    id: "volcengine",
+    protocol: "openai-compatible",
+    supportedCapabilities: [
+      "listing-copy",
+      "prompt-plan",
+      "viral-style-analysis",
+      "scene-image-generation",
+      "product-detail-generation",
+      "clothing-tryon-generation",
+      "image-edit",
+    ],
+    supportedCategories: ["text-to-text", "image-to-text", "text-to-image", "image-to-image"],
+  },
+  {
+    baseUrl: "https://api.deepseek.com/v1",
+    customEnabled: false,
+    defaultEndpointPath: "/chat/completions",
+    displayName: "DeepSeek",
+    providerLabel: "DeepSeek",
+    id: "deepseek",
+    protocol: "openai-compatible",
+    supportedCapabilities: ["listing-copy", "prompt-plan"],
+    supportedCategories: ["text-to-text"],
+  },
+];
+
+function appTestModelConfig(
+  capabilityId: string,
+  displayName: string,
+  model: string,
+  baseUrl: string,
+  endpointPath?: string,
+) {
+  return {
+    baseUrl,
+    capabilityId,
+    connectionStatus: "available",
+    displayName,
+    enabled: true,
+    endpointPath,
+    executionMode: "auto",
+    id: `cfg_${capabilityId}`,
+    isDefault: true,
+    model,
+    protocol: "openai",
+    providerLabel: "OpenAI",
+    providerProfileId: "openai",
+    secretStatus: {
+      configured: true,
+      storage: "sqlite-local",
+    },
+  };
+}
+
+const appTestModelConfigs = [
+  appTestModelConfig("listing-copy", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+  appTestModelConfig("scene-image-generation", "OpenAI 文生图", "gpt-image-2", "https://api.openai.com/v1/images"),
+  appTestModelConfig("clothing-tryon-generation", "OpenAI 图生图", "gpt-image-2", "https://api.openai.com/v1/images"),
+  appTestModelConfig("viral-style-analysis", "OpenAI 图生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+];
+
 const audioContextInstances: MockAudioContext[] = [];
+const audioSources: string[] = [];
+const audioPlayMock = vi.fn(() => Promise.resolve());
+
+function renderApp() {
+  return render(
+    <ToastProvider>
+      <App />
+    </ToastProvider>,
+  );
+}
 
 class MockAudioParam {
   setValueAtTime = vi.fn();
@@ -60,12 +176,98 @@ class MockAudioContext {
   }
 }
 
+class MockAudio {
+  volume = 1;
+
+  constructor(source: string) {
+    audioSources.push(source);
+  }
+
+  play = audioPlayMock;
+}
+
 describe("App shell", () => {
   beforeEach(() => {
     selectProductImagesMock.mockReset();
     invokeMock.mockReset();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "runtime_info") {
+        return Promise.resolve({
+          features: {
+            mode: "local",
+            supportsDirectoryPicker: true,
+            supportsLocalFileReveal: true,
+            supportsLocalModelConfig: true,
+            supportsSecretManagement: true,
+            supportsSystemNotification: false,
+            supportsWorkspaceSwitch: false,
+          },
+          mode: "local",
+          version: "0.1.0-test",
+        });
+      }
+      if (command === "model_config_list_provider_profiles") {
+        return Promise.resolve(appTestProviderProfiles);
+      }
+      if (command === "model_config_list_configs") {
+        return Promise.resolve(appTestModelConfigs);
+      }
+      if (command === "secret_reveal") {
+        return Promise.resolve("sk-demo-text-1234");
+      }
+      if (command === "settings_get") {
+        return Promise.resolve({
+          autoCreateDateFolders: true,
+          launchAtLogin: false,
+          minimizeToTrayOnClose: false,
+          notificationSound: "clear",
+          outputDirectory: "/workspace/exports",
+          restoreWorkspaceOnLaunch: true,
+          retainGenerationHistory: true,
+          showFailureNotifications: false,
+          showSystemNotifications: false,
+          showTaskDoneNotifications: false,
+          workspaceDirectory: "/workspace/current",
+        });
+      }
+      if (command === "settings_save") {
+        const input = (args as { input?: Record<string, unknown> } | undefined)?.input ?? {};
+        return Promise.resolve({
+          autoCreateDateFolders: input.autoCreateDateFolders ?? true,
+          launchAtLogin: input.launchAtLogin ?? false,
+          minimizeToTrayOnClose: input.minimizeToTrayOnClose ?? false,
+          notificationSound: input.notificationSound ?? "clear",
+          outputDirectory: input.outputDirectory ?? "/workspace/exports",
+          restoreWorkspaceOnLaunch: input.restoreWorkspaceOnLaunch ?? true,
+          retainGenerationHistory: input.retainGenerationHistory ?? true,
+          showFailureNotifications: input.showFailureNotifications ?? false,
+          showSystemNotifications: input.showSystemNotifications ?? false,
+          showTaskDoneNotifications: input.showTaskDoneNotifications ?? false,
+          workspaceDirectory: input.workspaceDirectory ?? "/workspace/current",
+        });
+      }
+      if (command === "workspace_get_storage_usage") {
+        return Promise.resolve({
+          assetBytes: 0,
+          cacheBytes: 0,
+          exportBytes: 0,
+          logBytes: 0,
+          totalBytes: 0,
+        });
+      }
+      if (command === "workspace_run_garbage_collection") {
+        return Promise.resolve({ deletedFiles: 0, reclaimedBytes: 0 });
+      }
+      return Promise.resolve(undefined);
+    });
     saveMock.mockReset();
     audioContextInstances.length = 0;
+    audioSources.length = 0;
+    audioPlayMock.mockClear();
+    Object.defineProperty(window, "Audio", {
+      configurable: true,
+      value: MockAudio,
+    });
     Object.defineProperty(window, "AudioContext", {
       configurable: true,
       value: MockAudioContext,
@@ -85,7 +287,7 @@ describe("App shell", () => {
   });
 
   it("renders a native-feeling workspace with reusable layout regions", () => {
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole("banner", { name: "应用工具栏" })).toBeInTheDocument();
     const navigation = screen.getByRole("navigation", { name: "主导航" });
@@ -110,7 +312,7 @@ describe("App shell", () => {
   it("opens model configuration workspace with model cards and default summary", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     await user.click(within(navigation).getByRole("button", { name: /模型/ }));
@@ -159,10 +361,9 @@ describe("App shell", () => {
   it("links model options to provider selection, closes menus after selection, and allows custom model input", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
-
     const providerTrigger = screen.getByRole("button", { name: /文生文 Provider.*OpenAI/ });
     await user.click(providerTrigger);
     await user.click(screen.getByRole("button", { name: "火山引擎" }));
@@ -193,10 +394,9 @@ describe("App shell", () => {
   it("supports DeepSeek provider for text-to-text models", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
-
     const providerTrigger = screen.getByRole("button", { name: /文生文 Provider.*OpenAI/ });
     await user.click(providerTrigger);
     await user.click(screen.getByRole("button", { name: "DeepSeek" }));
@@ -217,10 +417,9 @@ describe("App shell", () => {
   it("limits DeepSeek to text-to-text provider choices and closes provider menus after picking", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
-
     const textToImageProviderTrigger = screen.getByRole("button", { name: /文生图 Provider.*OpenAI/ });
     await user.click(textToImageProviderTrigger);
 
@@ -237,12 +436,11 @@ describe("App shell", () => {
   it("toggles API key visibility in model cards", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /模型/ }));
-
     const apiKeyInput = screen.getByRole("textbox", { name: "文生文 API Key" });
-    expect(apiKeyInput).toHaveValue("sk-••••••••••••••••••••••••1234");
+    expect(apiKeyInput).toHaveValue("sk-••••••••••••••••••••••••已配置");
 
     await user.click(screen.getByRole("button", { name: "显示文生文 API Key" }));
 
@@ -253,10 +451,10 @@ describe("App shell", () => {
     expect(apiKeyInput).toHaveValue("sk-••••••••••••••••••••••••1234");
   });
 
-  it("opens settings workspace and previews notification sound with Web Audio", async () => {
+  it("opens settings workspace and previews notification sound with generated audio", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     const toolbar = screen.getByRole("banner", { name: "应用工具栏" });
     await user.click(within(toolbar).getByRole("button", { name: "设置" }));
@@ -276,7 +474,7 @@ describe("App shell", () => {
     expect(screen.getByText("存储与输出")).toBeInTheDocument();
     expect(screen.getByText("提醒与通知")).toBeInTheDocument();
     expect(screen.getByText("缓存与清理")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("/Users/demo/Documents/商拍工坊/outputs")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("/workspace/exports")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "提示音" })).not.toBeInTheDocument();
     const soundTrigger = screen.getByRole("button", { name: /提示音.*清脆音效/ });
     expect(soundTrigger).toHaveClass(
@@ -294,18 +492,24 @@ describe("App shell", () => {
     const launchToggleThumb = launchToggle.querySelector("span");
     expect(launchToggle).toHaveClass("h-[18px]", "w-[34px]");
     expect(launchToggleThumb).not.toBeNull();
-    expect(launchToggleThumb).toHaveClass("left-0.5", "top-1/2", "-translate-y-1/2", "translate-x-4");
+    expect(launchToggleThumb).toHaveClass("left-0.5", "top-1/2", "-translate-y-1/2", "translate-x-0");
 
     await user.click(soundTrigger);
+    expect(screen.getByRole("button", { name: "爆款提示音" })).toBeInTheDocument();
     const successSoundOption = screen.getByRole("button", { name: "完成音效" });
     expect(successSoundOption).toHaveClass("flex", "h-9", "rounded-[10px]", "text-[12px]");
     await user.click(successSoundOption);
     expect(screen.getByRole("button", { name: /提示音.*完成音效/ })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "试听提示音" }));
 
-    expect(audioContextInstances).toHaveLength(1);
-    expect(audioContextInstances[0].createOscillator).toHaveBeenCalled();
-    expect(audioContextInstances[0].createGain).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("settings_play_notification_sound", {
+        soundId: "success",
+      }),
+    );
+    expect(audioPlayMock).not.toHaveBeenCalled();
+    expect(audioSources).toHaveLength(0);
+    expect(audioContextInstances).toHaveLength(0);
   });
 
   it("maps every scene template to the source ecom-details-image template ids", () => {
@@ -339,7 +543,7 @@ describe("App shell", () => {
   });
 
   it("keeps the first UI slice free of right inspector and bottom status regions", () => {
-    render(<App />);
+    renderApp();
 
     expect(screen.queryByRole("complementary", { name: "右侧属性区" })).not.toBeInTheDocument();
     expect(screen.queryByRole("contentinfo", { name: "底部状态栏" })).not.toBeInTheDocument();
@@ -420,7 +624,7 @@ describe("App shell", () => {
   });
 
   it("exposes the primary product workflow modules as reusable option tiles", () => {
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole("checkbox", { name: "首屏主视觉" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "核心卖点图" })).toBeChecked();
@@ -429,7 +633,7 @@ describe("App shell", () => {
   });
 
   it("defaults product generation settings to Tmall China Chinese", () => {
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole("button", { name: "淘宝天猫" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "中国" })).toBeInTheDocument();
@@ -437,7 +641,7 @@ describe("App shell", () => {
   });
 
   it("disables the browser context menu inside the desktop window", () => {
-    render(<App />);
+    renderApp();
 
     const contextMenuEvent = new MouseEvent("contextmenu", {
       bubbles: true,
@@ -461,7 +665,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "生成记录" }));
 
@@ -546,7 +750,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
 
@@ -572,7 +776,7 @@ describe("App shell", () => {
 
     selectProductImagesMock.mockResolvedValue([]);
 
-    render(<App />);
+    renderApp();
 
     const uploadDropzone = screen.getByRole("button", { name: "上传图片" });
     expect(uploadDropzone).toHaveClass(
@@ -638,7 +842,7 @@ describe("App shell", () => {
         },
       ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
@@ -676,7 +880,7 @@ describe("App shell", () => {
   it("shows AI model generation controls after switching the clothing model tab", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "AI 生成" }));
@@ -757,7 +961,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
@@ -801,7 +1005,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
@@ -910,7 +1114,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
 
@@ -936,7 +1140,7 @@ describe("App shell", () => {
   });
 
   it("keeps the product generation call to action disabled until product images are uploaded", () => {
-    render(<App />);
+    renderApp();
 
     const cta = screen.getByRole("button", { name: "请上传产品图" });
 
@@ -956,7 +1160,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
 
@@ -987,7 +1191,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.click(screen.getByTestId("product-format-select-trigger"));
@@ -1124,7 +1328,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.click(screen.getByTestId("product-format-select-trigger"));
@@ -1384,7 +1588,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.click(screen.getByTestId("product-format-select-trigger"));
@@ -1460,7 +1664,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.click(screen.getByTestId("product-format-select-trigger"));
@@ -1481,7 +1685,7 @@ describe("App shell", () => {
   it("updates generation setting options and syncs language from the selected market", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "淘宝天猫" }));
     await user.click(screen.getByRole("button", { name: "亚马逊" }));
@@ -1508,7 +1712,7 @@ describe("App shell", () => {
   it("only shows ordinary and advanced A+ formats for Amazon", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByTestId("product-format-select-trigger"));
 
@@ -1549,7 +1753,7 @@ describe("App shell", () => {
   it("keeps the format dropdown open for advanced A+ and supports web plus mobile selections", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "淘宝天猫" }));
     await user.click(screen.getByRole("button", { name: "亚马逊" }));
@@ -1580,7 +1784,7 @@ describe("App shell", () => {
   it("toggles product modules from the whole tile with desktop-like transitions", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     const brandModuleText = screen.getByText("品牌故事图");
     const brandModuleTile = brandModuleText.closest(".group");
@@ -1609,7 +1813,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     expect(screen.getByText("附加功能")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "false");
@@ -1684,7 +1888,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "爆款风格分析" }));
     await user.click(screen.getByRole("button", { name: "上传图片" }));
@@ -1758,7 +1962,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "红黑潮玩摆件，电竞桌搭，适合社媒种草。");
@@ -1804,7 +2008,7 @@ describe("App shell", () => {
   it("opens a non-editable AI writing dialog and confirms the suggestion", async () => {
     vi.useFakeTimers();
 
-    render(<App />);
+    renderApp();
 
     fireEvent.click(screen.getByRole("button", { name: "AI 帮写" }));
 
@@ -1858,7 +2062,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.click(screen.getByRole("checkbox", { name: "品牌故事图" }));
@@ -1878,7 +2082,7 @@ describe("App shell", () => {
   it("keeps clothing parameters when switching workspaces", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: /服饰/ }));
     await user.click(screen.getByRole("button", { name: "AI 生成" }));
@@ -1914,7 +2118,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "上传图片" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "防晒透气，适合户外骑行。");
@@ -1943,7 +2147,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
@@ -1973,7 +2177,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     await user.click(screen.getByRole("button", { name: "场景" }));
     await user.click(screen.getByRole("button", { name: "上传参考图" }));
@@ -2008,7 +2212,7 @@ describe("App shell", () => {
       },
     ]);
 
-    render(<App />);
+    renderApp();
 
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     const sceneNavigationButton = within(navigation).getByRole("button", { name: /场景/ });
@@ -2104,7 +2308,7 @@ describe("App shell", () => {
   it("switches from detail generation to the clothing try-on workspace", async () => {
     const user = userEvent.setup();
 
-    render(<App />);
+    renderApp();
 
     expect(screen.getByRole("button", { name: /场景/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /详情/ })).not.toBeInTheDocument();

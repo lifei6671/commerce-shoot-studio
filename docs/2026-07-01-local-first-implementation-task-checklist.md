@@ -12,8 +12,8 @@
 - 每个任务必须能独立验收，不能只完成“代码写了”。
 - React feature 只调用 Public Runtime Ports。
 - Rust runtime 拥有 SQLite、文件系统、Secret、Prompt 模板和 ModelGateway。
-- SQLite 只保存相对路径、脱敏摘要和结构化状态。
-- API Key、raw prompt、Provider raw response 永不入库。
+- SQLite 保存相对路径、脱敏摘要、结构化状态，以及本地密钥表中的 API Key。
+- API Key 只能进入 SQLite 本地密钥表；raw prompt、Provider raw response 永不入库。
 - macOS / Windows 差异由 runtime adapter 屏蔽，页面不写平台分支。
 
 ## 2. 全局验证命令
@@ -71,22 +71,22 @@ M7 真实场景生图闭环
 
 ### D0-01 SQLite 依赖
 
-- 状态：待确认。
-- 建议：MVP 使用 `rusqlite + migration helper`。
+- 状态：已确认。
+- 方案：MVP 使用 `rusqlite + migration helper`。
 - 影响：M0 所有数据库任务。
 - 验收：依赖选择写入方案文档或 PR 描述。
 
 ### D0-02 Secret 存储依赖
 
-- 状态：待确认。
-- 建议：macOS Keychain + Windows Credential Manager，优先选 Tauri plugin 或成熟 Rust crate。
+- 状态：已确认。
+- 方案：MVP 使用 SQLite 本地密钥表存储 API Key，不使用 macOS Keychain / Windows Credential Manager。
 - 影响：M5。
-- 验收：明确 macOS / Windows 两端实现路径。
+- 验收：明确本地密钥表 schema、workspace 隔离、文件权限、备份/导出排除和日志脱敏策略。
 
 ### D0-03 第一条真实模型通道
 
-- 状态：待确认。
-- 建议：先接一个稳定官方 Provider，再接 OpenAI-compatible 网关。
+- 状态：已确认。
+- 方案：先接一个稳定官方 Provider，再接 OpenAI-compatible 网关。
 - 影响：M6 / M7。
 - 验收：确认 provider profile allowlist 的第一批条目。
 
@@ -153,9 +153,10 @@ M7 真实场景生图闭环
 ### M0-T04 启动恢复和 temp 清理骨架
 
 - 依赖：M0-T03。
+- 当前状态：已完成基础闭环。`StartupRecoveryService` 已能在 workspace 初始化时把异常退出遗留的 `running` 任务恢复为 `interrupted`，写入 `TASK_INTERRUPTED` 标准错误和 `task.interrupted` 事件；同时会清理 `cache/tmp` 中孤儿临时文件。
 - 主要文件：
   - `desktop/src-tauri/src/services/workspace*`
-  - `desktop/src-tauri/src/services/task_recovery*`
+  - `desktop/src-tauri/src/services/startup_recovery*`
 - 执行动作：
   - 启动时扫描 `running` 任务，恢复为 `failed` / `TASK_INTERRUPTED`。
   - 清理 `cache/tmp` 中孤儿临时文件。
@@ -191,6 +192,7 @@ M7 真实场景生图闭环
 ### M1-T01 SettingsPort 持久化
 
 - 依赖：M0-T03。
+- 当前状态：已完成 SQLite `settings` 表、Rust `SettingsService` / Tauri command、前端 `localSettingsPort` adapter；设置页 UI 接入仍待 M1-T04。
 - 主要文件：
   - `desktop/src-tauri/src/services/settings*`
   - `desktop/src-tauri/src/commands/settings*`
@@ -201,13 +203,14 @@ M7 真实场景生图闭环
   - 支持 workspace 目录、导出目录、历史保留等字段。
 - 验收标准：
   - 修改设置后重启仍保留。
-  - SQLite 中只存配置 JSON，不存 secret。
+  - settings 表只存设置 JSON，不存 secret。
   - `make test`、`make cargo-check` 通过。
 - 退出条件：设置页不再依赖 local mock。
 
 ### M1-T02 ShellPort 本地壳能力
 
 - 依赖：M0-T01。
+- 当前状态：已完成 Rust shell commands 和前端 `localShellPort` adapter；系统通知仍按 MVP 口径 no-op，`RuntimeInfo.supportsSystemNotification=false`。
 - 主要文件：
   - `desktop/src-tauri/src/commands/shell*`
   - `desktop/src/runtime/local/shell*`
@@ -224,6 +227,7 @@ M7 真实场景生图闭环
 ### M1-T03 RuntimeInfoPort 和 feature gating
 
 - 依赖：M1-T02。
+- 当前状态：已完成 Rust `runtime_info` 命令和前端 `localRuntimeInfoPort` adapter；页面 feature gating 仍待 M1-T02/M1-T04 串接。
 - 主要文件：
   - `desktop/src/runtime/*`
   - `desktop/src/features/settings/*`
@@ -242,6 +246,7 @@ M7 真实场景生图闭环
 ### M1-T04 设置页接真实 Port
 
 - 依赖：M1-T01、M1-T02、M1-T03。
+- 当前状态：已完成设置页加载/保存真实 settings，目录选择和打开目录走 `ShellPort`，系统通知入口按 `RuntimeInfoPort.features` 禁用。
 - 主要文件：
   - `desktop/src/features/settings/components/SettingsPage.tsx`
   - `desktop/src/features/settings/*test*`
@@ -262,12 +267,14 @@ M7 真实场景生图闭环
 ### M2-T01 建立 assets migration 和 DAO
 
 - 依赖：M0-T03。
+- 当前状态：已完成。交付前不做 migration 演进，当前直接扩展 baseline schema；已建立 `assets` 表、`lifecycle`、索引、Rust `AssetService` 查询能力和覆盖测试。
 - 主要文件：
-  - `desktop/src-tauri/migrations/*assets*`
-  - `desktop/src-tauri/src/infrastructure/database/*asset*`
+  - `desktop/src-tauri/src/infrastructure/database/mod.rs`
+  - `desktop/src-tauri/src/domain/assets.rs`
+  - `desktop/src-tauri/src/services/assets.rs`
 - 执行动作：
   - 建立 `assets` 表和索引。
-  - 支持 `deleted_at`、`sha256`、`relative_path` 唯一约束。
+  - 支持 `lifecycle`、`deleted_at`、`sha256`、`relative_path` 唯一约束。
   - 默认查询过滤 `deleted_at IS NULL`。
 - 验收标准：
   - asset CRUD 单测覆盖。
@@ -278,6 +285,7 @@ M7 真实场景生图闭环
 ### M2-T02 importImages 真实导入
 
 - 依赖：M2-T01。
+- 当前状态：已完成后端基础能力。已支持 PNG/JPEG 尺寸读取、扩展名 MIME 校验、sha256、workspace `cache/tmp` 写入、atomic rename、相对路径入库、导入后 `staged` 生命周期和同 kind/hash 未删除资产复用；未引入第三方图片解码依赖。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/commands/assets*`
@@ -298,6 +306,7 @@ M7 真实场景生图闭环
 ### M2-T03 AssetPort list/get/reveal
 
 - 依赖：M2-T02、M1-T02。
+- 当前状态：已完成 runtime 基础能力。Rust command 与 `localAssetPort` 已接通；素材库 UI 对接未开始，需要单独确认交互方案。
 - 主要文件：
   - `desktop/src/runtime/local/assets*`
   - `desktop/src/features/*asset*`
@@ -314,6 +323,7 @@ M7 真实场景生图闭环
 ### M2-T04 deleteAsset 和引用保护
 
 - 依赖：M2-T01。
+- 当前状态：已完成后端基础能力。`deleteAsset` 已默认标记 `lifecycle=deleted` 并写 `deleted_at`，默认列表过滤 `deleted_at`；被任务引用的资产不会被 GC 物理清理。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/services/generation*`
@@ -331,8 +341,9 @@ M7 真实场景生图闭环
 ### M2-T05 GC 与 Windows 文件系统规则
 
 - 依赖：M2-T04。
+- 当前状态：部分完成。`WorkspacePort.runGarbageCollection` 已接本地 command；GC 会清理未引用且超过 24 小时的 `staged` 资产，以及未引用的 `deleted` 资产；Windows 保留字符、长路径和真机文件锁行为仍待补充。
 - 主要文件：
-  - `desktop/src-tauri/src/services/gc*`
+  - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/infrastructure/filesystem/*`
 - 执行动作：
   - GC 只清理不被引用且已标记删除的文件。
@@ -352,9 +363,9 @@ M7 真实场景生图闭环
 ### M3-T01 generation tasks migration
 
 - 依赖：M0-T03、M2-T01。
+- 当前状态：已完成 baseline schema。交付前不做 migration 演进，当前直接扩展 baseline；已建立 `generation_tasks`、`generation_task_input_assets`、`generation_assets`、`task_events`、CHECK 约束、外键和 `idempotency_key` 唯一索引。
 - 主要文件：
-  - `desktop/src-tauri/migrations/*generation*`
-  - `desktop/src-tauri/src/infrastructure/database/*task*`
+  - `desktop/src-tauri/src/infrastructure/database/mod.rs`
 - 执行动作：
   - 建立 `generation_tasks`、`generation_task_input_assets`、`generation_assets`、`task_events`。
   - 加 `status` / `kind` / `stage` / `role` CHECK 约束。
@@ -369,6 +380,7 @@ M7 真实场景生图闭环
 ### M3-T02 GenerationPort create/get/list
 
 - 依赖：M3-T01。
+- 当前状态：已完成后端和 runtime 基础能力。Rust `GenerationService` / Tauri command / 前端 `localGenerationPort` 已实现 `createTask`、`getTask`、`getTaskDetail`、`listTasks`，已覆盖双击幂等、failed idempotency、input asset relations、创建任务时将输入资产从 `staged` 提升为 `active`，以及 `GenerationTaskDetail` 聚合 input assets、output assets、events。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/commands/generation*`
@@ -388,6 +400,7 @@ M7 真实场景生图闭环
 ### M3-T03 状态机与 task_events
 
 - 依赖：M3-T02。
+- 当前状态：部分完成。创建、重试、取消会写 `task_events`；完整执行器 stage 流转和 Tauri event emit 仍待 M7 / UI 对接前补充。
 - 主要文件：
   - `desktop/src-tauri/src/services/task_events*`
   - `desktop/src-tauri/src/services/generation*`
@@ -405,13 +418,14 @@ M7 真实场景生图闭环
 ### M3-T04 retry/cancel/delete 语义
 
 - 依赖：M3-T03。
+- 当前状态：部分完成。`retryTask` 创建新 task 并写 `retry_of_task_id` / `attempt_no`，`cancelTask` 更新状态并写事件，`deleteTask` 写 `hidden_at` 做历史软隐藏；输入资产关系已落库，结果资产关系仍待 M7 联动。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src/runtime/local/generation*`
 - 执行动作：
   - `retryTask` 创建新 task，写 `retry_of_task_id` 和 `attempt_no`。
   - `cancelTask` 更新状态和事件。
-  - `deleteTask` 只写 `deleted_at`，不删除资产。
+  - `deleteTask` 只写 `hidden_at`，不删除资产。
 - 验收标准：
   - retry 新旧 task 关联正确。
   - delete 后默认历史不显示，`includeDeleted` 可查。
@@ -524,11 +538,12 @@ M7 真实场景生图闭环
 
 ## 10. M5：Capability + Model Config + Secret
 
-目标：建立本地模型配置和能力查询边界，密钥只在安全存储中。
+目标：建立本地模型配置和能力查询边界，密钥只通过 `SecretPort` 进入 SQLite 本地密钥表。
 
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
+- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
@@ -542,47 +557,80 @@ M7 真实场景生图闭环
   - `make cargo-check` 通过。
 - 退出条件：模型配置不能指向任意 baseUrl。
 
+### M5-T01A Provider 连接探测抽象
+
+- 依赖：M5-T01、M5-T03。
+- 当前状态：已完成第一版。已新增 Rust `ProviderConnectionTester` 抽象和 `HttpProviderConnectionTester`，`ModelConfigService.testConfig` 会用当前 workspace SQLite 中的 API Key，对内置 provider 的 models endpoint 发起最小 HTTP 探测，并将结果写回 `model_configs.connection_status`、`connection_message`、`connection_tested_at` 和连接指纹。
+- 主要文件：
+  - `desktop/src-tauri/src/services/provider_connection.rs`
+  - `desktop/src-tauri/src/services/model_config.rs`
+  - `desktop/src-tauri/tests/model_config_service.rs`
+- 执行动作：
+  - mock-local 不触发网络请求，直接视为可用。
+  - OpenAI / DeepSeek / 火山引擎只从 Rust 内置 profile 解析 baseUrl 和 models path。
+  - 连接测试只读取 HTTP status，不保存 provider raw response。
+  - 401 / 403 / 429 / 404 / timeout / network error 归一化为可展示文案。
+- 验收标准：
+  - API Key 不进入 `LocalModelConfigView`。
+  - `testConfig` 成功和失败状态均可持久读取。
+  - 配置、endpoint 或 API Key 变化后连接状态自动回到 `untested`。
+  - 单测可注入 fake tester，避免测试阶段真实访问 Provider。
+  - `make cargo-check` 和 Rust 全量测试通过。
+- 退出条件：模型配置页的“测试连接”具备真实 Provider 探测能力，但不代表真实生成链路已接入。
+
 ### M5-T02 model_configs migration 和 ModelConfigPort
 
 - 依赖：M5-T01。
+- 当前状态：已完成后端和 runtime 基础能力。已建立 `model_configs` baseline schema、Rust `ModelConfigService` / Tauri command / 前端 `localModelConfigPort`，并为每个能力自动准备一个默认 mock 配置；provider 可用性由真实连接测试或 mock-local 规则持久化。
 - 主要文件：
   - `desktop/src-tauri/migrations/*model_config*`
   - `desktop/src-tauri/src/services/model_config*`
   - `desktop/src/runtime/local/model-config*`
 - 执行动作：
   - 建立 `model_configs` 表。
+  - `model_configs` 只保存模型配置和 `secret_ref`，不直接保存 API Key。
+  - 持久化 provider 连接状态和连接指纹。
+  - 修改 API Key、模型、执行模式或 endpointPath 后，连接状态自动回到 `untested`。
   - 实现 `listConfigs`、`getConfig`、`saveConfig`、`setDefaultConfig`、`deleteConfig`、`listProviderProfiles`、`testConfig`。
   - `LocalModelConfigView` 不含 secret 明文。
   - remote mode 误调用返回 `MODEL_CONFIG_UNAVAILABLE`。
 - 验收标准：
-  - SQLite 不保存 API Key。
+  - API Key 不进入 `model_configs`。
   - `LocalModelConfigView` 不包含 secret 明文。
   - 默认配置唯一性生效。
+  - provider 连接测试结果可持久读取，配置或密钥变化后自动失效。
   - `make test`、`make cargo-check` 通过。
 - 退出条件：模型配置页可接真实本地配置。
 
 ### M5-T03 SecretPort
 
 - 依赖：D0-02、M5-T01。
+- 当前状态：已完成后端和 runtime 基础能力。已建立 `model_secrets` baseline schema、Rust `SecretService` / Tauri command / 前端 `localSecretPort`；API Key 只写入 `model_secrets.secret_value`，前端 DTO 只返回 `SecretStatus`。
 - 主要文件：
-  - `desktop/src-tauri/src/infrastructure/keychain*`
+  - `desktop/src-tauri/src/infrastructure/secrets*`
+  - `desktop/src-tauri/migrations/*model_secret*`
   - `desktop/src-tauri/src/services/secrets*`
   - `desktop/src/runtime/local/secrets*`
 - 执行动作：
   - Public `SecretScope` 不传 workspaceId。
   - runtime 用 active workspace 注入 `ResolvedSecretScope`。
-  - macOS Keychain / Windows Credential Manager 保存 secret。
+  - 建立 `model_secrets` 表保存 API Key。
+  - API Key 记录必须包含 workspace、provider profile、capability 维度。
+  - 初始化 workspace 时尽力加固目录和 SQLite 文件权限。
+  - 备份、导出和诊断包默认排除 `model_secrets.secret_value`。
   - 返回 `SecretStatus`，不返回明文。
 - 验收标准：
-  - SQLite、日志、前端 DTO 均无 API Key 明文。
+  - API Key 只出现在 `model_secrets.secret_value`。
+  - 日志、task events、settings、前端 DTO 均无 API Key 明文。
   - 切换 workspace 后 secret 状态隔离。
-  - macOS 本机验证 Keychain。
-  - Windows Credential Manager 真机待验。
-- 退出条件：密钥存储安全边界可用。
+  - macOS 本机验证 workspace / DB 权限。
+  - Windows 真机验证 workspace / DB ACL。
+- 退出条件：SQLite 本地密钥边界可用。
 
 ### M5-T04 CapabilityPort
 
 - 依赖：M5-T02、M5-T03。
+- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置让 7 个能力在无外网时可用于调试。
 - 主要文件：
   - `desktop/src-tauri/src/services/capability*`
   - `desktop/src/runtime/local/capability*`
@@ -599,6 +647,7 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 7 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
@@ -612,6 +661,7 @@ M7 真实场景生图闭环
   - 页面不出现 demo key。
   - 保存后重启仍有配置状态。
   - secret 明文不回显。
+  - mock-local 不要求 API Key，OpenAI / DeepSeek / 火山引擎需要密钥并重新测试后才算可用。
   - `make test`、`make frontend-build` 通过。
 - 退出条件：模型配置页不再是 mock 数据。
 
@@ -622,8 +672,9 @@ M7 真实场景生图闭环
 ### M6-T01 Internal ModelGatewayPort 和 invocation 表
 
 - 依赖：M5-T04。
+- 当前状态：已完成第一版。已建立 `model_invocations` baseline 表，`ModelGatewayService.invoke` 会生成 `invocation_id`，写入 capability、provider profile、model、状态、request summary、output summary 和 usage summary；不保存 raw request、raw response 或 raw prompt。开发期 baseline 会在旧 workspace 已应用 migration 1 时幂等补齐新增表。
 - 主要文件：
-  - `desktop/src-tauri/migrations/*model_invocation*`
+  - `desktop/src-tauri/src/infrastructure/database/mod.rs`
   - `desktop/src-tauri/src/services/model_gateway*`
 - 执行动作：
   - 建立 `model_invocations`。
@@ -638,6 +689,7 @@ M7 真实场景生图闭环
 ### M6-T02 DeterministicModelGatewayAdapter
 
 - 依赖：M6-T01。
+- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，支持 7 个 capability 的 deterministic mock 输出，不触发真实 Provider 调用；每次调用会写入脱敏 invocation 记录。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/deterministic*`
   - `desktop/src-tauri/src/services/model_gateway*test*`
@@ -653,9 +705,10 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
+- 当前状态：已完成基础骨架。已新增 OpenAI-compatible 响应归一化模块，支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；已实现 Provider 结果 URL 脱敏。真实 HTTP 生成请求和流式/异步轮询接入仍待后续切片。
 - 主要文件：
-  - `desktop/src-tauri/src/infrastructure/providers/openai*`
-  - `desktop/src-tauri/src/infrastructure/providers/openai_compatible*`
+  - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
+  - `desktop/src-tauri/tests/provider_adapter.rs`
 - 执行动作：
   - 建立 adapter 接口骨架。
   - 支持 sync / stream / async-task 结果归一化的结构。
@@ -671,9 +724,10 @@ M7 真实场景生图闭环
 ### M6-T04 Provider 错误归一化
 
 - 依赖：M6-T02、M6-T03。
+- 当前状态：已完成基础错误映射。已新增 Rust `domain::errors`，覆盖 429、timeout、network、401/403、常规未知错误等归一化规则；`providerErrorCode` 会做字符级清理和疑似 secret 替换，不使用 Provider raw error 作为 message。
 - 主要文件：
   - `desktop/src-tauri/src/domain/errors*`
-  - `desktop/src-tauri/src/services/model_gateway*`
+  - `desktop/src-tauri/tests/provider_error.rs`
 - 执行动作：
   - 将 rate limit、timeout、content rejected、network、unknown 映射到 `AppErrorCode`。
   - message 用产品可展示文案，不透出 raw provider error。
@@ -691,9 +745,10 @@ M7 真实场景生图闭环
 ### M7-T01 LocalTaskExecutor
 
 - 依赖：M3-T03、M6-T02。
+- 当前状态：部分完成。已新增 Rust `LocalTaskExecutor` 内部服务，支持 `maxConcurrentTasks = 1`，能领取最早 queued task，更新 running / completed / failed 状态，写入 `task.started`、`task.provider-called`、`task.succeeded`、`task.failed` 事件，并在模型能力不可用时写入 `MODEL_CAPABILITY_UNAVAILABLE` 标准错误；workspace 初始化已能恢复异常 `running` 任务为 `interrupted`。尚未接 cancellation token、Tauri event emit、应用关闭主动取消。
 - 主要文件：
   - `desktop/src-tauri/src/services/local_task_executor*`
-  - `desktop/src-tauri/src/lib.rs`
+  - `desktop/src-tauri/tests/local_task_executor.rs`
 - 执行动作：
   - 从 queued task 取任务执行。
   - `maxConcurrentTasks = 1`。
@@ -710,6 +765,7 @@ M7 真实场景生图闭环
 ### M7-T02 场景任务调用 ModelGateway
 
 - 依赖：M7-T01、M6-T03。
+- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；真实 prompt 渲染、sync / stream / async-task Provider 调用仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/services/model_gateway*`
@@ -784,11 +840,12 @@ M7 真实场景生图闭环
 
 ### 数据安全
 
-- [ ] SQLite 不包含 API Key。
+- [ ] API Key 只出现在 `model_secrets.secret_value`。
 - [ ] SQLite 不包含 raw prompt。
 - [ ] SQLite 不包含 Provider raw response。
 - [ ] `task_events.detail_json` 不包含 Authorization、Cookie、raw headers、raw request、raw response。
 - [ ] Provider URL 入库前脱敏。
+- [ ] 备份、导出和诊断包默认不包含 API Key。
 
 ### 本地工作区
 
@@ -800,10 +857,10 @@ M7 真实场景生图闭环
 
 ### 资产
 
-- [ ] 导入图片只保存相对路径。
-- [ ] 删除被历史引用的 asset 不破坏历史。
-- [ ] deleted asset 默认不出现在资源库。
-- [ ] GC 不删除被任务引用文件。
+- [x] 导入图片只保存相对路径。
+- [x] 删除被历史引用的 asset 不破坏历史。
+- [x] deleted asset 默认不出现在资源库。
+- [x] GC 不删除被任务引用文件。
 
 ### 任务
 
@@ -822,16 +879,19 @@ M7 真实场景生图闭环
 
 ### 模型配置
 
-- [ ] `LocalModelConfigView` 不含 secret 明文。
+- [x] `LocalModelConfigView` 不含 secret 明文。
+- [x] `model_configs` 不直接保存 API Key。
+- [x] `model_secrets` 按 workspace 隔离。
 - [ ] remote mode 不暴露 provider、model、baseUrl、endpointPath。
-- [ ] `provider_profile_id` 不能绕过 allowlist。
-- [ ] 保存配置或 secret 后 `CapabilityPort` 立即反映。
+- [x] `provider_profile_id` 不能绕过 allowlist。
+- [x] 保存配置或 secret 后 `CapabilityPort` 立即反映。
+- [x] provider 可用性持久化，修改 API Key、模型或 endpointPath 后自动失效。
 
 ### Windows 兼容
 
 - [ ] 文件名清理覆盖 Windows 保留字符和保留设备名。
 - [ ] 删除失败不会破坏 DB 状态。
-- [ ] Windows Credential Manager 不泄漏 secret。
+- [ ] Windows 下 workspace 目录和 SQLite 文件仅当前用户可读写。
 - [ ] Explorer reveal 通过 `ShellPort`。
 - [ ] Windows 真机完成导入、删除、GC、生成结果保存验收。
 

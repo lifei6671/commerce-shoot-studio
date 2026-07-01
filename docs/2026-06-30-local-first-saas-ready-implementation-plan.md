@@ -26,7 +26,7 @@ Typed Runtime Client
   v
 Runtime Port Interfaces
   |
-  +-- Local Runtime Adapter  -> Tauri Rust -> SQLite / Keychain / Local FS / Provider API
+  +-- Local Runtime Adapter  -> Tauri Rust -> SQLite / Local FS / Provider API
   |
   +-- Remote Runtime Adapter -> HTTPS API  -> SaaS Backend / Object Storage / Queue
 ```
@@ -41,7 +41,7 @@ Runtime Port Interfaces
 
 - 本地工作区初始化。
 - 图片素材导入与资产管理。
-- 模型配置与 API Key 安全保存。
+- 模型配置与 API Key 本地保存和权限加固。
 - 商品、服饰、场景三类生成任务。
 - 生成方案计划、可展示摘要编辑和确认。
 - ModelGateway 调用、轮询、下载和失败传播。
@@ -70,7 +70,7 @@ SaaS 化不应要求重写页面组件和业务流程，只替换 runtime adapte
 React UI 禁止直接处理：
 
 - Provider HTTP 请求。
-- API Key 明文保存。
+- API Key 持久化或回显。
 - SQLite 读写。
 - 真实文件复制、删除、移动。
 - 生成任务状态判定。
@@ -92,7 +92,7 @@ UI 只负责：
 单机版本：
 
 - 模型配置可以由本地模型配置页写入，但保存后属于 Rust runtime 内部配置。
-- API Key 保存在 Keychain。
+- API Key 由 Rust runtime 保存到 workspace SQLite 的本地密钥表，前端不持久化、不回显。
 - provider、model、baseUrl、endpointPath、executionMode 只在 Rust runtime 内解析。
 - Prompt 模板硬编码在 Rust 内，前端只传业务意图和用户输入。
 
@@ -139,7 +139,7 @@ await runtime.generation.createTask({
 
 - 本地数据库。
 - 本地文件系统资产目录。
-- Keychain / 系统凭据。
+- SQLite 本地密钥表。
 - ModelGatewayAdapter。
 - 任务状态机。
 - 结果文件保存。
@@ -203,7 +203,7 @@ desktop/src-tauri/src/
 ├── infrastructure/
 │   ├── database/
 │   ├── filesystem/
-│   ├── keychain/
+│   ├── secrets/
 │   └── providers/
 ├── services/
 └── lib.rs
@@ -214,7 +214,7 @@ desktop/src-tauri/src/
 - `commands` 只做 Tauri 入参、出参和错误转换。
 - `services` 编排用例。
 - `domain` 放任务、资产、模型配置等核心类型。
-- `infrastructure` 放 SQLite、Keychain、文件系统和 Provider 实现。
+- `infrastructure` 放 SQLite、密钥表、文件系统和 Provider 实现。
 
 ## 5. Runtime Port 接口
 
@@ -353,7 +353,7 @@ export interface RuntimeInfoPort {
 职责：
 
 - 返回当前 runtime 模式和前端可用能力。
-- UI 根据 `runtimeInfo.features` 显示或隐藏本地目录、reveal path、本地模型配置、本地 Keychain 等入口。
+- UI 根据 `runtimeInfo.features` 显示或隐藏本地目录、reveal path、本地模型配置、本地密钥管理等入口。
 - 页面不写 `if (isTauri)`。
 
 ### 5.5 SecretPort
@@ -375,7 +375,7 @@ export interface SecretPort {
 
 本地实现：
 
-- Keychain / 系统凭据。
+- SQLite 本地密钥表。
 - Rust Provider test client。
 
 远端实现：
@@ -386,10 +386,12 @@ export interface SecretPort {
 安全要求：
 
 - UI 不持有长期明文。
-- SQLite 不保存 API Key。
+- SQLite 可以保存 API Key，但只能保存在专用本地密钥表中，不能散落到 settings、task、event、asset 或前端 DTO。
 - 日志不打印 Authorization、Token、API Key。
 - 单机模式下 secret 默认按 workspace 隔离，不同 workspace 不共享 API Key。
-- Keychain key 必须包含 `workspaceId` 和 `providerProfileId`，避免测试 workspace 与正式 workspace 共用凭据。
+- 本地密钥记录必须包含 `workspaceId` 和 `providerProfileId`，避免测试 workspace 与正式 workspace 共用凭据。
+- workspace 目录必须做权限加固：macOS / Linux 目录建议 `0700`，SQLite 文件建议 `0600`；Windows 使用当前用户 ACL。
+- 自动备份、导出和诊断包默认不得包含 API Key；如果未来提供“包含密钥”的导出，必须二次确认并明确风险。
 
 ### 5.6 CapabilityPort
 
@@ -595,7 +597,7 @@ export interface ModelGatewayPort {
 
 本地实现：
 
-- Rust 从 Keychain 读取密钥。
+- Rust 从 SQLite 本地密钥表读取密钥。
 - Rust 按本地内部模型配置选择具体 `ModelGatewayAdapter`。
 - Rust 使用内置 Prompt 模板渲染最终请求。
 - Rust 处理 Provider 请求、轮询、下载和错误归一化。
@@ -710,7 +712,7 @@ export type LocalModelConfigView = {
 - `baseUrl` 只能作为内置 provider profile 的只读展示字段，MVP 不作为用户自由输入字段。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
-- API Key 永远不进入 `LocalModelConfigView`。
+- API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。
 
 Rust runtime 内部解析后使用 `ResolvedModelConfig`：
 
@@ -770,7 +772,7 @@ export type ResolvedSecretScope = SecretScope & {
 };
 ```
 
-`SecretScope` 是前端可传入范围，不包含 `workspaceId`。runtime 必须使用当前 active workspace 注入 `ResolvedSecretScope.workspaceId`，再读写 macOS Keychain 或 Windows Credential Manager。两端都不能把 secret 明文写入 SQLite、日志或前端 DTO。
+`SecretScope` 是前端可传入范围，不包含 `workspaceId`。runtime 必须使用当前 active workspace 注入 `ResolvedSecretScope.workspaceId`，再读写 SQLite 本地密钥表。API Key 可以在 SQLite 专用表中明文落盘，这是 MVP 明确接受的本地风险；但不能进入日志、task events、settings、asset、导出默认包或前端 DTO。
 
 ### 6.5 Asset
 
@@ -1270,6 +1272,17 @@ model_configs
 ├── created_at
 └── updated_at
 
+model_secrets
+├── id
+├── workspace_id
+├── provider_profile_id
+├── capability_id
+├── secret_kind
+├── secret_value
+├── created_at
+├── updated_at
+└── last_used_at
+
 model_invocations
 ├── id
 ├── capability_id
@@ -1396,10 +1409,12 @@ ai_assist_invocations
 
 - 数据库存相对路径，不存用户原始绝对路径。
 - 不存 Provider raw response。
-- 不存 API Key。
+- API Key 只允许保存在 `model_secrets.secret_value`，不得复制到其他表。
+- `model_secrets.secret_value` MVP 按本地明文密钥处理，依赖 workspace 文件权限和用户设备安全；后续可以在不改变 Public Port 的前提下升级为加密存储或系统凭据库。
 - 不存系统 Prompt 或最终 raw prompt。
 - `model_configs` 只服务本地单机 runtime，SaaS 模式不下发到客户端。
 - `model_configs.provider_profile_id` 只能引用 Rust runtime 内置 profile，不信任 SQLite 中的任意 `base_url`。
+- `model_configs.secret_ref` 只能引用同 workspace、同 provider profile 的 `model_secrets` 记录。
 - `prompt_plans` / `prompt_plan_items` 保存当前可编辑方案。
 - `generation_tasks.prompt_plan_snapshot_json` 保存任务执行时的冻结快照。
 - 任务创建后，即使原 PromptPlan 被用户继续编辑，历史任务也必须保持可追溯。
@@ -1757,7 +1772,7 @@ export type ModelInvocationAdapterResult =
 
 要求：
 
-- Rust 从 Keychain 读取密钥。
+- Rust 从 SQLite 本地密钥表读取密钥。
 - Rust 读取输入资产文件。
 - Rust 构造 OpenAI 或 OpenAI-compatible 请求。
 - Rust 发起 Provider 或网关请求。
@@ -1848,7 +1863,8 @@ MVP 必须同时考虑 macOS 和 Windows。平台差异由 Rust runtime 和 Shel
 
 ### 12.4 系统能力适配
 
-- macOS secret 使用 Keychain，Windows secret 使用 Windows Credential Manager。
+- MVP 不依赖 macOS Keychain 或 Windows Credential Manager，secret 统一由 SQLite 本地密钥表保存。
+- Rust runtime 必须在初始化 workspace 时尽力设置目录和 DB 文件权限；Windows 下使用当前用户 ACL，避免 Everyone / Users 可写。
 - `ShellPort.revealPath` 在 macOS 映射 Finder，在 Windows 映射 Explorer。
 - 系统通知、开机启动、托盘、窗口控制等能力只能通过 `RuntimeInfoPort.features` 暴露给 UI。
 - Windows 11 下应优先保留符合平台预期的窗口控制；自绘标题栏必须验证拖拽区域、缩放和高 DPI。
@@ -2007,14 +2023,14 @@ Local 到 SaaS 迁移边界：
 
 ### M5：Capability + Model Config + Secret
 
-目标：建立本地模型配置和能力查询边界，同时确保密钥只在安全存储中。
+目标：建立本地模型配置和能力查询边界，同时确保密钥只通过 `SecretPort` 进入 SQLite 本地密钥表。
 
 任务：
 
 - `CapabilityPort`。
 - `ModelConfigPort`。
 - `SecretPort`。
-- Keychain / Windows Credential Manager。
+- SQLite 本地密钥表。
 - provider profiles。
 - local model config view。
 - connection test。
@@ -2049,7 +2065,7 @@ Local 到 SaaS 迁移边界：
 以下事项进入编码前必须确认：
 
 1. SQLite 依赖选择：MVP 建议 `rusqlite + migration 工具`；如选择 `sqlx` 需确认编译和迁移成本。
-2. Keychain 依赖选择：使用 Tauri plugin 还是 Rust `keyring`。
+2. Secret 存储方式：MVP 已确认使用 SQLite 本地密钥表，不使用 macOS Keychain / Windows Credential Manager；正式发布前可再评估是否升级。
 3. 第一条真实模型通道：建议先接稳定官方 Provider，再接 OpenAI-compatible 网关。
 4. 单机版第三方 API 网关是否允许用户自定义 `baseUrl`、`endpointPath` 和 `executionMode`。MVP 建议不开放任意 custom，只做预设 profile。
 5. 异步网关第一版是否只支持轮询，还是同时预留 webhook/callback。MVP 建议单机只做 polling。
@@ -2061,7 +2077,7 @@ Local 到 SaaS 迁移边界：
 11. 本地 `model_configs` 是否永不迁移到 SaaS；默认建议不迁移，只由 SaaS 服务端重新配置。
 12. `confirmed` PromptPlan 是否需要“取消确认”能力；MVP 默认不支持原地回退，只能新建 draft。
 13. 任务状态更新在 SaaS 阶段优先采用 SSE、WebSocket 还是 polling。
-14. Windows Credential Manager 依赖选择：Tauri plugin、Rust crate，还是自研薄封装。
+14. Windows 本地密钥文件权限策略：确认 workspace 目录 ACL、备份排除策略和诊断包脱敏策略。
 15. Windows 安装包、自动更新、代码签名和企业环境代理策略是否纳入 MVP。
 
 这些涉及依赖、数据库、配置和外部协议，不能在没有确认时直接落代码。
@@ -2087,7 +2103,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib -- --nocapture
 
 - Port 接口 contract tests。
 - Settings 持久化。
-- Secret 不落盘。
+- Secret 只落 SQLite 本地密钥表，不进入其他表、日志、事件或前端 DTO。
 - Asset 导入和删除。
 - Task 状态机和 stage 流转。
 - task input assets 删除保护。
@@ -2095,7 +2111,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib -- --nocapture
 - runtime task event emit。
 - SQLite migration。
 - temp file / atomic rename / orphan GC。
-- Windows 文件名清理、文件锁和 Credential Manager 行为。
+- Windows 文件名清理、文件锁和 SQLite 文件 ACL 行为。
 - ModelGatewayPort contract tests。
 - DeterministicModelGatewayAdapter contract tests。
 - OpenAI-compatible 网关同步响应归一化。
@@ -2144,7 +2160,7 @@ Task：
 
 Model Config：
 
-- SQLite 不保存 API Key。
+- API Key 只保存在 `model_secrets.secret_value`。
 - `LocalModelConfigView` 不包含 secret 明文。
 - SaaS mode 不返回 provider、model、baseUrl、endpointPath。
 - `provider_profile_id` 不能绕过内置 allowlist。
@@ -2161,7 +2177,7 @@ Security：
 Windows：
 
 - Windows 下导入、删除、GC 不因文件句柄未关闭导致数据库状态损坏。
-- Windows Credential Manager 不向 SQLite 或前端返回 secret 明文。
+- Windows 下 workspace 目录和 SQLite 文件仅当前用户可读写。
 - Explorer reveal、系统通知和目录选择只通过 `ShellPort` / `RuntimeInfoPort.features` 暴露。
 - 文件名清理能处理 Windows 保留字符、保留设备名和长路径风险。
 
@@ -2174,8 +2190,8 @@ Windows：
 5. `CapabilityPort` 是模型能力唯一查询入口。
 6. `ModelConfigPort` 只服务 local mode，本地配置不进入 SaaS DTO。
 7. `WorkspacePort` 是本地工作区生命周期唯一入口。
-8. SQLite 只保存相对路径、脱敏摘要、结构化状态。
-9. API Key、raw prompt、Provider raw response 永不入库。
+8. SQLite 保存相对路径、脱敏摘要、结构化状态，以及 `model_secrets` 中的本地 API Key。
+9. API Key 只能进入 SQLite 本地密钥表；raw prompt、Provider raw response 永不入库。
 10. PromptPlan 当前状态和 Task 执行快照必须分离。
 11. MVP 不开放任意 custom gateway。
 12. MVP 本地任务并发数固定为 1。

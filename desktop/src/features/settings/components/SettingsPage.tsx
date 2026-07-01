@@ -1,9 +1,23 @@
-import { Bell, Folder, HardDrive, Layers3, Play, RotateCcw, Save, Settings2 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { Bell, Folder, HardDrive, Layers3, Play, Settings2 } from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Button } from "../../../shared/ui/button";
 import { cn } from "../../../shared/lib/cn";
 import { SelectPill } from "../../../shared/ui/select-pill";
-import { type NotificationSoundId, playNotificationSound } from "../lib/notificationSound";
+import type {
+  AppSettings,
+  RuntimeInfoPort,
+  SaveSettingsInput,
+  SettingsPort,
+  ShellPort,
+  WorkspacePort,
+  WorkspaceStorageUsage,
+} from "../../../runtime";
+import { localRuntimeInfoPort } from "../../../runtime/local/runtime-info";
+import { localSettingsPort } from "../../../runtime/local/settings";
+import { localShellPort } from "../../../runtime/local/shell";
+import { localWorkspacePort } from "../../../runtime/local/workspace";
+import { useToast } from "../../../shared/ui/toast";
+import { type NotificationSoundId, playNotificationSound as playBrowserNotificationSound } from "../lib/notificationSound";
 
 type SettingsState = {
   autoCreateDateFolders: boolean;
@@ -16,6 +30,7 @@ type SettingsState = {
   showSystemNotifications: boolean;
   showTaskDoneNotifications: boolean;
   retainGenerationHistory: boolean;
+  workspaceDirectory: string;
 };
 
 const defaultSettings: SettingsState = {
@@ -23,31 +38,229 @@ const defaultSettings: SettingsState = {
   launchAtLogin: true,
   minimizeToTrayOnClose: true,
   notificationSound: "clear",
-  outputDirectory: "/Users/demo/Documents/商拍工坊/outputs",
+  outputDirectory: "",
   restoreWorkspaceOnLaunch: true,
   retainGenerationHistory: true,
-  showFailureNotifications: true,
-  showSystemNotifications: true,
-  showTaskDoneNotifications: true,
+  showFailureNotifications: false,
+  showSystemNotifications: false,
+  showTaskDoneNotifications: false,
+  workspaceDirectory: "",
 };
 
-export function SettingsPage() {
+type SettingsPageProps = {
+  runtimeInfoPort?: RuntimeInfoPort;
+  settingsPort?: SettingsPort;
+  shellPort?: ShellPort;
+  workspacePort?: Pick<WorkspacePort, "getStorageUsage" | "runGarbageCollection">;
+};
+
+type RuntimeFeatureState = {
+  supportsDirectoryPicker: boolean;
+  supportsLocalFileReveal: boolean;
+  supportsSystemNotification: boolean;
+  supportsWorkspaceSwitch: boolean;
+};
+
+const defaultRuntimeFeatures: RuntimeFeatureState = {
+  supportsDirectoryPicker: false,
+  supportsLocalFileReveal: false,
+  supportsSystemNotification: false,
+  supportsWorkspaceSwitch: false,
+};
+
+export function SettingsPage({
+  runtimeInfoPort = localRuntimeInfoPort,
+  settingsPort = localSettingsPort,
+  shellPort = localShellPort,
+  workspacePort = localWorkspacePort,
+}: SettingsPageProps = {}) {
+  const { showToast } = useToast();
+  const pendingSettingsRef = useRef<SettingsState | null>(null);
+  const saveInFlightRef = useRef(false);
   const [settings, setSettings] = useState(defaultSettings);
-  const [saved, setSaved] = useState(true);
+  const [runtimeFeatures, setRuntimeFeatures] = useState(defaultRuntimeFeatures);
+  const [cleaning, setCleaning] = useState(false);
+  const [storageUsage, setStorageUsage] = useState<WorkspaceStorageUsage>({
+    assetBytes: 0,
+    cacheBytes: 0,
+    exportBytes: 0,
+    logBytes: 0,
+    totalBytes: 0,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSettings() {
+      try {
+        const [runtimeInfo, appSettings, usage] = await Promise.all([
+          runtimeInfoPort.getRuntimeInfo(),
+          settingsPort.getSettings(),
+          workspacePort.getStorageUsage(),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setRuntimeFeatures({
+          supportsDirectoryPicker: runtimeInfo.features.supportsDirectoryPicker,
+          supportsLocalFileReveal: runtimeInfo.features.supportsLocalFileReveal,
+          supportsSystemNotification: runtimeInfo.features.supportsSystemNotification,
+          supportsWorkspaceSwitch: runtimeInfo.features.supportsWorkspaceSwitch,
+        });
+        setStorageUsage(usage ?? emptyStorageUsage());
+        setSettings(normalizeSettings(appSettings, {
+          supportsDirectoryPicker: runtimeInfo.features.supportsDirectoryPicker,
+          supportsLocalFileReveal: runtimeInfo.features.supportsLocalFileReveal,
+          supportsSystemNotification: runtimeInfo.features.supportsSystemNotification,
+          supportsWorkspaceSwitch: runtimeInfo.features.supportsWorkspaceSwitch,
+        }));
+      } catch (error) {
+        if (!cancelled) {
+          showToast({
+            message: error instanceof Error ? error.message : "设置加载失败",
+            variant: "error",
+          });
+        }
+      }
+    }
+
+    void loadSettings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [runtimeInfoPort, settingsPort, showToast, workspacePort]);
 
   function updateSettings(patch: Partial<SettingsState>) {
-    setSettings((current) => ({ ...current, ...patch }));
-    setSaved(false);
+    setSettings((current) => {
+      const nextSettings = { ...current, ...patch };
+      void persistSettings(nextSettings);
+      return nextSettings;
+    });
   }
 
-  function restoreDefaults() {
-    setSettings(defaultSettings);
-    setSaved(false);
+  async function persistSettings(nextSettings: SettingsState) {
+    pendingSettingsRef.current = nextSettings;
+    if (saveInFlightRef.current) {
+      return;
+    }
+
+    saveInFlightRef.current = true;
+    try {
+      while (pendingSettingsRef.current) {
+        const settingsToSave = pendingSettingsRef.current;
+        pendingSettingsRef.current = null;
+
+        try {
+          const savedSettings = await settingsPort.saveSettings(toSaveSettingsInput(settingsToSave, runtimeFeatures));
+          // 即改即存可能连续触发多个请求，只允许最后一次保存结果回写页面。
+          if (pendingSettingsRef.current) {
+            continue;
+          }
+          setSettings(normalizeSettings(savedSettings, runtimeFeatures));
+          showToast({ message: "设置已保存", variant: "success" });
+        } catch (error) {
+          if (pendingSettingsRef.current) {
+            continue;
+          }
+          showToast({
+            message: error instanceof Error ? error.message : "设置保存失败",
+            variant: "error",
+          });
+        }
+      }
+    } finally {
+      saveInFlightRef.current = false;
+    }
   }
 
-  function saveSettings() {
-    setSaved(true);
+  async function chooseDirectory(kind: "outputDirectory" | "workspaceDirectory") {
+    try {
+      const selectedDirectory = await shellPort.chooseDirectory({
+        defaultPath: settings[kind] || undefined,
+        title: kind === "workspaceDirectory" ? "选择工作区目录" : "选择输出目录",
+      });
+      if (!selectedDirectory) {
+        return;
+      }
+      updateSettings({ [kind]: selectedDirectory });
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : "选择目录失败",
+        variant: "error",
+      });
+    }
   }
+
+  async function revealDirectory(path: string) {
+    if (!path) {
+      return;
+    }
+    try {
+      await shellPort.revealPath(path);
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : "打开文件夹失败",
+        variant: "error",
+      });
+    }
+  }
+
+  async function refreshStorageUsage() {
+    try {
+      setStorageUsage(await workspacePort.getStorageUsage());
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : "读取存储空间失败",
+        variant: "error",
+      });
+    }
+  }
+
+  async function cleanWorkspaceCache() {
+    if (cleaning) {
+      return;
+    }
+    setCleaning(true);
+    try {
+      const result = await workspacePort.runGarbageCollection();
+      await refreshStorageUsage();
+      showToast({
+        message: result.reclaimedBytes > 0 ? `已清理 ${formatBytes(result.reclaimedBytes)}` : "没有需要清理的缓存",
+        variant: "success",
+      });
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : "缓存清理失败",
+        variant: "error",
+      });
+    } finally {
+      setCleaning(false);
+    }
+  }
+
+  async function previewNotificationSound() {
+    try {
+      await settingsPort.playNotificationSound(settings.notificationSound);
+      showToast({ message: "已播放提示音", variant: "success" });
+    } catch {
+      try {
+        const played = await playBrowserNotificationSound(settings.notificationSound);
+        showToast({
+          message: played ? "已播放提示音" : "当前环境无法播放提示音",
+          variant: played ? "success" : "warning",
+        });
+      } catch (error) {
+        showToast({
+          message: error instanceof Error ? error.message : "当前环境无法播放提示音",
+          variant: "error",
+        });
+      }
+    }
+  }
+
+  const usedStorageBytes = storageUsage.totalBytes;
+  const storagePercent = usedStorageBytes > 0 ? 1 : 0;
 
   return (
     <main
@@ -98,21 +311,28 @@ export function SettingsPage() {
               icon={<Folder className="size-5" />}
               title="存储与输出"
             >
-              <div className="grid grid-cols-[110px_minmax(0,1fr)_92px_92px] items-center gap-3 border-b border-slate-200/60 px-5 py-3.5">
-                <div className="text-[13px] font-semibold text-slate-900">数据保存目录</div>
-                <input
-                  aria-label="数据保存目录"
-                  className="h-9 min-w-0 rounded-[11px] border border-slate-200/90 bg-white/78 px-3 text-[13px] text-slate-700 outline-none shadow-[inset_0_1px_2px_rgba(15,23,42,0.04),inset_0_1px_0_rgba(255,255,255,0.9)]"
-                  onChange={(event) => updateSettings({ outputDirectory: event.target.value })}
-                  value={settings.outputDirectory}
-                />
-                <Button className="justify-center bg-slate-950 text-white hover:bg-slate-900" size="sm">
-                  选择目录
-                </Button>
-                <Button className="justify-center" size="sm" variant="soft">
-                  打开文件夹
-                </Button>
-              </div>
+              <DirectorySettingRow
+                canChoose={runtimeFeatures.supportsDirectoryPicker && runtimeFeatures.supportsWorkspaceSwitch}
+                canEdit={runtimeFeatures.supportsWorkspaceSwitch}
+                canReveal={runtimeFeatures.supportsLocalFileReveal}
+                label="工作区目录"
+                onChange={(workspaceDirectory) => updateSettings({ workspaceDirectory })}
+                onChoose={() => chooseDirectory("workspaceDirectory")}
+                onReveal={() => revealDirectory(settings.workspaceDirectory)}
+                testId="workspace-directory-row"
+                value={settings.workspaceDirectory}
+              />
+              <DirectorySettingRow
+                canChoose={runtimeFeatures.supportsDirectoryPicker}
+                canEdit
+                canReveal={runtimeFeatures.supportsLocalFileReveal}
+                label="输出目录"
+                onChange={(outputDirectory) => updateSettings({ outputDirectory })}
+                onChoose={() => chooseDirectory("outputDirectory")}
+                onReveal={() => revealDirectory(settings.outputDirectory)}
+                testId="output-directory-row"
+                value={settings.outputDirectory}
+              />
               <SettingsRows>
                 <SettingsRow>
                   <ToggleSetting
@@ -135,13 +355,13 @@ export function SettingsPage() {
                   存储空间使用情况
                 </div>
                 <div className="grid grid-cols-[auto_auto_auto_1fr_auto] items-center gap-3">
-                  <span>已使用 45.6 GB</span>
+                  <span>已使用 {formatBytes(usedStorageBytes)}</span>
                   <span>·</span>
-                  <span>可用 954.4 GB</span>
+                  <span>工作区 {formatBytes(storageUsage.exportBytes)} 输出</span>
                   <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
-                    <div className="h-full w-[4%] rounded-full bg-app-blue" />
+                    <div className="h-full rounded-full bg-app-blue" style={{ width: `${storagePercent}%` }} />
                   </div>
-                  <span>4%</span>
+                  <span>{storagePercent}%</span>
                 </div>
               </div>
             </SettingsSection>
@@ -161,6 +381,7 @@ export function SettingsPage() {
                   />
                   <SystemNotificationSetting
                     checked={settings.showSystemNotifications}
+                    disabled={!runtimeFeatures.supportsSystemNotification}
                     onChange={(checked) => updateSettings({ showSystemNotifications: checked })}
                   />
                 </SettingsRow>
@@ -168,6 +389,7 @@ export function SettingsPage() {
                   <SoundSetting
                     notificationSound={settings.notificationSound}
                     onChange={(notificationSound) => updateSettings({ notificationSound })}
+                    onPreview={previewNotificationSound}
                   />
                   <ToggleSetting
                     checked={settings.showFailureNotifications}
@@ -186,19 +408,19 @@ export function SettingsPage() {
             >
               <div className="grid grid-cols-[minmax(0,0.95fr)_minmax(0,1.2fr)] gap-6 px-5 py-3.5">
                 <div className="grid grid-cols-3 overflow-hidden rounded-[14px] bg-slate-100/70 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
-                  <CacheStat label="缩略图缓存" value="328 MB" />
-                  <CacheStat label="临时文件" value="1.2 GB" />
-                  <CacheStat label="日志文件" value="42 MB" />
+                  <CacheStat label="缩略图缓存" value={formatBytes(storageUsage.assetBytes)} />
+                  <CacheStat label="临时文件" value={formatBytes(storageUsage.cacheBytes)} />
+                  <CacheStat label="日志文件" value={formatBytes(storageUsage.logBytes)} />
                 </div>
                 <div className="grid grid-cols-3 items-center gap-3">
-                  <Button className="justify-center border-blue-200 text-app-blue" size="sm" variant="soft">
-                    清理缓存
+                  <Button className="justify-center border-blue-200 text-app-blue" disabled={cleaning} onClick={cleanWorkspaceCache} size="sm" variant="soft">
+                    {cleaning ? "清理中" : "清理缓存"}
                   </Button>
-                  <Button className="justify-center border-blue-200 text-app-blue" size="sm" variant="soft">
-                    清理临时文件
+                  <Button className="justify-center border-blue-200 text-app-blue" disabled={cleaning} onClick={cleanWorkspaceCache} size="sm" variant="soft">
+                    {cleaning ? "清理中" : "清理临时文件"}
                   </Button>
-                  <Button className="justify-center border-red-200 text-red-500" size="sm" variant="soft">
-                    清空全部缓存
+                  <Button className="justify-center border-red-200 text-red-500" disabled={cleaning} onClick={cleanWorkspaceCache} size="sm" variant="soft">
+                    {cleaning ? "清理中" : "清空全部缓存"}
                   </Button>
                 </div>
               </div>
@@ -208,34 +430,110 @@ export function SettingsPage() {
             </SettingsSection>
           </div>
         </div>
-
-        <footer className="grid grid-cols-[1fr_auto_auto] items-center gap-4 border-t border-slate-200/70 bg-white/76 px-8 py-4 backdrop-blur-2xl">
-          <div className="flex items-center gap-4">
-            <span
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[12px] font-medium",
-                saved ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700",
-              )}
-            >
-              {saved ? "已自动保存" : "有未保存更改"}
-            </span>
-            <span className="text-[12px] text-slate-500">版本 1.2.0</span>
-          </div>
-          <Button className="justify-center" onClick={restoreDefaults} size="md" variant="soft">
-            <RotateCcw className="size-3.5" />
-            恢复默认设置
-          </Button>
-          <Button
-            className="min-w-44 justify-center border-slate-950/10 bg-slate-950 text-white hover:bg-slate-900"
-            onClick={saveSettings}
-            size="md"
-          >
-            <Save className="size-3.5" />
-            保存设置
-          </Button>
-        </footer>
       </div>
     </main>
+  );
+}
+
+function normalizeSettings(appSettings: AppSettings, runtimeFeatures: RuntimeFeatureState): SettingsState {
+  return {
+    autoCreateDateFolders: appSettings.autoCreateDateFolders ?? defaultSettings.autoCreateDateFolders,
+    launchAtLogin: appSettings.launchAtLogin ?? defaultSettings.launchAtLogin,
+    minimizeToTrayOnClose: appSettings.minimizeToTrayOnClose ?? defaultSettings.minimizeToTrayOnClose,
+    notificationSound: appSettings.notificationSound ?? defaultSettings.notificationSound,
+    outputDirectory: appSettings.outputDirectory ?? "",
+    restoreWorkspaceOnLaunch: appSettings.restoreWorkspaceOnLaunch,
+    retainGenerationHistory: appSettings.retainGenerationHistory,
+    showFailureNotifications: appSettings.showFailureNotifications,
+    showSystemNotifications: runtimeFeatures.supportsSystemNotification ? appSettings.showSystemNotifications : false,
+    showTaskDoneNotifications: appSettings.showTaskDoneNotifications,
+    workspaceDirectory: appSettings.workspaceDirectory ?? "",
+  };
+}
+
+function toSaveSettingsInput(settings: SettingsState, runtimeFeatures: RuntimeFeatureState): SaveSettingsInput {
+  return {
+    autoCreateDateFolders: settings.autoCreateDateFolders,
+    launchAtLogin: settings.launchAtLogin,
+    minimizeToTrayOnClose: settings.minimizeToTrayOnClose,
+    notificationSound: settings.notificationSound,
+    outputDirectory: settings.outputDirectory || null,
+    restoreWorkspaceOnLaunch: settings.restoreWorkspaceOnLaunch,
+    retainGenerationHistory: settings.retainGenerationHistory,
+    showFailureNotifications: settings.showFailureNotifications,
+    showSystemNotifications: runtimeFeatures.supportsSystemNotification ? settings.showSystemNotifications : false,
+    showTaskDoneNotifications: settings.showTaskDoneNotifications,
+    workspaceDirectory: settings.workspaceDirectory || null,
+  };
+}
+
+function emptyStorageUsage(): WorkspaceStorageUsage {
+  return {
+    assetBytes: 0,
+    cacheBytes: 0,
+    exportBytes: 0,
+    logBytes: 0,
+    totalBytes: 0,
+  };
+}
+
+function DirectorySettingRow({
+  canChoose,
+  canEdit,
+  canReveal,
+  label,
+  onChange,
+  onChoose,
+  onReveal,
+  testId,
+  value,
+}: {
+  canChoose: boolean;
+  canEdit: boolean;
+  canReveal: boolean;
+  label: "工作区目录" | "输出目录";
+  onChange: (value: string) => void;
+  onChoose: () => void;
+  onReveal: () => void;
+  testId: string;
+  value: string;
+}) {
+  return (
+    <div
+      className="grid grid-cols-[110px_minmax(0,1fr)_92px_92px] items-center gap-3 border-b border-slate-200/60 px-5 py-3.5"
+      data-testid={testId}
+    >
+      <div className="text-[13px] font-semibold text-slate-900">{label}</div>
+      <input
+        aria-label={label}
+        className="h-9 min-w-0 rounded-[11px] border border-slate-200/90 bg-white/78 px-3 text-[13px] text-slate-700 outline-none shadow-[inset_0_1px_2px_rgba(15,23,42,0.04),inset_0_1px_0_rgba(255,255,255,0.9)]"
+        disabled={!canEdit}
+        onChange={(event) => {
+          if (canEdit) {
+            onChange(event.target.value);
+          }
+        }}
+        value={value}
+      />
+      <Button
+        aria-label={`选择${label}`}
+        className="justify-center bg-slate-950 text-white hover:bg-slate-900"
+        disabled={!canChoose}
+        onClick={onChoose}
+        size="sm"
+      >
+        选择目录
+      </Button>
+      <Button
+        className="justify-center"
+        disabled={!canReveal || !value}
+        onClick={onReveal}
+        size="sm"
+        variant="soft"
+      >
+        打开文件夹
+      </Button>
+    </div>
   );
 }
 
@@ -311,9 +609,11 @@ function ToggleSetting({
 
 function SystemNotificationSetting({
   checked,
+  disabled,
   onChange,
 }: {
   checked: boolean;
+  disabled: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -323,9 +623,14 @@ function SystemNotificationSetting({
         <p className="mt-1 text-[12px] text-slate-500">通过系统通知中心发送消息</p>
       </div>
       <div className="flex items-center gap-3">
-        <ToggleSwitch checked={checked} label="系统通知" onChange={onChange} />
-        <span className="rounded-[10px] bg-emerald-50/90 px-2.5 py-1 text-[12px] font-medium text-emerald-700">
-          已允许通知权限
+        <ToggleSwitch checked={checked} disabled={disabled} label="系统通知" onChange={onChange} />
+        <span
+          className={cn(
+            "rounded-[10px] px-2.5 py-1 text-[12px] font-medium",
+            disabled ? "bg-slate-100 text-slate-500" : "bg-emerald-50/90 text-emerald-700",
+          )}
+        >
+          {disabled ? "当前运行环境暂不支持系统通知" : "已允许通知权限"}
         </span>
       </div>
     </div>
@@ -335,9 +640,11 @@ function SystemNotificationSetting({
 function SoundSetting({
   notificationSound,
   onChange,
+  onPreview,
 }: {
   notificationSound: NotificationSoundId;
   onChange: (notificationSound: NotificationSoundId) => void;
+  onPreview: () => void;
 }) {
   return (
     <div className="grid min-h-[64px] grid-cols-[minmax(0,1fr)_230px] items-center gap-4 px-5 py-2.5">
@@ -353,13 +660,14 @@ function SoundSetting({
             { label: "清脆音效", value: "clear" },
             { label: "柔和音效", value: "soft" },
             { label: "完成音效", value: "success" },
+            { label: "爆款提示音", value: "viral" },
           ]}
           value={notificationSound}
         />
         <button
           aria-label="试听提示音"
           className="grid size-9 place-items-center rounded-[11px] border border-slate-200/90 bg-white/82 text-slate-900 shadow-control transition hover:bg-white active:scale-95"
-          onClick={() => void playNotificationSound(notificationSound)}
+          onClick={onPreview}
           type="button"
         >
           <Play className="size-4 fill-slate-900" />
@@ -371,10 +679,12 @@ function SoundSetting({
 
 function ToggleSwitch({
   checked,
+  disabled = false,
   label,
   onChange,
 }: {
   checked: boolean;
+  disabled?: boolean;
   label: string;
   onChange: (checked: boolean) => void;
 }) {
@@ -383,9 +693,10 @@ function ToggleSwitch({
       aria-label={label}
       aria-pressed={checked}
       className={cn(
-        "relative h-[18px] w-[34px] shrink-0 rounded-full border border-transparent transition-colors duration-200 shadow-[inset_0_1px_2px_rgba(15,23,42,0.12),0_1px_2px_rgba(15,23,42,0.08)]",
+        "relative h-[18px] w-[34px] shrink-0 rounded-full border border-transparent transition-colors duration-200 shadow-[inset_0_1px_2px_rgba(15,23,42,0.12),0_1px_2px_rgba(15,23,42,0.08)] disabled:cursor-not-allowed disabled:opacity-60",
         checked ? "bg-app-blue" : "bg-slate-300/80",
       )}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       type="button"
     >
@@ -406,4 +717,22 @@ function CacheStat({ label, value }: { label: string; value: string }) {
       <div className="mt-1 text-[18px] font-semibold text-slate-950">{value}</div>
     </div>
   );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const fractionDigits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`;
 }

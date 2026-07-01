@@ -1,0 +1,472 @@
+use std::time::{Duration, Instant};
+
+use reqwest::blocking::Client;
+use reqwest::header::CONTENT_TYPE;
+use reqwest::{blocking::Response, StatusCode, Url};
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConnectionProbe {
+    pub provider_profile_id: String,
+    pub base_url: String,
+    pub endpoint_path: String,
+    pub category: String,
+    pub model: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConnectionResult {
+    pub ok: bool,
+    pub message: String,
+    pub elapsed_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderConnectionError {
+    InvalidEndpoint(String),
+    Transport(String),
+}
+
+impl std::fmt::Display for ProviderConnectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidEndpoint(message) | Self::Transport(message) => {
+                write!(formatter, "{message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProviderConnectionError {}
+
+pub trait ProviderConnectionTester {
+    fn test_connection(
+        &self,
+        probe: ProviderConnectionProbe,
+    ) -> Result<ProviderConnectionResult, ProviderConnectionError>;
+}
+
+pub struct HttpProviderConnectionTester {
+    client: Client,
+}
+
+impl HttpProviderConnectionTester {
+    pub fn new() -> Result<Self, ProviderConnectionError> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| {
+                ProviderConnectionError::Transport("Provider 连接客户端初始化失败。".to_string())
+            })?;
+        Ok(Self { client })
+    }
+}
+
+impl ProviderConnectionTester for HttpProviderConnectionTester {
+    fn test_connection(
+        &self,
+        probe: ProviderConnectionProbe,
+    ) -> Result<ProviderConnectionResult, ProviderConnectionError> {
+        if probe.api_key.trim().is_empty() {
+            return Ok(ProviderConnectionResult {
+                ok: false,
+                message: "模型配置缺少 API Key。".to_string(),
+                elapsed_ms: 0,
+            });
+        }
+
+        let endpoint = provider_endpoint(&probe.base_url, &probe.endpoint_path)?;
+        let request_body = provider_probe_body(&probe);
+        let started_at = Instant::now();
+        let response = self
+            .client
+            .post(endpoint)
+            .bearer_auth(&probe.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(provider_probe_timeout(&probe))
+            .body(request_body.to_string())
+            .send();
+        let elapsed_ms = elapsed_ms(started_at);
+
+        match response {
+            Ok(response) => Ok(result_from_response(response, elapsed_ms)),
+            Err(source) if source.is_timeout() => Ok(ProviderConnectionResult {
+                ok: false,
+                message: "Provider 连接超时。".to_string(),
+                elapsed_ms,
+            }),
+            Err(_) => Ok(ProviderConnectionResult {
+                ok: false,
+                message: "Provider 网络连接失败。".to_string(),
+                elapsed_ms,
+            }),
+        }
+    }
+}
+
+fn provider_probe_body(probe: &ProviderConnectionProbe) -> Value {
+    if probe.provider_profile_id == "volcengine" && probe.category == "image-to-text" {
+        return json!({
+            "model": probe.model,
+            "input": image_understanding_input("Which model series supports image input?"),
+            "max_output_tokens": 16,
+        });
+    }
+
+    if probe.provider_profile_id == "volcengine"
+        && matches!(probe.category.as_str(), "text-to-image" | "image-to-image")
+    {
+        let mut body = json!({
+            "model": probe.model,
+            "prompt": "hello",
+            "sequential_image_generation": "disabled",
+            "response_format": "url",
+            "size": "2K",
+            "stream": true,
+            "watermark": true,
+        });
+        if probe.category == "image-to-image" {
+            // 火山 Seedream 图生图接口要求 image 使用数组；探测使用 32x32 PNG data url，
+            // 避免依赖本地文件路径或外部测试图片，也不会把图片内容持久化。
+            body["image"] = json!([probe_png_data_url()]);
+            body["sequential_image_generation"] = Value::String("auto".to_string());
+            body["sequential_image_generation_options"] = json!({ "max_images": 1 });
+        }
+        return body;
+    }
+
+    if probe.provider_profile_id == "openai" && probe.endpoint_path.contains("/responses") {
+        return json!({
+            "model": probe.model,
+            "input": openai_responses_input(probe),
+            "max_output_tokens": 16,
+        });
+    }
+
+    // OpenAI-compatible 网关通常接受 chat/completions 结构。
+    // 探测只发送 hello 和极小图片 data url，不持久化原始请求/响应。
+    json!({
+        "model": probe.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": openai_compatible_content(probe),
+            }
+        ],
+        "max_tokens": 16,
+        "temperature": 0,
+    })
+}
+
+fn openai_responses_input(probe: &ProviderConnectionProbe) -> Value {
+    if matches!(probe.category.as_str(), "image-to-image" | "image-to-text") {
+        return image_understanding_input("hello");
+    }
+
+    Value::String("hello".to_string())
+}
+
+fn openai_compatible_content(probe: &ProviderConnectionProbe) -> Value {
+    if matches!(probe.category.as_str(), "image-to-image" | "image-to-text") {
+        return json!([
+            { "type": "text", "text": "hello" },
+            {
+                "type": "image_url",
+                "image_url": { "url": probe_png_data_url() }
+            }
+        ]);
+    }
+
+    Value::String("hello".to_string())
+}
+
+fn provider_probe_timeout(probe: &ProviderConnectionProbe) -> Duration {
+    if matches!(
+        probe.category.as_str(),
+        "text-to-image" | "image-to-image" | "image-to-text"
+    ) {
+        return Duration::from_secs(60);
+    }
+
+    Duration::from_secs(10)
+}
+
+fn image_understanding_input(prompt: &str) -> Value {
+    json!([
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": probe_png_data_url(),
+                },
+                {
+                    "type": "input_text",
+                    "text": prompt,
+                }
+            ]
+        }
+    ])
+}
+
+fn probe_png_data_url() -> &'static str {
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAKUlEQVR42u3OIQEAAAACIP+f1hkWWEB6FgEBAQEBAQEBAQEBAQEBgXdgl/rw4tnPBf0AAAAASUVORK5CYII="
+}
+
+fn provider_endpoint(base_url: &str, path: &str) -> Result<Url, ProviderConnectionError> {
+    if !path.starts_with('/') {
+        return Err(ProviderConnectionError::InvalidEndpoint(
+            "Provider 探测路径必须以 / 开头。".to_string(),
+        ));
+    }
+
+    let endpoint = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let url = Url::parse(&endpoint).map_err(|_| {
+        ProviderConnectionError::InvalidEndpoint("Provider 接入点不是有效 URL。".to_string())
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ProviderConnectionError::InvalidEndpoint(
+            "Provider 接入点只允许 http 或 https。".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
+fn result_from_response(response: Response, elapsed_ms: i64) -> ProviderConnectionResult {
+    let status = response.status();
+    if status.is_success() {
+        return ProviderConnectionResult {
+            ok: true,
+            message: "Provider 连接可用。".to_string(),
+            elapsed_ms,
+        };
+    }
+
+    let provider_error_code = response
+        .text()
+        .ok()
+        .and_then(|body| provider_error_code(&body));
+    result_from_error_status(status, provider_error_code.as_deref(), elapsed_ms)
+}
+
+fn result_from_error_status(
+    status: StatusCode,
+    provider_error_code: Option<&str>,
+    elapsed_ms: i64,
+) -> ProviderConnectionResult {
+    // 只使用脱敏后的 Provider error.code 做归一化，不透传 raw response/message。
+    let (ok, message) = match (status, provider_error_code) {
+        (
+            StatusCode::NOT_FOUND,
+            Some("ModelNotOpen" | "ModelNotFound" | "InvalidEndpointOrModel.NotFound" | "NotFound"),
+        ) => (
+            false,
+            "模型不存在、未开通，或当前 API Key 无权限访问。".to_string(),
+        ),
+        (StatusCode::BAD_REQUEST, Some("InvalidParameter" | "InvalidRequestError")) => {
+            (false, "Provider 请求参数不兼容。".to_string())
+        }
+        (status, _) => match status {
+            StatusCode::OK => (true, "Provider 连接可用。".to_string()),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                (false, "API Key 无效或无权限。".to_string())
+            }
+            StatusCode::TOO_MANY_REQUESTS => (false, "Provider 限流，请稍后重试。".to_string()),
+            StatusCode::NOT_FOUND => (false, "Provider 接入点不可用。".to_string()),
+            _ if status.is_success() => (true, "Provider 连接可用。".to_string()),
+            _ => (false, format!("Provider 返回状态码 {}。", status.as_u16())),
+        },
+    };
+
+    ProviderConnectionResult {
+        ok,
+        message,
+        elapsed_ms,
+    }
+}
+
+fn provider_error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.pointer("/error/code")?.as_str().map(str::to_string))
+}
+
+fn elapsed_ms(started_at: Instant) -> i64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe(
+        category: &str,
+        endpoint_path: &str,
+        provider_profile_id: &str,
+    ) -> ProviderConnectionProbe {
+        ProviderConnectionProbe {
+            provider_profile_id: provider_profile_id.to_string(),
+            base_url: "https://example.com".to_string(),
+            endpoint_path: endpoint_path.to_string(),
+            category: category.to_string(),
+            model: "test-model".to_string(),
+            api_key: "sk-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn builds_text_probe_with_hello() {
+        let body = provider_probe_body(&probe("text-to-text", "/chat/completions", "deepseek"));
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn builds_image_to_image_probe_with_base64_image() {
+        let body = provider_probe_body(&probe("image-to-image", "/chat/completions", "deepseek"));
+        let content = body["messages"][0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["text"], "hello");
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn builds_openai_responses_probe() {
+        let body = provider_probe_body(&probe("text-to-text", "/v1/responses", "openai"));
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["input"], "hello");
+        assert_eq!(body["max_output_tokens"], 16);
+    }
+
+    #[test]
+    fn builds_openai_responses_image_to_text_probe() {
+        let body = provider_probe_body(&probe("image-to-text", "/v1/responses", "openai"));
+        let content = body["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(content[0]["type"], "input_image");
+        assert!(content[0]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "hello");
+    }
+
+    #[test]
+    fn builds_volcengine_image_to_text_responses_probe() {
+        let body = provider_probe_body(&probe("image-to-text", "/responses", "volcengine"));
+        let content = body["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["max_output_tokens"], 16);
+        assert_eq!(content[0]["type"], "input_image");
+        assert!(content[0]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(
+            content[1]["text"],
+            "Which model series supports image input?"
+        );
+    }
+
+    #[test]
+    fn builds_volcengine_text_to_image_probe() {
+        let body =
+            provider_probe_body(&probe("text-to-image", "/images/generations", "volcengine"));
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["prompt"], "hello");
+        assert_eq!(body["sequential_image_generation"], "disabled");
+        assert_eq!(body["response_format"], "url");
+        assert_eq!(body["size"], "2K");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["watermark"], true);
+    }
+
+    #[test]
+    fn uses_longer_timeout_for_image_probe() {
+        assert_eq!(
+            provider_probe_timeout(&probe("text-to-image", "/images/generations", "volcengine")),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            provider_probe_timeout(&probe("image-to-text", "/responses", "volcengine")),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            provider_probe_timeout(&probe("text-to-text", "/chat/completions", "deepseek")),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn normalizes_volcengine_model_not_open_error() {
+        let result = result_from_error_status(StatusCode::NOT_FOUND, Some("ModelNotOpen"), 12);
+
+        assert!(!result.ok);
+        assert_eq!(
+            result.message,
+            "模型不存在、未开通，或当前 API Key 无权限访问。"
+        );
+        assert_eq!(result.elapsed_ms, 12);
+    }
+
+    #[test]
+    fn keeps_plain_not_found_as_endpoint_unavailable() {
+        let result = result_from_error_status(StatusCode::NOT_FOUND, None, 12);
+
+        assert!(!result.ok);
+        assert_eq!(result.message, "Provider 接入点不可用。");
+    }
+
+    #[test]
+    fn extracts_provider_error_code_without_raw_message() {
+        let body = r#"{
+            "error": {
+                "code": "InvalidEndpointOrModel.NotFound",
+                "message": "raw provider message should not be returned"
+            }
+        }"#;
+
+        assert_eq!(
+            provider_error_code(body).as_deref(),
+            Some("InvalidEndpointOrModel.NotFound")
+        );
+    }
+
+    #[test]
+    fn builds_volcengine_image_to_image_probe_with_base64_image_array() {
+        let body = provider_probe_body(&probe(
+            "image-to-image",
+            "/images/generations",
+            "volcengine",
+        ));
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["prompt"], "hello");
+        let image = body["image"].as_array().expect("image should be array");
+        assert_eq!(image.len(), 1);
+        assert!(image[0]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(body["sequential_image_generation"], "auto");
+        assert_eq!(body["sequential_image_generation_options"]["max_images"], 1);
+        assert_eq!(body["response_format"], "url");
+        assert_eq!(body["size"], "2K");
+        assert_eq!(body["stream"], true);
+    }
+}

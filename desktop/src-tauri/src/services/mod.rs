@@ -1,0 +1,13 @@
+pub mod assets;
+pub mod capability;
+pub mod desktop_runtime;
+pub mod generation;
+pub mod local_task_executor;
+pub mod model_config;
+pub mod model_gateway;
+pub mod notification_sound;
+pub mod provider_connection;
+pub mod secrets;
+pub mod settings;
+pub mod startup_recovery;
+pub mod workspace;
