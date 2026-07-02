@@ -1,3 +1,4 @@
+pub mod ai_assist;
 pub mod assets;
 pub mod capability;
 pub mod generation;

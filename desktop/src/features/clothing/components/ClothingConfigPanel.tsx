@@ -7,6 +7,7 @@ import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
 import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
+import { useToast } from "../../../shared/ui/toast";
 import { selectProductImages, type ProductImageAsset } from "../../generation/lib/productImagePicker";
 
 const modelPresets = [
@@ -130,6 +131,7 @@ export const defaultClothingConfig: ClothingConfigState = {
 };
 
 export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: ClothingConfigPanelProps) {
+  const { showToast } = useToast();
   const hasClothingImages = config.clothingImages.length > 0;
   const hasSelectedModel = Boolean(config.selectedModelId);
   const hasSceneChoice = config.aiRecommended || config.sceneIds.length > 0;
@@ -156,7 +158,13 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
 
   async function handleSelectClothingImages() {
     const remainingCount = maxClothingImageCount - config.clothingImages.length;
-    const selectedImages = await selectProductImages(remainingCount);
+    let selectedImages: ProductImageAsset[];
+    try {
+      selectedImages = await selectProductImages(remainingCount);
+    } catch (error) {
+      showToast({ message: imageSelectionErrorMessage(error), variant: "error" });
+      return;
+    }
     const knownPaths = new Set(config.clothingImages.map((image) => image.path));
     const nextImages = selectedImages.filter((image) => !knownPaths.has(image.path));
 
@@ -166,7 +174,13 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
   }
 
   async function handleSelectModelImage() {
-    const selectedImages = await selectProductImages(1);
+    let selectedImages: ProductImageAsset[];
+    try {
+      selectedImages = await selectProductImages(1);
+    } catch (error) {
+      showToast({ message: imageSelectionErrorMessage(error), variant: "error" });
+      return;
+    }
     const selectedImage = selectedImages[0];
     if (!selectedImage) {
       return;
@@ -961,4 +975,11 @@ function modelToneClass(tone: string) {
     default:
       return "bg-slate-100";
   }
+}
+
+function imageSelectionErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return "图片处理失败，请使用 png、jpg、jpeg 或 webp 图片。";
 }

@@ -9,6 +9,9 @@ import { SelectPill } from "../../../shared/ui/select-pill";
 import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
+import type { AiAssistPort } from "../../../runtime";
+import { localAiAssistPort } from "../../../runtime/local/ai-assist";
+import { useToast } from "../../../shared/ui/toast";
 import {
   type ProductImageAsset,
   selectProductImages,
@@ -22,6 +25,7 @@ export type ModuleOption = {
 };
 
 type GenerationConfigPanelProps = {
+  aiAssistPort?: AiAssistPort;
   detailGenerating: boolean;
   generationSettings: ProductGenerationSettings;
   generationSettingsTouched: boolean;
@@ -42,9 +46,15 @@ type GenerationConfigPanelProps = {
 const maxProductImageCount = 3;
 const strategyDraftDelayMs = 2500;
 const viralStyleAnalysisDelayMs = 1800;
-const aiWritingTypingDelayMs = 16;
-const aiWritingSuggestion =
-  "1、产品名称：黑色休闲翻领长袖衬衫 2、核心卖点：纯黑百搭、后背创意印花、宽松翻领剪裁 3、适用人群：日常通勤青年、潮流穿搭爱好者、休闲出行人群 4、使用场景：日常街头出行、朋友休闲聚会、居家外出随性穿搭 5、规格参数：颜色：纯黑 外观：后背带有创意印花装饰 版型：翻领长袖休闲款";
+const aiWritingDisclaimerAcceptedStorageKey = "commerce-shoot-studio.ai-writing-disclaimer.accepted.v1";
+const aiWritingDisclaimerTitle = "图片上传与使用免责声明";
+const aiWritingDisclaimerParagraphs = [
+  "用户在使用本功能上传图片前，应确保其对所上传图片及图片中包含的人物肖像、商品外观、品牌标识、文字、图案、作品内容等享有合法使用权，或已取得相关权利人、肖像权人及其他必要主体的充分授权。",
+  "用户不得上传、识别、编辑、生成或用于商业用途的内容包括但不限于：未经授权的他人肖像、明星或公众人物图片、第三方摄影作品、品牌商品图片、受版权保护的设计图案、商标标识、隐私信息、违法违规内容，以及可能侵犯他人著作权、肖像权、名誉权、隐私权、商标权或其他合法权益的内容。",
+  "本功能仅作为图片识别、信息提取和电商文案辅助生成工具，AI 输出结果不代表平台对图片来源、权利归属、授权状态、商业使用合法性或生成内容合规性的确认、保证或背书。用户应自行对上传内容、AI 生成结果及其后续使用行为承担审查义务和法律责任。",
+  "如用户将上传图片或生成内容用于商品详情页、广告投放、社交媒体发布、电商平台上架、商业宣传或其他公开传播场景，应自行确认相关内容不存在侵权、虚假宣传、误导消费者或违反平台规则的情形。",
+  "如平台发现或收到关于相关内容涉嫌违法、违规、侵权或未经授权使用的投诉、通知或权利主张，平台有权在法律允许范围内采取包括但不限于停止处理、删除相关内容、限制功能使用、暂停或终止服务、保存必要记录并配合有关部门处理等措施。因用户上传、使用或传播相关内容引发的争议、投诉、索赔、行政处罚或其他法律责任，由用户自行承担；因此给平台或第三方造成损失的，用户应依法承担相应责任。",
+];
 const platformOptions = [
   { label: "淘宝天猫", value: "淘宝天猫" },
   { label: "亚马逊", value: "亚马逊" },
@@ -132,6 +142,7 @@ export const defaultProductGenerationSettings: ProductGenerationSettings = {
 };
 
 export function GenerationConfigPanel({
+  aiAssistPort = localAiAssistPort,
   detailGenerating,
   generationSettings,
   modules,
@@ -147,13 +158,15 @@ export function GenerationConfigPanel({
   productPrompt,
   strategyDrafting,
 }: GenerationConfigPanelProps) {
+  const { showToast } = useToast();
   const hasProductImages = productImages.length > 0;
   const hasProductPrompt = productPrompt.trim().length > 0;
   const hasSelectedModules = modules.some((module) => module.checked);
+  const [aiWritingDisclaimerAccepted, setAiWritingDisclaimerAccepted] = useState(() => readAiWritingDisclaimerAccepted());
+  const [aiWritingDisclaimerOpen, setAiWritingDisclaimerOpen] = useState(false);
   const [aiWritingOpen, setAiWritingOpen] = useState(false);
-  const [aiWritingRunId, setAiWritingRunId] = useState(0);
   const [aiWritingStatus, setAiWritingStatus] = useState<"ready" | "writing">("ready");
-  const [aiWritingText, setAiWritingText] = useState(aiWritingSuggestion);
+  const [aiWritingText, setAiWritingText] = useState("");
   const [viralStyleBatchIndex, setViralStyleBatchIndex] = useState(0);
   const [selectedViralStyleTitles, setSelectedViralStyleTitles] = useState<Set<string>>(() => new Set());
   const [viralStyleStatus, setViralStyleStatus] = useState<"idle" | "loading" | "ready">("idle");
@@ -207,7 +220,13 @@ export function GenerationConfigPanel({
 
   async function handleSelectProductImages() {
     const remainingCount = maxProductImageCount - productImages.length;
-    const selectedImages = await selectProductImages(remainingCount);
+    let selectedImages: ProductImageAsset[];
+    try {
+      selectedImages = await selectProductImages(remainingCount);
+    } catch (error) {
+      showToast({ message: imageSelectionErrorMessage(error), variant: "error" });
+      return;
+    }
 
     const knownPaths = new Set(productImages.map((image) => image.path));
     const nextImages = selectedImages.filter((image) => !knownPaths.has(image.path));
@@ -220,14 +239,61 @@ export function GenerationConfigPanel({
   }
 
   function startAiWriting() {
+    if (!aiWritingDisclaimerAccepted) {
+      setAiWritingDisclaimerOpen(true);
+      return;
+    }
+
+    void runAiWriting();
+  }
+
+  async function runAiWriting() {
+    if (!hasProductImages) {
+      showToast({ message: "请先上传商品图", variant: "error" });
+      return;
+    }
+
     setAiWritingOpen(true);
     setAiWritingStatus("writing");
     setAiWritingText("");
-    setAiWritingRunId((currentRunId) => currentRunId + 1);
+
+    try {
+      const convertedImages = productImages
+        .filter((image) => image.aiAssistDataUrl)
+        .map((image) => ({
+          originalName: image.name,
+          mimeType: image.aiAssistMimeType,
+          dataUrl: image.aiAssistDataUrl,
+        }));
+      const assistInput = {
+        imagePaths: productImages
+          .filter((image) => !image.aiAssistDataUrl)
+          .map((image) => image.path),
+        ...(convertedImages.length > 0 ? { images: convertedImages } : {}),
+      };
+      const result = aiAssistPort.streamProductSellingPoints
+        ? await aiAssistPort.streamProductSellingPoints(assistInput, {
+            onDelta: (delta) => setAiWritingText((currentText) => `${currentText}${delta}`),
+          })
+        : await aiAssistPort.generateProductSellingPoints(assistInput);
+      setAiWritingText((currentText) => result.text?.trim() || currentText.trim() || "需补充");
+      setAiWritingStatus("ready");
+    } catch (error) {
+      setAiWritingStatus("ready");
+      setAiWritingOpen(false);
+      showToast({ message: aiWritingErrorMessage(error), variant: "error" });
+    }
+  }
+
+  function handleAcceptAiWritingDisclaimer() {
+    writeAiWritingDisclaimerAccepted();
+    setAiWritingDisclaimerAccepted(true);
+    setAiWritingDisclaimerOpen(false);
+    void runAiWriting();
   }
 
   function handleConfirmAiWriting() {
-    onProductPromptChange(aiWritingSuggestion);
+    onProductPromptChange(aiWritingText);
     setAiWritingOpen(false);
   }
 
@@ -267,25 +333,6 @@ export function GenerationConfigPanel({
   }, [viralStyleStatus, viralStyleBatchIndex]);
 
   useEffect(() => {
-    if (!aiWritingOpen || aiWritingStatus !== "writing") {
-      return;
-    }
-
-    let nextLength = 0;
-    const typingTimer = window.setInterval(() => {
-      nextLength += 1;
-      setAiWritingText(aiWritingSuggestion.slice(0, nextLength));
-
-      if (nextLength >= aiWritingSuggestion.length) {
-        window.clearInterval(typingTimer);
-        setAiWritingStatus("ready");
-      }
-    }, aiWritingTypingDelayMs);
-
-    return () => window.clearInterval(typingTimer);
-  }, [aiWritingOpen, aiWritingRunId, aiWritingStatus]);
-
-  useEffect(() => {
     onViralStylesChange?.(selectedViralStyles);
   }, [onViralStylesChange, selectedViralStyles]);
 
@@ -304,6 +351,7 @@ export function GenerationConfigPanel({
   }
 
   return (
+    <>
     <aside
       aria-label="生成配置"
       className="relative z-40 flex min-h-0 flex-col bg-white/50 shadow-[inset_1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-2xl"
@@ -391,8 +439,15 @@ export function GenerationConfigPanel({
               </button>
             </div>
 
-            <div className="max-h-44 overflow-y-auto rounded-control border border-slate-300 bg-white px-3 py-2.5 text-[13px] leading-6 text-slate-800 shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)]">
-              {aiWritingText}
+            <div
+              className="h-44 max-h-64 overflow-y-auto rounded-control border border-slate-300 bg-white px-3 py-2.5 text-[13px] leading-6 text-slate-800 shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)]"
+              data-testid="ai-writing-output"
+            >
+              {aiWritingStatus === "writing" && !aiWritingText ? (
+                <span className="text-slate-400">等待模型返回内容...</span>
+              ) : (
+                aiWritingText
+              )}
             </div>
 
             <div className="mt-4 flex justify-end gap-2">
@@ -497,6 +552,108 @@ export function GenerationConfigPanel({
         </Button>
       </div>
     </aside>
+    {aiWritingDisclaimerOpen
+      ? createPortal(
+          <AiWritingDisclaimerDialog
+            onAccept={handleAcceptAiWritingDisclaimer}
+            onClose={() => setAiWritingDisclaimerOpen(false)}
+          />,
+          document.body,
+        )
+      : null}
+    </>
+  );
+}
+
+function readAiWritingDisclaimerAccepted() {
+  try {
+    return window.localStorage.getItem(aiWritingDisclaimerAcceptedStorageKey) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeAiWritingDisclaimerAccepted() {
+  try {
+    window.localStorage.setItem(aiWritingDisclaimerAcceptedStorageKey, "true");
+  } catch {
+    // 存储不可用时仍允许本次继续，避免阻断用户操作。
+  }
+}
+
+function aiWritingErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return "AI 帮写失败，请检查模型配置后重试";
+}
+
+function imageSelectionErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return "图片处理失败，请使用 png、jpg、jpeg 或 webp 图片。";
+}
+
+function AiWritingDisclaimerDialog({
+  onAccept,
+  onClose,
+}: {
+  onAccept: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[170] grid place-items-center bg-slate-950/24 px-5 backdrop-blur-[3px]">
+      <div
+        aria-label={aiWritingDisclaimerTitle}
+        aria-modal="true"
+        className="w-[min(640px,calc(100vw-40px))] overflow-hidden rounded-[18px] border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.22),0_8px_24px_rgba(15,23,42,0.10)]"
+        role="dialog"
+      >
+        <div className="flex items-start justify-between gap-5 border-b border-slate-100 px-6 py-5">
+          <div>
+            <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-slate-400">AI 帮写</div>
+            <h2 className="mt-1 text-[18px] font-semibold text-slate-950">{aiWritingDisclaimerTitle}</h2>
+          </div>
+          <button
+            aria-label="关闭免责声明"
+            className="grid size-8 shrink-0 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            onClick={onClose}
+            type="button"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="max-h-[48vh] space-y-4 overflow-y-auto px-6 py-5 text-[13px] leading-6 text-slate-600 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.55)_transparent]">
+          {aiWritingDisclaimerParagraphs.map((paragraph) => (
+            <p key={paragraph}>{paragraph}</p>
+          ))}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50/70 px-6 py-4">
+          <Button
+            className="border-slate-200 bg-white text-slate-700 shadow-none hover:bg-slate-100"
+            onClick={onClose}
+            size="sm"
+            type="button"
+          >
+            取消
+          </Button>
+          <Button
+            className="border-slate-900 bg-[#1f1f21] text-white shadow-none hover:bg-black"
+            onClick={onAccept}
+            size="sm"
+            type="button"
+          >
+            我已知悉并继续
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

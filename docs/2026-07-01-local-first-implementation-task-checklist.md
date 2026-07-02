@@ -783,6 +783,7 @@ M7 真实场景生图闭环
 ### M7-T03 下载结果到 assets
 
 - 依赖：M7-T02、M2-T02。
+- 当前状态：已完成第一版。`LocalTaskExecutor` 会把图片类任务的 ModelGateway 输出保存为 `generated` 资产，支持 deterministic adapter 返回的 PNG data URL，也支持 HTTP(S) 结果 URL 下载；结果先经过 `cache/tmp` 再 atomic rename 到 `assets/generated`，并写入 `generation_assets` 输出关系和 `task.result-saved` 事件。真实 Provider 生成请求仍依赖后续 M6/M7 切片继续接入。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/services/generation*`

@@ -25,6 +25,12 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
         "mock-prompt-plan-v1",
     ),
     ModelCapabilityDefinition::new(
+        "product-selling-points",
+        "image-to-text",
+        "商品卖点提取",
+        "mock-product-selling-points-v1",
+    ),
+    ModelCapabilityDefinition::new(
         "viral-style-analysis",
         "image-to-text",
         "爆款风格分析",
@@ -98,6 +104,7 @@ pub struct ProviderProfile {
 pub const ALL_CAPABILITY_IDS: &[&str] = &[
     "listing-copy",
     "prompt-plan",
+    "product-selling-points",
     "viral-style-analysis",
     "scene-image-generation",
     "product-detail-generation",

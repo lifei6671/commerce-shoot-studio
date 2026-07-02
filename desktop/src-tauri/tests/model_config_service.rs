@@ -26,11 +26,14 @@ fn model_config_lists_builtin_mock_profile_and_seeded_mock_configs() {
     let configs = service
         .list_configs(&workspace_dir)
         .expect("configs should list");
+    let capabilities = CapabilityService::new()
+        .list_capabilities(&workspace_dir)
+        .expect("capabilities should list");
 
     assert!(profiles.iter().any(|profile| profile.id == "mock-local"));
     assert_eq!(
         configs.len(),
-        7,
+        capabilities.len(),
         "每个模型能力都应有一个默认 mock 配置，方便无外网调试",
     );
     assert!(configs

@@ -35,6 +35,7 @@ const mockLocalProfile: ProviderProfileView = {
   supportedCapabilities: [
     "listing-copy",
     "prompt-plan",
+    "product-selling-points",
     "viral-style-analysis",
     "scene-image-generation",
     "product-detail-generation",
@@ -55,6 +56,7 @@ const openaiProfile: ProviderProfileView = {
   supportedCapabilities: [
     "listing-copy",
     "prompt-plan",
+    "product-selling-points",
     "viral-style-analysis",
     "scene-image-generation",
     "product-detail-generation",
@@ -113,7 +115,7 @@ describe("ModelConfigPage", () => {
       </ToastProvider>,
     );
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("模型配置加载失败"));
+    await waitFor(() => expect(screen.getByText("模型配置加载失败")).toBeInTheDocument());
 
     expect(screen.queryByDisplayValue("sk-demo-text-1234")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("sk-demo-image-5678")).not.toBeInTheDocument();
@@ -310,7 +312,7 @@ describe("ModelConfigPage", () => {
 
     resolveFirstSave?.(deepseekConfig("listing-copy"));
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("配置已保存"));
+    await waitFor(() => expect(screen.getByText("配置已保存")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
   });
 
@@ -479,7 +481,7 @@ describe("ModelConfigPage", () => {
     const testButton = (await screen.findAllByRole("button", { name: "测试连接" }))[0];
     await user.click(testButton);
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("API Key 无效或无权限。"));
+    await waitFor(() => expect(screen.getByText("API Key 无效或无权限。")).toBeInTheDocument());
   });
 
   it("reloads saved runtime configs when canceling local edits", async () => {
@@ -549,6 +551,6 @@ describe("ModelConfigPage", () => {
     expect(screen.getByRole("button", { name: "文生文 Provider Mock Local" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("mock-listing-copy-v1")).toBeInTheDocument();
     expect(modelConfigPort.saveConfig).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent("已恢复为 Mock 默认配置，保存后生效");
+    expect(screen.getByText("已恢复为 Mock 默认配置，保存后生效")).toBeInTheDocument();
   });
 });

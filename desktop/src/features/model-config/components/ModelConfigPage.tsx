@@ -42,7 +42,7 @@ type ModelCategoryDescriptor = Pick<ModelConfig, "description" | "iconTone" | "i
 export const modelCatalog = {
   "mock-local": {
     textToText: ["mock-listing-copy-v1", "mock-prompt-plan-v1"],
-    imageToText: ["mock-viral-style-v1"],
+    imageToText: ["mock-product-selling-points-v1", "mock-viral-style-v1"],
     textToImage: ["mock-scene-image-v1", "mock-product-detail-v1"],
     imageToImage: ["mock-clothing-tryon-v1", "mock-image-edit-v1"],
   },
@@ -104,7 +104,7 @@ const categoryCatalogKeys = {
 
 const categoryCapabilityIds = {
   "image-to-image": ["clothing-tryon-generation", "image-edit"],
-  "image-to-text": ["viral-style-analysis"],
+  "image-to-text": ["product-selling-points", "viral-style-analysis"],
   "text-to-image": ["scene-image-generation", "product-detail-generation"],
   "text-to-text": ["listing-copy", "prompt-plan"],
 } satisfies Record<ModelCategoryId, ModelCapability["id"][]>;

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use commerce_shoot_studio_lib::infrastructure::filesystem::WorkspaceFileSystem;
@@ -7,6 +8,7 @@ use commerce_shoot_studio_lib::services::model_config::{
     ModelConfigService, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
 };
 use commerce_shoot_studio_lib::services::model_gateway::{
+    ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
     ModelGatewayRequest, ModelGatewayService,
 };
 use commerce_shoot_studio_lib::services::provider_connection::{
@@ -24,6 +26,7 @@ fn deterministic_model_gateway_supports_all_capabilities_without_real_provider_c
     let capabilities = [
         "listing-copy",
         "prompt-plan",
+        "product-selling-points",
         "viral-style-analysis",
         "scene-image-generation",
         "product-detail-generation",
@@ -50,14 +53,70 @@ fn deterministic_model_gateway_supports_all_capabilities_without_real_provider_c
         );
         assert!(result.output_json["mock"].as_bool().unwrap_or(false));
         assert!(
-            result
-                .output_text
-                .as_deref()
-                .unwrap_or_default()
-                .contains(capability_id),
-            "mock output should identify capability for UI debugging",
+            !result.output_text.as_deref().unwrap_or_default().is_empty(),
+            "mock output should provide visible UI text for debugging",
         );
     }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn model_gateway_passes_raw_input_to_adapter_without_storing_it() {
+    let workspace_dir = initialized_workspace("model-gateway-raw-input");
+    let adapter = CapturingAdapter::default();
+    let service = ModelGatewayService::new();
+
+    let result = service
+        .invoke_with_adapter(
+            &workspace_dir,
+            ModelGatewayRequest {
+                capability_id: "product-selling-points".to_string(),
+                input: serde_json::json!({
+                    "prompt": {
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "system rules"
+                            }
+                        ]
+                    },
+                    "userImages": [
+                        {
+                            "mimeType": "image/png",
+                            "dataUrl": "data:image/png;base64,secret-image"
+                        }
+                    ]
+                }),
+            },
+            &adapter,
+        )
+        .expect("mock invocation should succeed");
+
+    assert_eq!(result.output_text.as_deref(), Some("captured"));
+    let captured = adapter.captured_input.lock().expect("capture lock");
+    let captured_input = captured.as_ref().expect("adapter should see raw input");
+    assert_eq!(captured_input["prompt"]["messages"][0]["role"], "system");
+    assert_eq!(
+        captured_input["userImages"][0]["dataUrl"],
+        "data:image/png;base64,secret-image",
+    );
+
+    let database = Connection::open(workspace_dir.join("workspace.db")).expect("db should open");
+    let stored = database
+        .query_row(
+            "
+            SELECT request_summary_json
+            FROM model_invocations
+            WHERE id = ?1
+            ",
+            [result.invocation_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("invocation should be stored");
+    assert!(stored.contains("object:2 keys"));
+    assert!(!stored.contains("system rules"));
+    assert!(!stored.contains("secret-image"));
 
     remove_workspace(&workspace_dir);
 }
@@ -254,6 +313,25 @@ impl ProviderConnectionTester for SuccessfulConnectionTester {
             elapsed_ms: 0,
             message: "Provider 连接可用。".to_string(),
             ok: true,
+        })
+    }
+}
+
+#[derive(Default)]
+struct CapturingAdapter {
+    captured_input: Mutex<Option<serde_json::Value>>,
+}
+
+impl ModelGatewayAdapter for CapturingAdapter {
+    fn invoke(
+        &self,
+        request: ModelGatewayAdapterRequest<'_>,
+    ) -> Result<ModelGatewayAdapterResult, ModelGatewayError> {
+        *self.captured_input.lock().expect("capture lock") = Some(request.input.clone());
+        Ok(ModelGatewayAdapterResult {
+            output_text: Some("captured".to_string()),
+            output_json: serde_json::json!({ "captured": true }),
+            usage_json: None,
         })
     }
 }

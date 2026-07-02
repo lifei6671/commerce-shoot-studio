@@ -9,9 +9,12 @@ export type ProductImageAsset = {
   name: string;
   path: string;
   src: string;
+  aiAssistDataUrl?: string;
+  aiAssistMimeType?: string;
 };
 
-const imageExtensions = ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif"];
+const passthroughImageExtensions = ["png", "jpg", "jpeg", "webp"];
+const imageExtensions = [...passthroughImageExtensions, "gif", "bmp", "tif", "tiff", "heic", "heif"];
 
 export async function selectProductImages(limit: number): Promise<ProductImageAsset[]> {
   if (limit <= 0) {
@@ -44,7 +47,7 @@ export async function selectProductImages(limit: number): Promise<ProductImageAs
 
   rememberSelectedProductImageDirectory(paths[0]);
 
-  return paths.map(createProductImageAsset);
+  return Promise.all(paths.map(createProductImageAsset));
 }
 
 async function getProductImageDialogDefaultPath() {
@@ -95,11 +98,119 @@ function normalizeSelectedPaths(selected: string | string[] | null): string[] {
   return Array.isArray(selected) ? selected : [selected];
 }
 
-function createProductImageAsset(path: string): ProductImageAsset {
-  return {
+async function createProductImageAsset(path: string): Promise<ProductImageAsset> {
+  const asset = {
     id: path,
     name: path.split(/[\\/]/).pop() ?? "商品原图",
     path,
     src: convertFileSrc(path),
   };
+  if (shouldConvertToWebp(path)) {
+    const dataUrl = await convertImagePathToWebpDataUrl(asset.src);
+    return {
+      ...asset,
+      name: replaceImageExtension(asset.name, "webp"),
+      src: dataUrl,
+      aiAssistDataUrl: dataUrl,
+      aiAssistMimeType: "image/webp",
+    };
+  }
+
+  return asset;
+}
+
+function shouldConvertToWebp(path: string) {
+  const extension = path
+    .split(/[\\/]/)
+    .pop()
+    ?.split(".")
+    .pop()
+    ?.toLowerCase();
+
+  return extension ? !passthroughImageExtensions.includes(extension) : true;
+}
+
+function replaceImageExtension(name: string, extension: string) {
+  if (!name.includes(".")) {
+    return `${name}.${extension}`;
+  }
+
+  return name.replace(/\.[^.]+$/, `.${extension}`);
+}
+
+async function convertImagePathToWebpDataUrl(src: string) {
+  const response = await fetch(src);
+  const sourceBlob = await response.blob();
+  const decodedImage = await decodeImageBlob(sourceBlob);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = decodedImage.width;
+    canvas.height = decodedImage.height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("当前浏览器无法创建图片转换画布。");
+    }
+    context.drawImage(decodedImage, 0, 0);
+    const webpBlob = await canvasToWebpBlob(canvas);
+    return blobToDataUrl(webpBlob);
+  } finally {
+    if ("close" in decodedImage && typeof decodedImage.close === "function") {
+      decodedImage.close();
+    }
+  }
+}
+
+async function decodeImageBlob(blob: Blob): Promise<(CanvasImageSource & { width: number; height: number })> {
+  if ("createImageBitmap" in window) {
+    return createImageBitmap(blob);
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("当前浏览器无法解析该图片格式。"));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function canvasToWebpBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("当前浏览器无法将图片转换为 WebP。"));
+          return;
+        }
+        if (blob.type.toLowerCase() !== "image/webp") {
+          reject(new Error("当前浏览器无法将图片转换为 WebP。"));
+          return;
+        }
+        resolve(blob);
+      },
+      "image/webp",
+      0.92,
+    );
+  });
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("当前浏览器无法读取转换后的 WebP 图片。"));
+    };
+    reader.onerror = () => reject(new Error("当前浏览器无法读取转换后的 WebP 图片。"));
+    reader.readAsDataURL(blob);
+  });
 }

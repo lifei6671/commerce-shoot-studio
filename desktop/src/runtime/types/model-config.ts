@@ -4,6 +4,7 @@ export type ModelCapability = {
   id:
     | "listing-copy"
     | "prompt-plan"
+    | "product-selling-points"
     | "viral-style-analysis"
     | "scene-image-generation"
     | "product-detail-generation"

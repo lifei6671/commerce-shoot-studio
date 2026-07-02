@@ -90,6 +90,7 @@ describe("Runtime public contract", () => {
       aiAssist: {
         analyzeViralStyle: vi.fn(),
         generateListingCopy: vi.fn(),
+        generateProductSellingPoints: vi.fn(),
       },
       assets: {
         deleteAsset: vi.fn(),

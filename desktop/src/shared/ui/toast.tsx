@@ -1,11 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import * as ToastPrimitive from "@radix-ui/react-toast";
+import { X } from "lucide-react";
 import { cn } from "../lib/cn";
 
 type ToastVariant = "error" | "success" | "warning";
 
 type ToastItem = {
+  durationMs: number;
   id: string;
   message: string;
   variant: ToastVariant;
@@ -26,68 +28,57 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 
 const toastToneClasses = {
   error: {
-    icon: "text-red-500",
-    panel: "border-red-100 bg-white text-slate-950",
-    ring: "bg-red-50",
+    close: "text-red-100/70 hover:bg-white/12 hover:text-white focus:ring-red-200/50",
+    panel:
+      "bg-[linear-gradient(135deg,rgba(139,24,34,0.94),rgba(75,18,30,0.94))] text-red-50 shadow-[0_16px_34px_rgba(127,29,29,0.20),0_6px_14px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.16)]",
+    title: "text-red-50",
   },
   success: {
-    icon: "text-emerald-500",
-    panel: "border-emerald-100 bg-white text-slate-950",
-    ring: "bg-emerald-50",
+    close: "text-emerald-100/70 hover:bg-white/12 hover:text-white focus:ring-emerald-200/50",
+    panel:
+      "bg-[linear-gradient(135deg,rgba(20,111,80,0.94),rgba(7,63,48,0.94))] text-emerald-50 shadow-[0_16px_34px_rgba(6,95,70,0.20),0_6px_14px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.18)]",
+    title: "text-emerald-50",
   },
   warning: {
-    icon: "text-amber-500",
-    panel: "border-amber-100 bg-white text-slate-950",
-    ring: "bg-amber-50",
+    close: "text-amber-100/70 hover:bg-white/12 hover:text-white focus:ring-amber-200/50",
+    panel:
+      "bg-[linear-gradient(135deg,rgba(150,83,14,0.94),rgba(83,49,16,0.94))] text-amber-50 shadow-[0_16px_34px_rgba(146,64,14,0.18),0_6px_14px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.16)]",
+    title: "text-amber-50",
   },
-} satisfies Record<ToastVariant, { icon: string; panel: string; ring: string }>;
-
-const toastIcons = {
-  error: XCircle,
-  success: CheckCircle2,
-  warning: AlertTriangle,
-} satisfies Record<ToastVariant, typeof CheckCircle2>;
+} satisfies Record<ToastVariant, { close: string; panel: string; title: string }>;
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const timersRef = useRef<Map<string, number>>(new Map());
 
   const removeToast = useCallback((toastId: string) => {
-    const timer = timersRef.current.get(toastId);
-    if (timer) {
-      window.clearTimeout(timer);
-      timersRef.current.delete(toastId);
-    }
-
     setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== toastId));
   }, []);
 
   const showToast = useCallback(
     ({ durationMs = defaultToastDurationMs, message, variant }: ToastInput) => {
       const id = createToastId();
-      setToasts((currentToasts) => [...currentToasts, { id, message, variant }]);
-      const timer = window.setTimeout(() => removeToast(id), durationMs);
-      timersRef.current.set(id, timer);
+      setToasts((currentToasts) => {
+        const nextToasts = currentToasts.filter(
+          (toast) => toast.message !== message || toast.variant !== variant,
+        );
+        return [...nextToasts, { durationMs, id, message, variant }];
+      });
       return id;
     },
-    [removeToast],
+    [],
   );
-
-  useEffect(() => {
-    return () => {
-      for (const timer of timersRef.current.values()) {
-        window.clearTimeout(timer);
-      }
-      timersRef.current.clear();
-    };
-  }, []);
 
   const value = useMemo(() => ({ showToast }), [showToast]);
 
   return (
     <ToastContext.Provider value={value}>
-      {children}
-      <ToastViewport toasts={toasts} />
+      <ToastPrimitive.Provider swipeDirection="up">
+        {children}
+        {toasts.map((toast) => (
+          <ToastCard key={toast.id} onDismiss={removeToast} toast={toast} />
+        ))}
+        <ToastViewport />
+      </ToastPrimitive.Provider>
     </ToastContext.Provider>
   );
 }
@@ -100,41 +91,56 @@ export function useToast() {
   return context;
 }
 
-function ToastViewport({ toasts }: { toasts: ToastItem[] }) {
-  if (toasts.length === 0) {
-    return null;
-  }
-
+function ToastViewport() {
   return (
-    <div
-      aria-live="polite"
-      className="pointer-events-none fixed left-1/2 top-[72px] z-[160] flex w-[min(380px,calc(100vw-48px))] -translate-x-1/2 flex-col gap-2"
-      role="region"
-    >
-      {toasts.map((toast) => (
-        <ToastCard key={toast.id} toast={toast} />
-      ))}
-    </div>
+    <ToastPrimitive.Viewport
+      aria-label="全局提示"
+      className="pointer-events-none fixed left-1/2 top-[72px] z-[160] flex w-fit max-w-[min(320px,calc(100vw-48px))] -translate-x-1/2 flex-col gap-2"
+    />
   );
 }
 
-function ToastCard({ toast }: { toast: ToastItem }) {
-  const Icon = toastIcons[toast.variant];
+function ToastCard({
+  onDismiss,
+  toast,
+}: {
+  onDismiss: (toastId: string) => void;
+  toast: ToastItem;
+}) {
   const tone = toastToneClasses[toast.variant];
 
   return (
-    <div
+    <ToastPrimitive.Root
       className={cn(
-        "pointer-events-auto flex min-h-11 items-center gap-3 rounded-[12px] border px-3.5 py-2.5 text-[13px] font-medium shadow-[0_16px_36px_rgba(15,23,42,0.16),inset_0_1px_0_rgba(255,255,255,0.88)] backdrop-blur-xl transition-all duration-200 ease-out",
+        "group pointer-events-auto relative flex min-h-10 w-fit min-w-[180px] max-w-full items-center overflow-hidden rounded-full px-4 py-2 pr-9 text-sm transition-all",
+        "data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-2",
+        "data-[swipe=move]:translate-y-[var(--radix-toast-swipe-move-y)] data-[swipe=cancel]:translate-y-0 data-[swipe=end]:animate-out data-[swipe=end]:slide-out-to-top-2 data-[swipe=cancel]:transition-transform",
+        "before:pointer-events-none before:absolute before:inset-x-6 before:top-0 before:h-px before:bg-white/24 after:pointer-events-none after:absolute after:inset-0 after:bg-[radial-gradient(circle_at_18%_0%,rgba(255,255,255,0.12),transparent_32%)]",
         tone.panel,
       )}
+      duration={toast.durationMs}
+      onOpenChange={(open) => {
+        if (!open) {
+          onDismiss(toast.id);
+        }
+      }}
       role="status"
     >
-      <span className={cn("grid size-7 shrink-0 place-items-center rounded-full", tone.ring)}>
-        <Icon className={cn("size-4", tone.icon)} />
-      </span>
-      <span className="min-w-0 flex-1 truncate">{toast.message}</span>
-    </div>
+      <div className="relative z-10 min-w-0 flex-1">
+        <ToastPrimitive.Title className={cn("truncate text-[14px] font-semibold leading-5 tracking-[0.01em]", tone.title)}>
+          {toast.message}
+        </ToastPrimitive.Title>
+      </div>
+      <ToastPrimitive.Close
+        aria-label="关闭提示"
+        className={cn(
+          "absolute right-3 top-1/2 z-10 grid size-6 -translate-y-1/2 place-items-center rounded-full opacity-72 transition hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2",
+          tone.close,
+        )}
+      >
+        <X className="size-3.5" />
+      </ToastPrimitive.Close>
+    </ToastPrimitive.Root>
   );
 }
 

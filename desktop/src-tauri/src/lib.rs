@@ -22,6 +22,8 @@ pub fn run() {
         })
         .on_window_event(handle_main_window_event)
         .invoke_handler(tauri::generate_handler![
+            commands::ai_assist::ai_assist_product_selling_points,
+            commands::ai_assist::ai_assist_product_selling_points_stream,
             save_generated_asset,
             commands::assets::asset_delete,
             commands::assets::asset_get,

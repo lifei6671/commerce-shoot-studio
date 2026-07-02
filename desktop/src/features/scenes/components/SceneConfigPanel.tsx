@@ -6,7 +6,8 @@ import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
 import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
-import { selectProductImages } from "../../generation/lib/productImagePicker";
+import { useToast } from "../../../shared/ui/toast";
+import { selectProductImages, type ProductImageAsset } from "../../generation/lib/productImagePicker";
 import {
   type SceneConfigState,
   sceneOutputModes,
@@ -32,6 +33,7 @@ type SceneConfigPanelProps = {
 };
 
 export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConfigPanelProps) {
+  const { showToast } = useToast();
   const [activeSceneTemplateGroup, setActiveSceneTemplateGroup] =
     useState<(typeof sceneTemplateGroups)[number]>("基础商品图");
   const hasReferenceImages = config.referenceImages.length > 0;
@@ -53,7 +55,13 @@ export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConf
 
   async function handleSelectReferenceImages() {
     const remainingCount = maxReferenceImageCount - config.referenceImages.length;
-    const selectedImages = await selectProductImages(remainingCount);
+    let selectedImages: ProductImageAsset[];
+    try {
+      selectedImages = await selectProductImages(remainingCount);
+    } catch (error) {
+      showToast({ message: imageSelectionErrorMessage(error), variant: "error" });
+      return;
+    }
     const knownPaths = new Set(config.referenceImages.map((image) => image.path));
     const nextImages = selectedImages.filter((image) => !knownPaths.has(image.path));
 
@@ -268,4 +276,11 @@ function SceneRadioTile({
       <span className="mt-1.5 block text-[11px] leading-4 text-slate-500">{description}</span>
     </button>
   );
+}
+
+function imageSelectionErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return "图片处理失败，请使用 png、jpg、jpeg 或 webp 图片。";
 }

@@ -9,11 +9,26 @@ import { PreviewCanvas } from "../features/generation/components/PreviewCanvas";
 import { sceneTemplates } from "../features/scenes/lib/sceneImagePlan";
 import { ToastProvider } from "../shared/ui/toast";
 
+type TauriEventHandler = (event: { payload: unknown }) => void;
+const tauriEventMock = vi.hoisted(() => {
+  const listeners = new Map<string, TauriEventHandler>();
+  return {
+    listeners,
+    listen: vi.fn(async (eventName: string, handler: TauriEventHandler) => {
+      listeners.set(eventName, handler);
+      return vi.fn(() => listeners.delete(eventName));
+    }),
+  };
+});
+
 vi.mock("../features/generation/lib/productImagePicker", () => ({
   selectProductImages: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: tauriEventMock.listen,
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
@@ -23,6 +38,7 @@ const selectProductImagesMock = vi.mocked(selectProductImages);
 const invokeMock = vi.mocked(invoke);
 const saveMock = vi.mocked(save);
 const aiWritingSuggestionPattern = /产品名称：黑色休闲翻领长袖衬衫/;
+const aiWritingDisclaimerAcceptedStorageKey = "commerce-shoot-studio.ai-writing-disclaimer.accepted.v1";
 
 const appTestProviderProfiles = [
   {
@@ -35,6 +51,7 @@ const appTestProviderProfiles = [
     supportedCapabilities: [
       "listing-copy",
       "prompt-plan",
+      "product-selling-points",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -54,6 +71,7 @@ const appTestProviderProfiles = [
     supportedCapabilities: [
       "listing-copy",
       "prompt-plan",
+      "product-selling-points",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -73,6 +91,7 @@ const appTestProviderProfiles = [
     supportedCapabilities: [
       "listing-copy",
       "prompt-plan",
+      "product-selling-points",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -124,6 +143,7 @@ function appTestModelConfig(
 
 const appTestModelConfigs = [
   appTestModelConfig("listing-copy", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+  appTestModelConfig("product-selling-points", "OpenAI 商品卖点提取", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("scene-image-generation", "OpenAI 文生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("clothing-tryon-generation", "OpenAI 图生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("viral-style-analysis", "OpenAI 图生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
@@ -188,8 +208,11 @@ class MockAudio {
 
 describe("App shell", () => {
   beforeEach(() => {
+    ensureTestLocalStorage().removeItem(aiWritingDisclaimerAcceptedStorageKey);
     selectProductImagesMock.mockReset();
     invokeMock.mockReset();
+    tauriEventMock.listeners.clear();
+    tauriEventMock.listen.mockClear();
     invokeMock.mockImplementation((command, args) => {
       if (command === "runtime_info") {
         return Promise.resolve({
@@ -257,6 +280,20 @@ describe("App shell", () => {
       }
       if (command === "workspace_run_garbage_collection") {
         return Promise.resolve({ deletedFiles: 0, reclaimedBytes: 0 });
+      }
+      if (command === "ai_assist_product_selling_points") {
+        return Promise.resolve({
+          capabilityId: "product-selling-points",
+          promptId: "product-selling-points",
+          text: "1、产品名称：黑色休闲翻领长袖衬衫\n\n2、核心卖点：\n* 卖点 1：黑色翻领长袖版型，简洁百搭。\n* 卖点 2：后背可见图案装饰，增加视觉层次。\n* 卖点 3：偏休闲穿搭，适合日常通勤和街头出行。\n* 卖点 4：需补充。",
+        });
+      }
+      if (command === "ai_assist_product_selling_points_stream") {
+        return Promise.resolve({
+          capabilityId: "product-selling-points",
+          promptId: "product-selling-points",
+          text: "1、产品名称：黑色休闲翻领长袖衬衫\n\n2、核心卖点：\n* 卖点 1：黑色翻领长袖版型，简洁百搭。\n* 卖点 2：后背可见图案装饰，增加视觉层次。\n* 卖点 3：偏休闲穿搭，适合日常通勤和街头出行。\n* 卖点 4：需补充。",
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -1633,7 +1670,7 @@ describe("App shell", () => {
 
     await user.click(within(listingCopyCard).getByRole("button", { name: "复制商品上架文案卡片" }));
 
-    expect(screen.getByRole("status")).toHaveTextContent("已复制商品上架文案");
+    expect(screen.getByText("已复制商品上架文案")).toBeInTheDocument();
 
     await user.click(within(listingCopyCard).getByRole("button", { name: "查看商品上架文案" }));
 
@@ -2005,49 +2042,250 @@ describe("App shell", () => {
     expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(screen.getAllByTestId("generated-detail-image-card").length);
   });
 
-  it("opens a non-editable AI writing dialog and confirms the suggestion", async () => {
-    vi.useFakeTimers();
-
+  it("shows a toast when AI writing is requested before uploading product images", async () => {
     renderApp();
 
     fireEvent.click(screen.getByRole("button", { name: "AI 帮写" }));
 
-    const dialog = screen.getByRole("dialog", { name: "AI 帮写" });
+    const disclaimer = screen.getByRole("dialog", { name: "图片上传与使用免责声明" });
+    expect(disclaimer).toHaveTextContent("用户在使用本功能上传图片前");
+    expect(screen.queryByText("请先上传商品图")).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("ai_assist_product_selling_points", expect.anything());
+
+    fireEvent.click(within(disclaimer).getByRole("button", { name: "我已知悉并继续" }));
+
+    expect(screen.getByText("请先上传商品图")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "图片上传与使用免责声明" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "AI 帮写" })).not.toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("ai_assist_product_selling_points", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("ai_assist_product_selling_points_stream", expect.anything());
+  });
+
+  it("calls product image-to-text AI writing and confirms the returned selling points", async () => {
+    const user = userEvent.setup();
+    const aiWritingText =
+      "1、产品名称：黑色休闲翻领长袖衬衫\n\n2、核心卖点：\n* 卖点 1：黑色翻领长袖版型，简洁百搭。\n* 卖点 2：后背可见图案装饰，增加视觉层次。\n* 卖点 3：偏休闲穿搭，适合日常通勤和街头出行。\n* 卖点 4：需补充。";
+    let resolveAssist: ((value: unknown) => void) | undefined;
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/shirt.png",
+        name: "shirt.png",
+        path: "/Users/demo/Pictures/shirt.png",
+        src: "asset:///Users/demo/Pictures/shirt.png",
+      },
+    ]);
+    invokeMock.mockImplementation((command) => {
+      if (command === "ai_assist_product_selling_points_stream") {
+        return new Promise((resolve) => {
+          resolveAssist = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+    const disclaimer = await screen.findByRole("dialog", { name: "图片上传与使用免责声明" });
+    expect(disclaimer).toHaveTextContent("AI 输出结果不代表平台");
+    expect(invokeMock).not.toHaveBeenCalledWith("ai_assist_product_selling_points", expect.anything());
+
+    await user.click(within(disclaimer).getByRole("button", { name: "我已知悉并继续" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_product_selling_points_stream", {
+      input: {
+        imagePaths: ["/Users/demo/Pictures/shirt.png"],
+        requestId: expect.stringContaining("ai-writing-"),
+      },
+    });
+
+    const dialog = await screen.findByRole("dialog", { name: "AI 帮写" });
 
     expect(screen.getByRole("complementary", { name: "生成配置" })).toHaveClass("z-40");
     expect(dialog).toHaveClass("w-[360px]", "p-5");
+    expect(within(dialog).getByTestId("ai-writing-output")).toHaveClass("h-44", "max-h-64");
+    expect(within(dialog).getByText("等待模型返回内容...")).toBeInTheDocument();
     const writingButton = within(dialog).getByRole("button", { name: "正在改写中" });
     expect(writingButton).toBeDisabled();
     expect(writingButton).toHaveClass("h-8", "px-3");
     expect(within(dialog).queryByRole("button", { name: "重新帮写" })).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
-    expect(within(dialog).queryByText(aiWritingSuggestionPattern)).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue("");
 
-    act(() => {
-      vi.advanceTimersByTime(5200);
+    resolveAssist?.({
+      capabilityId: "product-selling-points",
+      promptId: "product-selling-points",
+      text: aiWritingText,
     });
+    expect(await within(dialog).findByText(/产品名称：黑色休闲翻领长袖衬衫/)).toBeInTheDocument();
 
-    expect(within(dialog).getByText(aiWritingSuggestionPattern)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "重新帮写" })).toHaveClass("h-8", "px-3");
     expect(within(dialog).getByRole("button", { name: "确认" })).toHaveClass("h-8", "px-3");
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "重新帮写" }));
+    let resolveRefreshAssist: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command) => {
+      if (command === "ai_assist_product_selling_points_stream") {
+        return new Promise((resolve) => {
+          resolveRefreshAssist = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    await user.click(within(dialog).getByRole("button", { name: "重新帮写" }));
 
     expect(within(dialog).getByRole("button", { name: "正在改写中" })).toBeDisabled();
     expect(within(dialog).queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
 
-    act(() => {
-      vi.advanceTimersByTime(5200);
+    resolveRefreshAssist?.({
+      capabilityId: "product-selling-points",
+      promptId: "product-selling-points",
+      text: aiWritingText,
     });
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认" }));
+    expect(await within(dialog).findByText(/产品名称：黑色休闲翻领长袖衬衫/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "确认" }));
 
     expect(screen.queryByRole("dialog", { name: "AI 帮写" })).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue(
-      "1、产品名称：黑色休闲翻领长袖衬衫 2、核心卖点：纯黑百搭、后背创意印花、宽松翻领剪裁 3、适用人群：日常通勤青年、潮流穿搭爱好者、休闲出行人群 4、使用场景：日常街头出行、朋友休闲聚会、居家外出随性穿搭 5、规格参数：颜色：纯黑 外观：后背带有创意印花装饰 版型：翻领长袖休闲款",
+    expect(screen.getByPlaceholderText(/建议包含以下信息生成更精准/)).toHaveValue(aiWritingText);
+  });
+
+  it("renders streamed AI writing deltas before the command resolves", async () => {
+    const user = userEvent.setup();
+    let resolveAssist: ((value: unknown) => void) | undefined;
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/shirt.png",
+        name: "shirt.png",
+        path: "/Users/demo/Pictures/shirt.png",
+        src: "asset:///Users/demo/Pictures/shirt.png",
+      },
+    ]);
+    invokeMock.mockImplementation((command) => {
+      if (command === "ai_assist_product_selling_points_stream") {
+        return new Promise((resolve) => {
+          resolveAssist = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+    await user.click(
+      within(await screen.findByRole("dialog", { name: "图片上传与使用免责声明" })).getByRole("button", {
+        name: "我已知悉并继续",
+      }),
     );
+
+    const dialog = await screen.findByRole("dialog", { name: "AI 帮写" });
+    await waitFor(() => expect(tauriEventMock.listen).toHaveBeenCalled());
+    const eventName = tauriEventMock.listen.mock.calls[0][0];
+    const handler = tauriEventMock.listeners.get(eventName);
+    expect(handler).toBeDefined();
+
+    act(() => {
+      handler?.({
+        payload: {
+          eventType: "delta",
+          delta: "1、产品名称：",
+        },
+      });
+      handler?.({
+        payload: {
+          eventType: "delta",
+          delta: "测试商品",
+        },
+      });
+    });
+
+    expect(await within(dialog).findByText("1、产品名称：测试商品")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "正在改写中" })).toBeDisabled();
+    expect(within(dialog).queryByRole("button", { name: "确认" })).not.toBeInTheDocument();
+
+    resolveAssist?.({
+      capabilityId: "product-selling-points",
+      promptId: "product-selling-points",
+      text: "1、产品名称：测试商品",
+    });
+
+    expect(await within(dialog).findByRole("button", { name: "确认" })).toBeInTheDocument();
+  });
+
+  it("shows the runtime error when product image-to-text AI writing fails", async () => {
+    const user = userEvent.setup();
+    const runtimeError = "没有可用模型";
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/shirt.png",
+        name: "shirt.png",
+        path: "/Users/demo/Pictures/shirt.png",
+        src: "asset:///Users/demo/Pictures/shirt.png",
+      },
+    ]);
+    invokeMock.mockImplementation((command) => {
+      if (command === "ai_assist_product_selling_points_stream") {
+        return Promise.reject(new Error(runtimeError));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+    await user.click(
+      within(await screen.findByRole("dialog", { name: "图片上传与使用免责声明" })).getByRole("button", {
+        name: "我已知悉并继续",
+      }),
+    );
+
+    expect(await screen.findByText(runtimeError)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "AI 帮写" })).not.toBeInTheDocument();
+  });
+
+  it("persists AI writing disclaimer acceptance after the first confirmed use", async () => {
+    const user = userEvent.setup();
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/shirt.png",
+        name: "shirt.png",
+        path: "/Users/demo/Pictures/shirt.png",
+        src: "asset:///Users/demo/Pictures/shirt.png",
+      },
+    ]);
+
+    const { unmount } = renderApp();
+
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+    await user.click(
+      within(await screen.findByRole("dialog", { name: "图片上传与使用免责声明" })).getByRole("button", {
+        name: "我已知悉并继续",
+      }),
+    );
+
+    expect(window.localStorage.getItem(aiWritingDisclaimerAcceptedStorageKey)).toBe("true");
+    unmount();
+    invokeMock.mockClear();
+
+    renderApp();
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.click(screen.getByRole("button", { name: "AI 帮写" }));
+
+    expect(screen.queryByRole("dialog", { name: "图片上传与使用免责声明" })).not.toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_product_selling_points_stream", {
+      input: {
+        imagePaths: ["/Users/demo/Pictures/shirt.png"],
+        requestId: expect.stringContaining("ai-writing-"),
+      },
+    });
   });
 
   it("keeps product images and parameters when switching workspaces", async () => {
@@ -2324,3 +2562,28 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "请上传服饰图片" })).toBeDisabled();
   });
 });
+
+function ensureTestLocalStorage() {
+  if (typeof window.localStorage?.removeItem === "function") {
+    return window.localStorage;
+  }
+
+  const values = new Map<string, string>();
+  const storage = {
+    clear: () => values.clear(),
+    getItem: (key: string) => values.get(key) ?? null,
+    key: (index: number) => Array.from(values.keys())[index] ?? null,
+    get length() {
+      return values.size;
+    },
+    removeItem: (key: string) => values.delete(key),
+    setItem: (key: string, value: string) => values.set(key, value),
+  } satisfies Storage;
+
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+
+  return storage;
+}

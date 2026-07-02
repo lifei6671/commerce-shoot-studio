@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { BootstrappedApp } from "./BootstrappedApp";
+import { ToastProvider } from "../shared/ui/toast";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -36,7 +37,11 @@ describe("BootstrappedApp", () => {
   });
 
   it("shows initialization loading first and enters product workspace after workspace is ready", async () => {
-    render(<BootstrappedApp />);
+    render(
+      <ToastProvider>
+        <BootstrappedApp />
+      </ToastProvider>,
+    );
 
     expect(screen.getByRole("status", { name: "应用初始化状态" })).toHaveTextContent("正在初始化工作区");
 

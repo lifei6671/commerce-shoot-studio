@@ -1,4 +1,5 @@
 use reqwest::Url;
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedProviderOutput {
@@ -24,21 +25,14 @@ impl std::fmt::Display for ProviderNormalizeError {
 impl std::error::Error for ProviderNormalizeError {}
 
 pub fn normalize_openai_compatible_response(
-    response: &serde_json::Value,
+    response: &Value,
 ) -> Result<NormalizedProviderOutput, ProviderNormalizeError> {
     let output_text = response
         .get("output_text")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            response
-                .get("choices")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|choices| choices.first())
-                .and_then(|choice| choice.get("message"))
-                .and_then(|message| message.get("content"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .map(str::to_string);
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| responses_message_output_text(response))
+        .or_else(|| chat_completion_output_text(response));
 
     let output_text = output_text.ok_or(ProviderNormalizeError::UnsupportedResponseShape)?;
 
@@ -50,6 +44,55 @@ pub fn normalize_openai_compatible_response(
         usage_json: normalize_usage(response.get("usage")),
         raw_response_stored: false,
     })
+}
+
+fn responses_message_output_text(response: &Value) -> Option<String> {
+    let parts = response
+        .get("output")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|content| {
+            let content_type = content.get("type").and_then(Value::as_str);
+            if matches!(content_type, Some("output_text") | Some("text")) {
+                return content.get("text").and_then(Value::as_str);
+            }
+            None
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    non_empty_join(parts)
+}
+
+fn chat_completion_output_text(response: &Value) -> Option<String> {
+    let content = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))?;
+
+    if let Some(text) = content.as_str().filter(|text| !text.trim().is_empty()) {
+        return Some(text.to_string());
+    }
+
+    let parts = content
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    non_empty_join(parts)
+}
+
+fn non_empty_join(parts: Vec<&str>) -> Option<String> {
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(""))
 }
 
 pub fn redact_provider_result_url(value: &str) -> String {

@@ -65,6 +65,43 @@ fn run_next_executes_oldest_queued_task_with_model_gateway_and_events() {
 }
 
 #[test]
+fn run_next_persists_generated_result_asset_for_scene_task() {
+    let workspace_dir = initialized_workspace("local-executor-generated-asset");
+    let generation_service = GenerationService::new();
+    let task = generation_service
+        .create_task(&workspace_dir, create_scene_task("scene-generated-asset"))
+        .expect("task should create");
+
+    LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should run")
+        .expect("queued task should exist");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+
+    assert_eq!(detail.output_assets.len(), 1);
+    let output = &detail.output_assets[0];
+    assert_eq!(output.role, "output");
+    assert_eq!(output.sort_order, 0);
+    assert_eq!(output.asset.kind.as_str(), "generated");
+    assert_eq!(output.asset.mime_type, "image/png");
+    assert_eq!(output.asset.lifecycle.as_str(), "active");
+    assert_eq!(output.asset.width, Some(1));
+    assert_eq!(output.asset.height, Some(1));
+    assert!(output.asset.relative_path.starts_with("assets/generated/"));
+    assert!(workspace_dir
+        .join(relative_path_to_platform(&output.asset.relative_path))
+        .is_file());
+    assert_eq!(
+        task_event_count(&workspace_dir, &task.id, "task.result-saved"),
+        1
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
 fn run_next_returns_none_when_queue_is_empty() {
     let workspace_dir = initialized_workspace("local-executor-empty");
 
@@ -214,4 +251,8 @@ fn unique_temp_workspace(label: &str) -> PathBuf {
 
 fn remove_workspace(path: &Path) {
     let _ = fs::remove_dir_all(path);
+}
+
+fn relative_path_to_platform(relative_path: &str) -> PathBuf {
+    relative_path.split('/').collect()
 }

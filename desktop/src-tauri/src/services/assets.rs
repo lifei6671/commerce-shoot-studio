@@ -143,6 +143,28 @@ impl AssetService {
         let asset = self.get_asset(workspace_directory, asset_id)?;
         Ok(workspace_directory.join(relative_path_to_platform(&asset.relative_path)))
     }
+
+    pub(crate) fn save_generated_image(
+        &self,
+        workspace_directory: &Path,
+        original_name: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<Asset, AssetError> {
+        if bytes.is_empty() {
+            return Err(AssetError::InvalidInput(
+                "生成结果图片内容不能为空。".to_string(),
+            ));
+        }
+        let database = open_database(workspace_directory)?;
+        save_generated_image(
+            &database,
+            workspace_directory,
+            original_name,
+            mime_type,
+            bytes,
+        )
+    }
 }
 
 fn open_database(workspace_directory: &Path) -> Result<WorkspaceDatabase, AssetError> {
@@ -205,6 +227,74 @@ fn import_single_image(
         params![
             id,
             kind.as_str(),
+            name,
+            original_name,
+            mime_type,
+            relative_path,
+            sha256,
+            width,
+            height,
+            bytes.len() as i64
+        ],
+    ) {
+        let _ = fs::remove_file(&target_path);
+        return Err(AssetError::from(source));
+    }
+
+    find_asset_by_id(database, &id)?.ok_or_else(|| AssetError::NotFound(id))
+}
+
+fn save_generated_image(
+    database: &WorkspaceDatabase,
+    workspace_directory: &Path,
+    original_name: &str,
+    mime_type: &str,
+    bytes: &[u8],
+) -> Result<Asset, AssetError> {
+    let extension = extension_for_mime_type(mime_type)?;
+    let sha256 = sha256::digest_hex(bytes);
+    if let Some(existing) = find_active_asset_by_hash(database, AssetKind::Generated, &sha256)? {
+        return Ok(existing);
+    }
+
+    let id = create_asset_id();
+    let name = format!("{id}.{extension}");
+    let original_name = if original_name.trim().is_empty() {
+        format!("generated.{extension}")
+    } else {
+        original_name.to_string()
+    };
+    let relative_path = format!("assets/{}/{}", AssetKind::Generated.directory_name(), name);
+    let target_path = workspace_directory.join(relative_path_to_platform(&relative_path));
+    let tmp_path = workspace_directory
+        .join("cache")
+        .join("tmp")
+        .join(format!("{id}.generated"));
+
+    if let Some(parent) = tmp_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+
+    fs::write(&tmp_path, bytes).map_err(|source| io_error(&tmp_path, source))?;
+    if let Err(source) = fs::rename(&tmp_path, &target_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(io_error(&target_path, source));
+    }
+
+    let (width, height) = image_dimensions(bytes, mime_type);
+    if let Err(source) = database.connection().execute(
+        "
+        INSERT INTO assets (
+            id, kind, name, original_name, mime_type, relative_path,
+            sha256, width, height, size_bytes, lifecycle
+        )
+        VALUES (?1, 'generated', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active')
+        ",
+        params![
+            id,
             name,
             original_name,
             mime_type,
@@ -442,6 +532,18 @@ fn mime_type_for_extension(extension: &str) -> Result<String, AssetError> {
         "gif" => Ok("image/gif".to_string()),
         _ => Err(AssetError::InvalidInput(format!(
             "暂不支持的图片格式：{extension}"
+        ))),
+    }
+}
+
+fn extension_for_mime_type(mime_type: &str) -> Result<&'static str, AssetError> {
+    match mime_type {
+        "image/png" => Ok("png"),
+        "image/jpeg" => Ok("jpg"),
+        "image/webp" => Ok("webp"),
+        "image/gif" => Ok("gif"),
+        _ => Err(AssetError::InvalidInput(format!(
+            "暂不支持的生成图片 MIME 类型：{mime_type}"
         ))),
     }
 }
