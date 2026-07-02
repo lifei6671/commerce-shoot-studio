@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use commerce_shoot_studio_lib::infrastructure::filesystem::WorkspaceFileSystem;
 use commerce_shoot_studio_lib::services::ai_assist::{
     AiAssistService, ProductSellingPointsImageInput, ProductSellingPointsInput,
+    ViralStyleAnalysisInput,
 };
 use commerce_shoot_studio_lib::services::model_gateway::{
     ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
@@ -24,6 +25,7 @@ fn product_selling_points_prompt_keeps_rules_as_system_and_task_as_user() {
         .content
         .contains("你是一名专业的电商商品详情页文案策划"));
     assert!(messages[0].content.contains("不要编造品牌、型号、价格"));
+    assert!(messages[0].content.contains("如信息不足，写“需补充”"));
     assert_eq!(messages[1].role, "user");
     assert!(messages[1].content.contains("请根据上传图片识别商品信息"));
     assert!(!messages[1]
@@ -40,6 +42,54 @@ fn product_selling_points_prompt_can_render_roleless_fallback() {
     assert!(prompt.contains("【用户任务】"));
     assert!(prompt.contains("如果多张图片中明显包含多个不同商品"));
     assert!(prompt.contains("请根据上传图片识别商品信息"));
+}
+
+#[test]
+fn viral_style_analysis_prompt_keeps_rules_as_system_and_task_as_user() {
+    let messages = render_prompt_for_roles(PromptTemplateId::ViralStyleAnalysis)
+        .expect("prompt should render");
+
+    assert_eq!(messages[0].role, "system");
+    assert!(messages[0]
+        .content
+        .contains("你是一名专业的电商视觉营销与爆款内容策划专家"));
+    assert!(messages[0].content.contains("输出必须是合法 JSON"));
+    assert!(messages[0].content.contains("小标题控制在 8-15 个汉字"));
+    assert!(messages[0]
+        .content
+        .contains("每个风格方向只返回 2-3 个颜色"));
+    assert!(messages[0].content.contains("colors"));
+    assert!(messages[0].content.contains(r#""id":"style-4""#));
+    assert!(!messages[0].content.contains("palettes"));
+    assert_eq!(messages[1].role, "user");
+    assert!(messages[1]
+        .content
+        .contains("请根据以下信息生成爆款风格分析"));
+}
+
+#[test]
+fn viral_style_analysis_assist_uses_platform_and_product_selling_points() {
+    let workspace_dir = initialized_workspace("ai-assist-viral-style-analysis");
+
+    let result = AiAssistService::new()
+        .analyze_viral_style_with_adapter(
+            &workspace_dir,
+            ViralStyleAnalysisInput {
+                platform: "淘宝天猫".to_string(),
+                product_selling_points: "黑色翻领长袖版型，后背图案装饰，适合日常通勤。"
+                    .to_string(),
+            },
+            &ViralStyleGatewayAdapter,
+        )
+        .expect("viral style analysis should run");
+
+    assert_eq!(result.capability_id, "viral-style-analysis");
+    assert_eq!(result.prompt_id, "viral-style-analysis");
+    assert_eq!(result.data["items"][0]["title"], "通勤质感风");
+    assert_eq!(result.data["items"][0]["colors"][0], "#111827");
+    assert!(result.data["items"][0].get("palettes").is_none());
+
+    remove_workspace(&workspace_dir);
 }
 
 #[test]
@@ -205,6 +255,66 @@ impl ModelGatewayAdapter for WebpGatewayAdapter {
         Ok(ModelGatewayAdapterResult {
             output_text: Some("1、产品名称：WebP 商品".to_string()),
             output_json: serde_json::json!({ "test": true }),
+            usage_json: None,
+        })
+    }
+}
+
+struct ViralStyleGatewayAdapter;
+
+impl ModelGatewayAdapter for ViralStyleGatewayAdapter {
+    fn invoke(
+        &self,
+        request: ModelGatewayAdapterRequest<'_>,
+    ) -> Result<ModelGatewayAdapterResult, ModelGatewayError> {
+        assert_eq!(request.capability_id, "viral-style-analysis");
+        assert_eq!(request.input["prompt"]["messages"][0]["role"], "system");
+        assert_eq!(request.input["prompt"]["messages"][1]["role"], "user");
+        assert_eq!(request.input["context"]["platform"], "淘宝天猫");
+        assert!(request.input["context"]["productSellingPoints"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("黑色翻领长袖版型"));
+        assert!(request.input.get("userImages").is_none());
+
+        Ok(ModelGatewayAdapterResult {
+            output_text: Some(
+                serde_json::json!({
+                    "platform": "淘宝天猫",
+                    "items": [
+                        {
+                            "id": "style-1",
+                            "title": "通勤质感风",
+                            "subtitle": "突出黑色翻领衬衫的简洁通勤气质，适合天猫详情页表达。",
+                            "designFocus": "突出服装版型、面料质感和通勤搭配场景。",
+                            "colors": ["#111827", "#F8FAFC"]
+                        },
+                        {
+                            "id": "style-2",
+                            "title": "街头潮酷风",
+                            "subtitle": "放大后背图案装饰记忆点，适合年轻人群点击。",
+                            "designFocus": "突出后背图案和街头穿搭氛围。",
+                            "colors": ["#0F172A", "#EF4444"]
+                        },
+                        {
+                            "id": "style-3",
+                            "title": "简约百搭风",
+                            "subtitle": "强化黑色单品的搭配效率，适合详情页快速理解。",
+                            "designFocus": "突出多场景搭配和基础款价值。",
+                            "colors": ["#111111", "#FFFFFF"]
+                        },
+                        {
+                            "id": "style-4",
+                            "title": "细节品质风",
+                            "subtitle": "用细节图与质感表达承接核心卖点，增强购买信任。",
+                            "designFocus": "突出领型、走线、面料纹理和局部细节。",
+                            "colors": ["#27272A", "#F4F4F5", "#71717A"]
+                        }
+                    ]
+                })
+                .to_string(),
+            ),
+            output_json: serde_json::json!({ "type": "text" }),
             usage_json: None,
         })
     }

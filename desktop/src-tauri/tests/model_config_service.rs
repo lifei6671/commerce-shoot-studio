@@ -252,7 +252,7 @@ fn volcengine_image_understanding_uses_responses_endpoint() {
     let workspace_dir = initialized_workspace("model-config-volcengine-image-understanding");
     let model_service = ModelConfigService::new();
     let secret_service = SecretService::new();
-    let capability_id = "viral-style-analysis".to_string();
+    let capability_id = "product-selling-points".to_string();
     let config = model_service
         .save_config(
             &workspace_dir,

@@ -443,23 +443,15 @@ fn message_content(messages: &[Value], role: &str) -> Option<String> {
 }
 
 fn parse_user_images(input: &Value) -> Result<Vec<String>, ModelGatewayError> {
-    let images = input
-        .get("userImages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            ModelGatewayError::ProviderUnavailable("模型输入缺少用户图片。".to_string())
-        })?;
+    let Some(images) = input.get("userImages").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
     let data_urls = images
         .iter()
         .filter_map(|image| image.get("dataUrl").and_then(Value::as_str))
         .filter(|data_url| !data_url.trim().is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    if data_urls.is_empty() {
-        return Err(ModelGatewayError::ProviderUnavailable(
-            "模型输入缺少可用的用户图片。".to_string(),
-        ));
-    }
     Ok(data_urls)
 }
 

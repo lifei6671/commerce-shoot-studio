@@ -4,7 +4,8 @@ export type ListingCopyAssistInput = {
 };
 
 export type ViralStyleAnalysisInput = {
-  assetIds: string[];
+  platform: string;
+  productSellingPoints: string;
 };
 
 export type ProductSellingPointsAssistInput = {

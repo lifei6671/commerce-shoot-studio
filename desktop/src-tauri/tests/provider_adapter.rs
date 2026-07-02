@@ -256,6 +256,42 @@ fn builds_volcengine_streaming_responses_request() {
 }
 
 #[test]
+fn builds_text_only_responses_request_without_user_images() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/v1/responses",
+            model: "gpt-5.5",
+            provider_profile_id: "openai",
+        },
+        &serde_json::json!({
+            "prompt": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "系统规则"
+                    },
+                    {
+                        "role": "user",
+                        "content": "目标平台：淘宝天猫\n商品卖点：黑色翻领长袖版型"
+                    }
+                ],
+                "rolelessPrompt": "【应用规则】\n系统规则\n\n【用户任务】\n目标平台：淘宝天猫"
+            }
+        }),
+    )
+    .expect("text-only request body should build");
+
+    assert_eq!(body["instructions"], "系统规则");
+    assert_eq!(body["input"][0]["role"], "user");
+    assert_eq!(body["input"][0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(
+        body["input"][0]["content"][0]["text"],
+        "目标平台：淘宝天猫\n商品卖点：黑色翻领长袖版型"
+    );
+}
+
+#[test]
 fn parses_responses_stream_output_text_delta_event() {
     let event = parse_model_gateway_sse_event(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"卖点内容\"}\n\n",

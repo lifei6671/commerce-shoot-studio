@@ -45,7 +45,6 @@ type GenerationConfigPanelProps = {
 
 const maxProductImageCount = 3;
 const strategyDraftDelayMs = 2500;
-const viralStyleAnalysisDelayMs = 1800;
 const aiWritingDisclaimerAcceptedStorageKey = "commerce-shoot-studio.ai-writing-disclaimer.accepted.v1";
 const aiWritingDisclaimerTitle = "图片上传与使用免责声明";
 const aiWritingDisclaimerParagraphs = [
@@ -100,24 +99,11 @@ const marketLanguageMap: Record<string, string> = {
   墨西哥: "西班牙文",
 };
 
-const viralStyleBatches = [
-  [
-    { colors: ["bg-black", "bg-slate-100", "bg-rose-500"], description: "契合街头爱好者穿搭调性", title: "街头潮酷风" },
-    { colors: ["bg-black", "bg-slate-100", "bg-blue-600"], description: "凸显面料高级通穿属性", title: "通勤质感风" },
-    { colors: ["bg-black", "bg-stone-100", "bg-amber-500"], description: "突出两穿随性穿搭优势", title: "随性格调风" },
-    { colors: ["bg-black", "bg-emerald-50", "bg-emerald-500"], description: "适配日常出街阳光属性", title: "运动活力风" },
-  ],
-  [
-    { colors: ["bg-slate-950", "bg-white", "bg-stone-300"], description: "压低色彩噪音，突出商品轮廓", title: "轻奢极简风" },
-    { colors: ["bg-zinc-900", "bg-sky-100", "bg-cyan-500"], description: "强调清爽质感与平台主图效率", title: "清透电商风" },
-    { colors: ["bg-neutral-950", "bg-orange-100", "bg-orange-500"], description: "放大促销氛围与点击吸引力", title: "热卖冲击风" },
-    { colors: ["bg-slate-900", "bg-purple-100", "bg-violet-500"], description: "适合社媒种草与人群标签表达", title: "潮流种草风" },
-  ],
-];
-
 export type ViralStyleAnalysisResult = {
   colors: string[];
-  description: string;
+  designFocus?: string;
+  id?: string;
+  subtitle: string;
   title: string;
 };
 
@@ -167,16 +153,15 @@ export function GenerationConfigPanel({
   const [aiWritingOpen, setAiWritingOpen] = useState(false);
   const [aiWritingStatus, setAiWritingStatus] = useState<"ready" | "writing">("ready");
   const [aiWritingText, setAiWritingText] = useState("");
-  const [viralStyleBatchIndex, setViralStyleBatchIndex] = useState(0);
+  const [viralStyles, setViralStyles] = useState<ViralStyleAnalysisResult[]>([]);
   const [selectedViralStyleTitles, setSelectedViralStyleTitles] = useState<Set<string>>(() => new Set());
   const [viralStyleStatus, setViralStyleStatus] = useState<"idle" | "loading" | "ready">("idle");
-  const activeViralStyles = viralStyleBatches[viralStyleBatchIndex];
   const selectedViralStyles = useMemo(
     () =>
       generationSettings.viralStyleAnalysisEnabled
-        ? activeViralStyles.filter((style) => selectedViralStyleTitles.has(style.title))
+        ? viralStyles.filter((style) => selectedViralStyleTitles.has(style.title))
         : [],
-    [activeViralStyles, generationSettings.viralStyleAnalysisEnabled, selectedViralStyleTitles],
+    [generationSettings.viralStyleAnalysisEnabled, selectedViralStyleTitles, viralStyles],
   );
   const generationReady = hasProductImages && hasProductPrompt && hasSelectedModules;
   const generationCtaLabel = !hasProductImages
@@ -304,33 +289,35 @@ export function GenerationConfigPanel({
     onGenerationSettingsChange({ ...generationSettings, [feature]: enabled });
     if (feature === "viralStyleAnalysisEnabled" && !enabled) {
       setViralStyleStatus("idle");
+      setViralStyles([]);
       setSelectedViralStyleTitles(new Set());
     }
   }
 
-  function startViralStyleAnalysis(nextBatchIndex = viralStyleBatchIndex) {
-    if (!hasProductImages) {
+  async function startViralStyleAnalysis() {
+    if (!hasProductPrompt) {
       return;
     }
 
-    setViralStyleBatchIndex(nextBatchIndex);
     setSelectedViralStyleTitles(new Set());
     setViralStyleStatus("loading");
+    try {
+      const result = await aiAssistPort.analyzeViralStyle({
+        platform: generationSettings.platform,
+        productSellingPoints: productPrompt.trim(),
+      });
+      setViralStyles(normalizeViralStyleAnalysisResult(result.data));
+      setViralStyleStatus("ready");
+    } catch (error) {
+      setViralStyles([]);
+      setViralStyleStatus("idle");
+      showToast({ message: aiWritingErrorMessage(error), variant: "error" });
+    }
   }
 
   function refreshViralStyleAnalysis() {
-    startViralStyleAnalysis((viralStyleBatchIndex + 1) % viralStyleBatches.length);
+    void startViralStyleAnalysis();
   }
-
-  useEffect(() => {
-    if (viralStyleStatus !== "loading") {
-      return;
-    }
-
-    const analysisTimer = window.setTimeout(() => setViralStyleStatus("ready"), viralStyleAnalysisDelayMs);
-
-    return () => window.clearTimeout(analysisTimer);
-  }, [viralStyleStatus, viralStyleBatchIndex]);
 
   useEffect(() => {
     onViralStylesChange?.(selectedViralStyles);
@@ -505,12 +492,12 @@ export function GenerationConfigPanel({
             >
               {generationSettings.viralStyleAnalysisEnabled ? (
                 <ViralStyleAnalysisPanel
-                  disabled={!hasProductImages}
-                  onAnalyze={() => startViralStyleAnalysis()}
+                  disabled={!hasProductPrompt}
+                  onAnalyze={() => void startViralStyleAnalysis()}
                   onRefresh={refreshViralStyleAnalysis}
                   status={viralStyleStatus}
                   selectedStyleTitles={selectedViralStyleTitles}
-                  styles={activeViralStyles}
+                  styles={viralStyles}
                   onStyleCheckedChange={(styleTitle, checked) =>
                     setSelectedViralStyleTitles((currentTitles) => {
                       const nextTitles = new Set(currentTitles);
@@ -589,6 +576,48 @@ function aiWritingErrorMessage(error: unknown) {
     return error;
   }
   return "AI 帮写失败，请检查模型配置后重试";
+}
+
+function normalizeViralStyleAnalysisResult(data: unknown): ViralStyleAnalysisResult[] {
+  if (!data || typeof data !== "object" || !("items" in data)) {
+    throw new Error("爆款风格分析返回结构无效");
+  }
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length !== 4) {
+    throw new Error("爆款风格分析返回结构无效");
+  }
+
+  return items.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new Error("爆款风格分析返回结构无效");
+    }
+    const source = item as Record<string, unknown>;
+    const title = stringField(source.title);
+    const subtitle = stringField(source.subtitle);
+    const colors = Array.isArray(source.colors) ? source.colors.map(stringField).filter(isHexColor) : [];
+    if (!title || !subtitle || colors.length < 2 || colors.length > 3) {
+      throw new Error("爆款风格分析返回结构无效");
+    }
+    return {
+      colors,
+      designFocus: stringField(source.designFocus),
+      id: stringField(source.id) || `style-${index + 1}`,
+      subtitle: compactViralStyleSubtitle(subtitle),
+      title,
+    };
+  });
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function isHexColor(value: string) {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+function compactViralStyleSubtitle(value: string) {
+  return Array.from(value).slice(0, 15).join("");
 }
 
 function imageSelectionErrorMessage(error: unknown) {
@@ -730,7 +759,7 @@ function ViralStyleAnalysisPanel({
       <div className="mt-4 rounded-[11px] border border-white/70 bg-white/70 px-4 py-5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.82)]">
         <Loader2 className="mx-auto size-5 animate-spin text-app-blue" />
         <div className="mt-2 text-[13px] font-medium text-slate-800">正在分析爆款风格...</div>
-        <p className="mt-1 text-[12px] text-slate-500">根据商品图提取色彩、调性与平台表达方式</p>
+        <p className="mt-1 text-[12px] text-slate-500">根据平台与商品卖点分析视觉方向</p>
       </div>
     );
   }
@@ -786,7 +815,7 @@ function ViralStyleCard({
   style: ViralStyleAnalysisResult;
 }) {
   return (
-    <label className="min-h-[104px] rounded-[10px] bg-white px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.86),0_1px_2px_rgba(15,23,42,0.04)]">
+    <label className="flex min-h-[112px] flex-col rounded-[10px] bg-white px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.86),0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="flex items-start gap-2">
         <input
           aria-label={style.title}
@@ -797,12 +826,18 @@ function ViralStyleCard({
         />
         <div className="min-w-0">
           <div className="text-[13px] font-medium text-slate-900">{style.title}</div>
-          <p className="mt-1 text-[12px] leading-5 text-slate-500">{style.description}</p>
+          <p className="mt-1 text-[12px] leading-5 text-slate-500">{style.subtitle}</p>
         </div>
       </div>
-      <div className="mt-3 flex justify-end gap-1.5">
-        {style.colors.map((color, index) => (
-          <span className={cn("size-4 rounded-full", color)} key={`${style.title}-${index}`} />
+      <div className="mt-auto flex justify-end gap-2 pt-3" data-testid="viral-style-color-row">
+        {style.colors.slice(0, 3).map((color, index) => (
+          <span
+            aria-hidden="true"
+            className="size-4 shrink-0 rounded-full shadow-[0_0_0_1px_rgba(148,163,184,0.18),0_1px_2px_rgba(15,23,42,0.10)]"
+            data-testid="viral-style-color-dot"
+            key={`${style.title}-${color}-${index}`}
+            style={{ backgroundColor: color }}
+          />
         ))}
       </div>
     </label>

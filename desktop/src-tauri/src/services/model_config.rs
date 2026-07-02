@@ -32,7 +32,7 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
     ),
     ModelCapabilityDefinition::new(
         "viral-style-analysis",
-        "image-to-text",
+        "text-to-text",
         "爆款风格分析",
         "mock-viral-style-v1",
     ),
@@ -119,7 +119,7 @@ pub const ALL_CATEGORIES: &[&str] = &[
     "image-to-text",
 ];
 
-pub const TEXT_CAPABILITY_IDS: &[&str] = &["listing-copy", "prompt-plan"];
+pub const TEXT_CAPABILITY_IDS: &[&str] = &["listing-copy", "prompt-plan", "viral-style-analysis"];
 pub const TEXT_CATEGORIES: &[&str] = &["text-to-text"];
 
 pub const PROVIDER_PROFILES: &[ProviderProfile] = &[

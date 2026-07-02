@@ -5,6 +5,7 @@ import type {
   AiAssistResult,
   ProductSellingPointsAssistInput,
   ProductSellingPointsStreamHandlers,
+  ViralStyleAnalysisInput,
 } from "../index";
 
 type AiAssistStreamPayload = {
@@ -62,8 +63,8 @@ export const localAiAssistPort: AiAssistPort = {
   generateListingCopy() {
     return Promise.reject(new Error("generateListingCopy 尚未接入本地 runtime。"));
   },
-  analyzeViralStyle() {
-    return Promise.reject(new Error("analyzeViralStyle 尚未接入本地 runtime。"));
+  analyzeViralStyle(input: ViralStyleAnalysisInput) {
+    return invoke<AiAssistResult>("ai_assist_viral_style_analysis", { input });
   },
 };
 

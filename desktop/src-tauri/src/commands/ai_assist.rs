@@ -1,6 +1,7 @@
 use crate::infrastructure::filesystem::default_workspace_directory;
 use crate::services::ai_assist::{
     AiAssistResult, AiAssistService, ProductSellingPointsImageInput, ProductSellingPointsInput,
+    ViralStyleAnalysisInput,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -16,6 +17,19 @@ pub async fn ai_assist_product_selling_points(
     })
     .await
     .map_err(|error| format!("AI 帮写任务执行失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn ai_assist_viral_style_analysis(
+    input: ViralStyleAnalysisInput,
+) -> Result<AiAssistResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        AiAssistService::new()
+            .analyze_viral_style(&default_workspace_directory(), input)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("爆款风格分析任务执行失败：{error}"))?
 }
 
 #[derive(Debug, Clone, Deserialize)]

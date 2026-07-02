@@ -24,6 +24,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ai_assist::ai_assist_product_selling_points,
             commands::ai_assist::ai_assist_product_selling_points_stream,
+            commands::ai_assist::ai_assist_viral_style_analysis,
             save_generated_asset,
             commands::assets::asset_delete,
             commands::assets::asset_get,

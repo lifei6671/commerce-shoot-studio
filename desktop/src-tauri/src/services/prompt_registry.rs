@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptTemplateId {
     ProductSellingPoints,
+    ViralStyleAnalysis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,16 +40,16 @@ const PRODUCT_SELLING_POINTS_OUTPUT_FORMAT: &[&str] = &[
     "请严格按照以下格式输出：",
     "1、产品名称：",
     "基于图片推断一个简洁、清晰、适合电商使用的商品名称，控制在 8-18 个字。",
-    "如果无法判断商品类型，写“需补充”。",
+    "如果无法判断商品类型，返回“无法识别”。",
     "2、核心卖点：",
     "* 卖点 1：突出图片中可见的外观、造型、结构、版型、颜色、图案或设计特征。",
     "* 卖点 2：突出图片中可观察到的细节、工艺感、质感、组件、配件或品质感线索。",
     "* 卖点 3：突出该商品可转化为购买理由的利益点，例如搭配性、便携性、收纳性、舒适感、装饰性、实用性、氛围感、耐用感等。",
     "* 卖点 4：如图片信息足够，可补充一个差异化卖点；如信息不足，写“需补充”。",
     "3、适用人群：",
-    "列出 2-4 类可能适用人群。要求人群描述具体，例如“日常通勤人群”“喜欢简约穿搭的女性”“租房小户型用户”“注重桌面收纳的人群”。如果图片信息不足以判断，请写“需补充”。",
+    "列出 2-4 类可能适用人群。要求人群描述具体，例如“日常通勤人群”“喜欢简约穿搭的女性”“租房小户型用户”“注重桌面收纳的人群”。",
     "4、使用场景：",
-    "列出 2-4 个适合该商品的真实使用场景。场景应贴近电商详情页表达，例如“日常通勤”“居家收纳”“户外出行”“办公室使用”“节日送礼”“拍照搭配”“宿舍使用”等。如果图片信息不足以判断，请写“需补充”。",
+    "列出 2-4 个适合该商品的真实使用场景。场景应贴近电商详情页表达，例如“日常通勤”“居家收纳”“户外出行”“办公室使用”“节日送礼”“拍照搭配”“宿舍使用”等。",
     "5、规格参数：",
     "仅列出图片可观察或可合理描述的信息，不能编造具体数值。",
     "可包含但不限于以下字段：",
@@ -74,11 +75,40 @@ const PRODUCT_SELLING_POINTS_PROMPT: PromptTemplate = PromptTemplate {
     output_format: PRODUCT_SELLING_POINTS_OUTPUT_FORMAT,
 };
 
+const VIRAL_STYLE_ANALYSIS_SYSTEM_RULES: &[&str] = &[
+    "你是一名专业的电商视觉营销与爆款内容策划专家，擅长根据商品卖点和目标销售平台，分析适合商品详情页、主图、信息流素材和社媒种草内容的爆款视觉风格方向。",
+    "请基于用户提供的目标平台和商品卖点进行分析，不要编造实时销量、榜单排名、官方认证、具体品牌数据或无法验证的平台趋势。",
+    "如果商品卖点信息不足，请围绕已提供内容给出保守、可落地的视觉表达方向，不要虚构商品参数、功效、材质成分、价格或品牌背书。",
+    "四个风格方向需要彼此有明显差异，分别覆盖不同的视觉调性、页面表达重点或消费心智。",
+    "标题要短、明确、适合在工作台中作为风格标签使用；小标题控制在 8-15 个汉字以内，避免长句和逗号。",
+    "每个风格方向只返回 2-3 个颜色，颜色必须使用 6 位 HEX 色值。",
+    "输出必须是合法 JSON，不要输出 Markdown，不要使用代码块，不要输出分析过程，不要解释你的判断逻辑。",
+    "输出使用简体中文。",
+];
+
+const VIRAL_STYLE_ANALYSIS_OUTPUT_FORMAT: &[&str] = &[
+    "请严格按照以下 JSON 结构输出：",
+    r##"{"platform":"目标平台","items":[{"id":"style-1","title":"风格标题一","subtitle":"8到15个汉字小标题","designFocus":"视觉设计重点","colors":["#111827","#F8FAFC","#2563EB"]},{"id":"style-2","title":"风格标题二","subtitle":"8到15个汉字小标题","designFocus":"视觉设计重点","colors":["#0F172A","#22C55E"]},{"id":"style-3","title":"风格标题三","subtitle":"8到15个汉字小标题","designFocus":"视觉设计重点","colors":["#1E3A8A","#E0F2FE"]},{"id":"style-4","title":"风格标题四","subtitle":"8到15个汉字小标题","designFocus":"视觉设计重点","colors":["#27272A","#F4F4F5"]}]}"##,
+    "items 必须且只能包含 4 个风格方向。",
+    "每个 colors 必须包含 2-3 个颜色。",
+    "字段名必须保持为 platform、items、id、title、subtitle、designFocus、colors。",
+];
+
+const VIRAL_STYLE_ANALYSIS_PROMPT: PromptTemplate = PromptTemplate {
+    id: "viral-style-analysis",
+    version: "v1",
+    capability_id: "viral-style-analysis",
+    system_rules: VIRAL_STYLE_ANALYSIS_SYSTEM_RULES,
+    user_task: "请根据以下信息生成爆款风格分析。\n\n目标平台：{{platform}}\n\n商品卖点：\n{{productSellingPoints}}\n\n请严格按照指定 JSON 结构输出。",
+    output_format: VIRAL_STYLE_ANALYSIS_OUTPUT_FORMAT,
+};
+
 pub fn get_prompt_template(
     id: PromptTemplateId,
 ) -> Result<&'static PromptTemplate, PromptRegistryError> {
     match id {
         PromptTemplateId::ProductSellingPoints => Ok(&PRODUCT_SELLING_POINTS_PROMPT),
+        PromptTemplateId::ViralStyleAnalysis => Ok(&VIRAL_STYLE_ANALYSIS_PROMPT),
     }
 }
 

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::services::model_config::ModelConfigError;
 use crate::services::model_gateway::{
@@ -31,13 +31,22 @@ pub struct ProductSellingPointsImageInput {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViralStyleAnalysisInput {
+    pub platform: String,
+    pub product_selling_points: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAssistResult {
     pub text: String,
     pub capability_id: String,
     pub prompt_id: String,
     pub prompt_version: String,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub data: Value,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -85,7 +94,41 @@ impl AiAssistService {
             capability_id: request_context.capability_id,
             prompt_id: request_context.prompt_id,
             prompt_version: request_context.prompt_version,
+            data: Value::Null,
         })
+    }
+
+    pub fn analyze_viral_style(
+        &self,
+        workspace_directory: &Path,
+        input: ViralStyleAnalysisInput,
+    ) -> Result<AiAssistResult, AiAssistError> {
+        self.analyze_viral_style_with_gateway(
+            workspace_directory,
+            input,
+            |workspace_directory, request| {
+                ModelGatewayService::new().invoke_real_provider(workspace_directory, request)
+            },
+        )
+    }
+
+    pub fn analyze_viral_style_with_adapter<T: ModelGatewayAdapter>(
+        &self,
+        workspace_directory: &Path,
+        input: ViralStyleAnalysisInput,
+        adapter: &T,
+    ) -> Result<AiAssistResult, AiAssistError> {
+        self.analyze_viral_style_with_gateway(
+            workspace_directory,
+            input,
+            |workspace_directory, request| {
+                ModelGatewayService::new().invoke_with_adapter(
+                    workspace_directory,
+                    request,
+                    adapter,
+                )
+            },
+        )
     }
 
     pub fn generate_product_selling_points_with_adapter<T: ModelGatewayAdapter>(
@@ -128,11 +171,46 @@ impl AiAssistService {
             capability_id: request_context.capability_id,
             prompt_id: request_context.prompt_id,
             prompt_version: request_context.prompt_version,
+            data: Value::Null,
+        })
+    }
+
+    fn analyze_viral_style_with_gateway<F>(
+        &self,
+        workspace_directory: &Path,
+        input: ViralStyleAnalysisInput,
+        invoke_gateway: F,
+    ) -> Result<AiAssistResult, AiAssistError>
+    where
+        F: FnOnce(
+            &Path,
+            ModelGatewayRequest,
+        )
+            -> Result<crate::services::model_gateway::ModelGatewayResult, ModelConfigError>,
+    {
+        let request_context = build_viral_style_analysis_request(input)?;
+        let gateway_result = invoke_gateway(workspace_directory, request_context.gateway_request)?;
+        let output_text = gateway_result.output_text.unwrap_or_default();
+        let data = parse_viral_style_analysis_output(&output_text)?;
+
+        Ok(AiAssistResult {
+            text: output_text,
+            capability_id: request_context.capability_id,
+            prompt_id: request_context.prompt_id,
+            prompt_version: request_context.prompt_version,
+            data,
         })
     }
 }
 
 struct ProductSellingPointsRequestContext {
+    capability_id: String,
+    gateway_request: ModelGatewayRequest,
+    prompt_id: String,
+    prompt_version: String,
+}
+
+struct ViralStyleAnalysisRequestContext {
     capability_id: String,
     gateway_request: ModelGatewayRequest,
     prompt_id: String,
@@ -197,6 +275,152 @@ fn build_product_selling_points_request(
             }),
         },
     })
+}
+
+fn build_viral_style_analysis_request(
+    input: ViralStyleAnalysisInput,
+) -> Result<ViralStyleAnalysisRequestContext, AiAssistError> {
+    let platform = input.platform.trim();
+    let product_selling_points = input.product_selling_points.trim();
+    if platform.is_empty() {
+        return Err(AiAssistError::Validation(
+            "爆款风格分析缺少目标平台。".to_string(),
+        ));
+    }
+    if product_selling_points.is_empty() {
+        return Err(AiAssistError::Validation("请先补充商品卖点。".to_string()));
+    }
+
+    let template = get_prompt_template(PromptTemplateId::ViralStyleAnalysis)?;
+    let prompt_messages = render_viral_style_prompt_messages(platform, product_selling_points)?;
+    let roleless_prompt = render_viral_style_roleless_prompt(platform, product_selling_points)?;
+    let capability_id = template.capability_id.to_string();
+    let prompt_id = template.id.to_string();
+    let prompt_version = template.version.to_string();
+
+    Ok(ViralStyleAnalysisRequestContext {
+        capability_id: capability_id.clone(),
+        prompt_id,
+        prompt_version,
+        gateway_request: ModelGatewayRequest {
+            capability_id,
+            input: json!({
+                "prompt": {
+                    "id": template.id,
+                    "version": template.version,
+                    "messages": prompt_messages
+                        .iter()
+                        .map(|message| json!({
+                            "role": message.role,
+                            "content": message.content,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "rolelessPrompt": roleless_prompt,
+                },
+                "context": {
+                    "platform": platform,
+                    "productSellingPoints": product_selling_points,
+                },
+            }),
+        },
+    })
+}
+
+fn render_viral_style_prompt_messages(
+    platform: &str,
+    product_selling_points: &str,
+) -> Result<Vec<crate::services::prompt_registry::PromptMessage>, AiAssistError> {
+    let mut messages = render_prompt_for_roles(PromptTemplateId::ViralStyleAnalysis)?;
+    for message in &mut messages {
+        message.content =
+            render_viral_style_variables(&message.content, platform, product_selling_points);
+    }
+    Ok(messages)
+}
+
+fn render_viral_style_roleless_prompt(
+    platform: &str,
+    product_selling_points: &str,
+) -> Result<String, AiAssistError> {
+    Ok(render_viral_style_variables(
+        &render_roleless_prompt(PromptTemplateId::ViralStyleAnalysis)?,
+        platform,
+        product_selling_points,
+    ))
+}
+
+fn render_viral_style_variables(
+    content: &str,
+    platform: &str,
+    product_selling_points: &str,
+) -> String {
+    content
+        .replace("{{platform}}", platform)
+        .replace("{{productSellingPoints}}", product_selling_points)
+}
+
+fn parse_viral_style_analysis_output(output_text: &str) -> Result<Value, AiAssistError> {
+    let data: Value = serde_json::from_str(output_text.trim())
+        .map_err(|_| AiAssistError::Validation("爆款风格分析返回的 JSON 无法解析。".to_string()))?;
+    let items = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AiAssistError::Validation("爆款风格分析返回结构缺少 items。".to_string()))?;
+    if items.len() != 4 {
+        return Err(AiAssistError::Validation(
+            "爆款风格分析需要返回 4 个风格方向。".to_string(),
+        ));
+    }
+    for item in items {
+        if item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+            || item
+                .get("subtitle")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Err(AiAssistError::Validation(
+                "爆款风格分析返回结构缺少标题或副标题。".to_string(),
+            ));
+        }
+        let colors = item
+            .get("colors")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AiAssistError::Validation("爆款风格分析返回结构缺少配色。".to_string())
+            })?;
+        if colors.len() < 2 || colors.len() > 3 {
+            return Err(AiAssistError::Validation(
+                "每个爆款风格需要返回 2-3 个颜色。".to_string(),
+            ));
+        }
+        if colors
+            .iter()
+            .any(|color| !is_hex_color(color.as_str().unwrap_or_default()))
+        {
+            return Err(AiAssistError::Validation(
+                "爆款风格分析颜色必须是 6 位 HEX 色值。".to_string(),
+            ));
+        }
+    }
+    Ok(data)
+}
+
+fn is_hex_color(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 7
+        && value.starts_with('#')
+        && value
+            .as_bytes()
+            .iter()
+            .skip(1)
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone)]

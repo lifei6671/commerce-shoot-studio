@@ -108,7 +108,7 @@ const appTestProviderProfiles = [
     providerLabel: "DeepSeek",
     id: "deepseek",
     protocol: "openai-compatible",
-    supportedCapabilities: ["listing-copy", "prompt-plan"],
+    supportedCapabilities: ["listing-copy", "prompt-plan", "viral-style-analysis"],
     supportedCategories: ["text-to-text"],
   },
 ];
@@ -146,7 +146,7 @@ const appTestModelConfigs = [
   appTestModelConfig("product-selling-points", "OpenAI 商品卖点提取", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("scene-image-generation", "OpenAI 文生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("clothing-tryon-generation", "OpenAI 图生图", "gpt-image-2", "https://api.openai.com/v1/images"),
-  appTestModelConfig("viral-style-analysis", "OpenAI 图生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+  appTestModelConfig("viral-style-analysis", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
 ];
 
 const audioContextInstances: MockAudioContext[] = [];
@@ -293,6 +293,42 @@ describe("App shell", () => {
           capabilityId: "product-selling-points",
           promptId: "product-selling-points",
           text: "1、产品名称：黑色休闲翻领长袖衬衫\n\n2、核心卖点：\n* 卖点 1：黑色翻领长袖版型，简洁百搭。\n* 卖点 2：后背可见图案装饰，增加视觉层次。\n* 卖点 3：偏休闲穿搭，适合日常通勤和街头出行。\n* 卖点 4：需补充。",
+        });
+      }
+      if (command === "ai_assist_viral_style_analysis") {
+        return Promise.resolve({
+          capabilityId: "viral-style-analysis",
+          data: {
+            platform: "淘宝天猫",
+            items: [
+              {
+                id: "style-1",
+                title: "街头潮酷风",
+                subtitle: "放大商品视觉记忆点，适合社媒种草。",
+                colors: ["#0F172A", "#22C55E"],
+              },
+              {
+                id: "style-2",
+                title: "通勤质感风",
+                subtitle: "突出简洁通勤气质，适合详情页表达。",
+                colors: ["#111827", "#F8FAFC", "#2563EB"],
+              },
+              {
+                id: "style-3",
+                title: "简约百搭风",
+                subtitle: "强化搭配效率和基础款价值。",
+                colors: ["#111111", "#FFFFFF"],
+              },
+              {
+                id: "style-4",
+                title: "细节品质风",
+                subtitle: "用细节与工艺感增强信任。",
+                colors: ["#27272A", "#F4F4F5", "#71717A"],
+              },
+            ],
+          },
+          promptId: "viral-style-analysis",
+          text: "",
         });
       }
       return Promise.resolve(undefined);
@@ -1840,15 +1876,51 @@ describe("App shell", () => {
 
   it("runs viral style analysis after product images are uploaded", async () => {
     const user = userEvent.setup();
+    const viralAnalysisResolvers: Array<() => void> = [];
 
-    selectProductImagesMock.mockResolvedValue([
-      {
-        id: "/Users/demo/Pictures/helmet.png",
-        name: "helmet.png",
-        path: "/Users/demo/Pictures/helmet.png",
-        src: "asset://helmet.png",
-      },
-    ]);
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "ai_assist_viral_style_analysis") {
+        return new Promise((resolve) => {
+          viralAnalysisResolvers.push(() =>
+            resolve({
+          capabilityId: "viral-style-analysis",
+          promptId: "viral-style-analysis",
+          data: {
+            platform: "淘宝天猫",
+            items: [
+              {
+                id: "style-1",
+                title: "通勤质感风",
+                subtitle: "突出黑色翻领衬衫的简洁通勤气质，适合天猫详情页表达。",
+                colors: ["#111827", "#F8FAFC"],
+              },
+              {
+                id: "style-2",
+                title: "街头潮酷风",
+                subtitle: "放大后背图案装饰记忆点，适合年轻人群点击。",
+                colors: ["#0F172A", "#EF4444"],
+              },
+              {
+                id: "style-3",
+                title: "简约百搭风",
+                subtitle: "强化黑色单品的搭配效率，适合详情页快速理解。",
+                colors: ["#111111", "#FFFFFF"],
+              },
+              {
+                id: "style-4",
+                title: "细节品质风",
+                subtitle: "用细节图与质感表达承接核心卖点，增强购买信任。",
+                colors: ["#27272A", "#F4F4F5", "#71717A"],
+              },
+            ],
+          },
+          text: JSON.stringify(args),
+            }),
+          );
+        });
+      }
+      return Promise.resolve(undefined);
+    });
 
     renderApp();
 
@@ -1864,36 +1936,37 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "上传图片" }));
-
-    expect(await screen.findByAltText("helmet.png")).toBeInTheDocument();
+    await user.type(
+      screen.getByPlaceholderText(/建议包含以下信息生成更精准/),
+      "黑色翻领长袖版型，后背图案装饰，适合日常通勤。",
+    );
     expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeEnabled();
 
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+    await user.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
 
     expect(screen.getByText("正在分析爆款风格...")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1800);
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_viral_style_analysis", {
+      input: {
+        platform: "淘宝天猫",
+        productSellingPoints: "黑色翻领长袖版型，后背图案装饰，适合日常通勤。",
+      },
     });
-    vi.useRealTimers();
 
-    expect(screen.getByRole("checkbox", { name: "街头潮酷风" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "通勤质感风" })).toBeInTheDocument();
+    act(() => viralAnalysisResolvers.shift()?.());
+    expect(await screen.findByRole("checkbox", { name: "通勤质感风" })).toBeInTheDocument();
+    expect(screen.queryByText("高级黑白")).not.toBeInTheDocument();
+    expect(screen.queryByText("突出服装版型、面料质感和通勤搭配场景。")).not.toBeInTheDocument();
+    expect(screen.queryByText("突出黑色翻领衬衫的简洁通勤气质，适合天猫详情页表达。")).not.toBeInTheDocument();
+    expect(screen.getByText("突出黑色翻领衬衫的简洁通勤气质")).toBeInTheDocument();
+    expect(screen.getAllByTestId("viral-style-color-dot")).toHaveLength(9);
+    expect(screen.getAllByTestId("viral-style-color-row")[0]).toHaveClass("mt-auto");
     expect(screen.getByRole("button", { name: "换一批风格" })).toBeInTheDocument();
 
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "换一批风格" }));
+    await user.click(screen.getByRole("button", { name: "换一批风格" }));
 
     expect(screen.getByText("正在分析爆款风格...")).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(1800);
-    });
-    vi.useRealTimers();
-
-    expect(screen.getByRole("checkbox", { name: "轻奢极简风" })).toBeInTheDocument();
+    act(() => viralAnalysisResolvers.shift()?.());
+    expect(await screen.findByRole("checkbox", { name: "通勤质感风" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "商品上架文案生成" }));
 
@@ -1905,6 +1978,32 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "爆款风格分析" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "商品上架文案生成" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeEnabled();
+  });
+
+  it("returns viral style analysis to the start state after model failure", async () => {
+    const user = userEvent.setup();
+    let rejectViralAnalysis: ((error: Error) => void) | undefined;
+
+    invokeMock.mockImplementation((command) => {
+      if (command === "ai_assist_viral_style_analysis") {
+        return new Promise((_, reject) => {
+          rejectViralAnalysis = reject;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "爆款风格分析" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "黑色翻领衬衫，通勤穿搭。");
+    await user.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+
+    expect(screen.getByText("正在分析爆款风格...")).toBeInTheDocument();
+    act(() => rejectViralAnalysis?.(new Error("没有可用模型")));
+    expect(await screen.findByText("没有可用模型")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始爆款风格分析" })).toBeEnabled();
+    expect(screen.queryByText("正在分析爆款风格...")).not.toBeInTheDocument();
   });
 
   it("groups generated product results by selected viral styles with a source image card", async () => {
@@ -1934,13 +2033,8 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "商品上架文案生成" }));
     await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "红黑潮玩摆件，电竞桌搭，适合社媒种草。");
 
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
-
-    act(() => {
-      vi.advanceTimersByTime(1800);
-    });
-    vi.useRealTimers();
+    await user.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+    await screen.findByRole("checkbox", { name: "街头潮酷风" });
 
     await user.click(screen.getByRole("checkbox", { name: "街头潮酷风" }));
     await user.click(screen.getByRole("checkbox", { name: "通勤质感风" }));
