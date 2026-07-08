@@ -27,6 +27,7 @@ pub struct CreateGenerationTaskInput {
     pub title: String,
     pub prompt_plan_id: Option<String>,
     pub input: Option<serde_json::Value>,
+    pub prompt_plan_snapshot: Option<serde_json::Value>,
     #[serde(default)]
     pub input_assets: Vec<GenerationTaskInputAssetInput>,
 }
@@ -95,13 +96,14 @@ impl GenerationService {
 
         let task_id = create_task_id();
         let input_json = serialize_optional_json(input.input)?;
+        let prompt_plan_snapshot_json = serialize_optional_json(input.prompt_plan_snapshot)?;
         database.connection().execute(
             "
             INSERT INTO generation_tasks (
                 id, attempt_no, idempotency_key, workspace, kind, status, stage,
-                title, prompt_plan_id, input_json
+                title, prompt_plan_id, input_json, prompt_plan_snapshot_json
             )
-            VALUES (?1, 1, ?2, ?3, ?4, 'queued', 'queued', ?5, ?6, ?7)
+            VALUES (?1, 1, ?2, ?3, ?4, 'queued', 'queued', ?5, ?6, ?7, ?8)
             ",
             params![
                 task_id,
@@ -110,7 +112,8 @@ impl GenerationService {
                 input.kind.as_str(),
                 input.title,
                 input.prompt_plan_id,
-                input_json
+                input_json,
+                prompt_plan_snapshot_json
             ],
         )?;
         for input_asset in &input.input_assets {
@@ -261,6 +264,13 @@ impl GenerationService {
             .ok_or_else(|| GenerationError::NotFound(task_id.to_string()))?;
 
         Ok(GenerationTaskDetail {
+            input: task_detail_json(&database, task_id, "input_json")?,
+            prompt_plan_snapshot: task_detail_json(
+                &database,
+                task_id,
+                "prompt_plan_snapshot_json",
+            )?,
+            output: task_detail_json(&database, task_id, "output_json")?,
             input_assets: list_task_assets(&database, task_id, TaskAssetTable::Input)?,
             output_assets: list_task_assets(&database, task_id, TaskAssetTable::Output)?,
             events: list_task_events(&database, task_id)?,
@@ -459,6 +469,32 @@ fn list_task_events(
     }
 
     Ok(events)
+}
+
+fn task_detail_json(
+    database: &WorkspaceDatabase,
+    task_id: &str,
+    column_name: &str,
+) -> Result<Option<serde_json::Value>, GenerationError> {
+    let sql = match column_name {
+        "input_json" => "SELECT input_json FROM generation_tasks WHERE id = ?1",
+        "prompt_plan_snapshot_json" => {
+            "SELECT prompt_plan_snapshot_json FROM generation_tasks WHERE id = ?1"
+        }
+        "output_json" => "SELECT output_json FROM generation_tasks WHERE id = ?1",
+        _ => {
+            return Err(GenerationError::Validation(
+                "不支持的任务 JSON 字段。".to_string(),
+            ))
+        }
+    };
+    let raw: Option<String> = database
+        .connection()
+        .query_row(sql, params![task_id], |row| row.get(0))?;
+
+    raw.map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(GenerationError::from)
 }
 
 fn link_input_asset(

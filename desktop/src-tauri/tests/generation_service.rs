@@ -13,6 +13,7 @@ use commerce_shoot_studio_lib::services::generation::{
     GenerationTaskQuery, RetryGenerationTaskInput,
 };
 use commerce_shoot_studio_lib::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
+use serde_json::json;
 
 #[test]
 fn create_task_reuses_existing_non_failed_task_for_same_idempotency_key() {
@@ -305,6 +306,113 @@ fn get_task_detail_returns_assets_outputs_and_events() {
     remove_workspace(&workspace_dir);
 }
 
+#[test]
+fn task_detail_returns_persisted_generation_prompts_for_later_image_edits() {
+    let workspace_dir = initialized_workspace("task-detail-prompts");
+    let service = GenerationService::new();
+    let input = json!({
+        "kind": "product-detail-generation",
+        "items": [
+            {
+                "imageId": "scenario",
+                "title": "使用场景图",
+                "sceneDescription": "画面以儿童骑行头盔为主体，右侧预留卖点信息区。",
+                "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止生成品牌 Logo、价格、销量、认证标识。"
+            }
+        ]
+    });
+    let snapshot = json!({
+        "planId": "local-product-plan",
+        "workspace": "product",
+        "items": [
+            {
+                "id": "scenario",
+                "title": "使用场景图",
+                "intent": {
+                    "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止生成品牌 Logo、价格、销量、认证标识。"
+                }
+            }
+        ]
+    });
+
+    let task = service
+        .create_task(
+            &workspace_dir,
+            CreateGenerationTaskInput {
+                idempotency_key: Some("detail-prompt-click-1".to_string()),
+                workspace: WorkspaceKind::Product,
+                kind: GenerationTaskKind::ImageGeneration,
+                title: "商品详情图".to_string(),
+                prompt_plan_id: Some("local-product-plan".to_string()),
+                input: Some(input.clone()),
+                prompt_plan_snapshot: Some(snapshot.clone()),
+                input_assets: Vec::new(),
+            },
+        )
+        .expect("task should create");
+
+    let detail = service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+
+    assert_eq!(detail.input, Some(input));
+    assert_eq!(detail.prompt_plan_snapshot, Some(snapshot));
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn listing_copy_task_detail_returns_persisted_output_json_for_history() {
+    let workspace_dir = initialized_workspace("task-detail-listing-copy-output");
+    let service = GenerationService::new();
+    let task = service
+        .create_task(
+            &workspace_dir,
+            CreateGenerationTaskInput {
+                idempotency_key: Some("listing-copy-click-1".to_string()),
+                workspace: WorkspaceKind::Product,
+                kind: GenerationTaskKind::ListingCopy,
+                title: "商品上架文案".to_string(),
+                prompt_plan_id: Some("local-product-plan".to_string()),
+                input: Some(json!({
+                    "platform": "taobao",
+                    "productSellingPoints": "藏青运动风字母印花圆领短袖T恤"
+                })),
+                prompt_plan_snapshot: None,
+                input_assets: Vec::new(),
+            },
+        )
+        .expect("listing copy task should create");
+    let output = json!({
+        "platform": "taobao",
+        "title": "藏青运动风字母印花圆领短袖T恤",
+        "sellingPoints": ["运动风印花", "圆领短袖版型"],
+        "promotionBenefits": ["清爽休闲", "日常好搭"],
+        "detailCopy": "适合日常通勤与户外休闲穿搭。",
+        "searchKeywords": ["藏青T恤", "运动风T恤"],
+        "attributeWords": ["藏青色", "圆领", "短袖"],
+        "mainImageGuidance": ["首图突出上身效果", "细节图放大胸口印花"]
+    });
+    let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+    database
+        .connection()
+        .execute(
+            "UPDATE generation_tasks SET output_json = ?1 WHERE id = ?2",
+            (&output.to_string(), &task.id),
+        )
+        .expect("persist output");
+
+    let detail = service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+
+    assert_eq!(detail.task.kind, GenerationTaskKind::ListingCopy);
+    assert_eq!(detail.output, Some(output));
+    assert!(detail.output_assets.is_empty());
+
+    remove_workspace(&workspace_dir);
+}
+
 fn create_input(idempotency_key: &str) -> CreateGenerationTaskInput {
     CreateGenerationTaskInput {
         idempotency_key: Some(idempotency_key.to_string()),
@@ -313,6 +421,7 @@ fn create_input(idempotency_key: &str) -> CreateGenerationTaskInput {
         title: "场景图任务".to_string(),
         prompt_plan_id: None,
         input: None,
+        prompt_plan_snapshot: None,
         input_assets: Vec::new(),
     }
 }

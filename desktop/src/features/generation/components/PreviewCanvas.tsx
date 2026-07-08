@@ -34,6 +34,17 @@ export type PreviewBoard = {
 type PreviewCanvasProps = {
   boards: PreviewBoard[];
   detailImages?: GeneratedDetailImage[];
+  onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
+  onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+};
+
+export type GeneratedReferenceImage = {
+  assetId?: string;
+  dataUrl?: string;
+  mimeType?: string;
+  originalName?: string;
+  src?: string;
 };
 
 export type GeneratedDetailImage = {
@@ -41,10 +52,16 @@ export type GeneratedDetailImage = {
   groupId?: string;
   groupTitle?: string;
   id: string;
+  imageNo?: number;
+  assetId?: string;
+  assetLocalPath?: string;
+  assetRelativePath?: string;
   kind?: "image" | "listing-copy" | "source-image";
   listingCopy?: ProductListingCopy;
   prompt?: string;
   ratio?: string;
+  referenceImages?: GeneratedReferenceImage[];
+  sceneDescription?: string;
   sourceImages?: ProductImageAsset[];
   src?: string;
   status: "generating" | "complete" | "failed";
@@ -60,9 +77,22 @@ export type ProductListingCopy = {
   title: string;
 };
 
-export function PreviewCanvas({ boards, detailImages = [] }: PreviewCanvasProps) {
+export function PreviewCanvas({
+  boards,
+  detailImages = [],
+  onImageRewrite,
+  onImageRetry,
+  onListingCopyRetry,
+}: PreviewCanvasProps) {
   if (detailImages.length > 0) {
-    return <GeneratedDetailCanvas detailImages={detailImages} />;
+    return (
+      <GeneratedDetailCanvas
+        detailImages={detailImages}
+        onImageRewrite={onImageRewrite}
+        onImageRetry={onImageRetry}
+        onListingCopyRetry={onListingCopyRetry}
+      />
+    );
   }
 
   return (
@@ -110,7 +140,17 @@ export function PreviewCanvas({ boards, detailImages = [] }: PreviewCanvasProps)
   );
 }
 
-function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetailImage[] }) {
+function GeneratedDetailCanvas({
+  detailImages,
+  onImageRewrite,
+  onImageRetry,
+  onListingCopyRetry,
+}: {
+  detailImages: GeneratedDetailImage[];
+  onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
+  onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+}) {
   const [removedImageIds, setRemovedImageIds] = useState<Set<string>>(() => new Set());
   const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(() => new Set());
   const [regeneratingImageIds, setRegeneratingImageIds] = useState<Set<string>>(() => new Set());
@@ -237,7 +277,7 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     setImageRewritePrompt("");
   }
 
-  function regenerateImageById(targetId: string) {
+  function markImageRegenerating(targetId: string) {
     setRegeneratingImageIds((currentIds) => new Set([...currentIds, targetId]));
     setSelectedImageIds((currentIds) => {
       const nextIds = new Set(currentIds);
@@ -247,7 +287,10 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     if (previewImageId === targetId) {
       closeImagePreview();
     }
+  }
 
+  function regenerateImageById(targetId: string) {
+    markImageRegenerating(targetId);
     window.setTimeout(() => {
       setRegeneratingImageIds((currentIds) => {
         const nextIds = new Set(currentIds);
@@ -257,13 +300,67 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
     }, 3000);
   }
 
-  function regenerateImage() {
+  async function retryImage(image: GeneratedDetailImage) {
+    if (onImageRetry) {
+      markImageRegenerating(image.id);
+      try {
+        await onImageRetry(image);
+      } finally {
+        setRegeneratingImageIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          nextIds.delete(image.id);
+          return nextIds;
+        });
+      }
+      return;
+    }
+
+    regenerateImageById(image.id);
+  }
+
+  async function retryListingCopy(image: GeneratedDetailImage) {
+    if (!onListingCopyRetry) {
+      regenerateImageById(image.id);
+      return;
+    }
+
+    markImageRegenerating(image.id);
+    try {
+      await onListingCopyRetry(image);
+    } finally {
+      setRegeneratingImageIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(image.id);
+        return nextIds;
+      });
+    }
+  }
+
+  async function regenerateImage() {
     if (!imageRewriteTargetId) {
       return;
     }
 
-    regenerateImageById(imageRewriteTargetId);
+    const targetId = imageRewriteTargetId;
+    const target = imageRewriteTarget;
+    const instruction = imageRewritePrompt.trim();
     closeImageRewriteDialog();
+
+    if (target && onImageRewrite) {
+      markImageRegenerating(target.id);
+      try {
+        await onImageRewrite(target, instruction);
+      } finally {
+        setRegeneratingImageIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          nextIds.delete(target.id);
+          return nextIds;
+        });
+      }
+      return;
+    }
+
+    regenerateImageById(targetId);
   }
 
   function openTextEditDialog(image: GeneratedDetailImage) {
@@ -397,19 +494,6 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
       return <GeneratedSourceImageCard image={image} key={image.id} />;
     }
 
-    if (image.status === "failed") {
-      return (
-        <GeneratedFailedResultCard
-          image={image}
-          key={image.id}
-          onDelete={() => deleteImageById(image.id)}
-          onRetry={() => regenerateImageById(image.id)}
-          onSelect={(selected) => toggleImageSelection(image.id, selected)}
-          selected={selectedImageIds.has(image.id)}
-        />
-      );
-    }
-
     if (image.kind === "listing-copy") {
       return (
         <GeneratedListingCopyCard
@@ -417,6 +501,20 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
           key={image.id}
           onCopy={(copy) => void copyProductListingCopy(copy)}
           onOpen={() => openListingCopyDialog(image)}
+          onRetry={() => void retryListingCopy(image)}
+        />
+      );
+    }
+
+    if (image.status === "failed") {
+      return (
+        <GeneratedFailedResultCard
+          image={image}
+          key={image.id}
+          onDelete={() => deleteImageById(image.id)}
+          onRetry={() => void retryImage(image)}
+          onSelect={(selected) => toggleImageSelection(image.id, selected)}
+          selected={selectedImageIds.has(image.id)}
         />
       );
     }
@@ -809,11 +907,19 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                       <div
                         className={cn(
                           "relative aspect-[970/600] w-full overflow-hidden",
-                          generatedImageBackgrounds[index % generatedImageBackgrounds.length],
+                          image.src ? "bg-slate-100" : generatedImageBackgrounds[index % generatedImageBackgrounds.length],
                         )}
                         data-testid="long-preview-image-section"
                         key={image.id}
                       >
+                        {image.src ? (
+                          <img
+                            alt={`长图 ${image.title}`}
+                            className="absolute inset-0 h-full w-full object-cover"
+                            draggable={false}
+                            src={image.src}
+                          />
+                        ) : null}
                         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
                       </div>
                     ))}
@@ -881,8 +987,10 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                 <div
                   aria-label={`预览 ${previewImage.title}`}
                   className={cn(
-                    "h-[68vh] w-[min(68vh,70vw)] origin-center rounded-[14px] shadow-[0_24px_80px_rgba(0,0,0,0.36)] transition-transform duration-200",
-                    generatedImageBackgrounds[Math.max(previewImageIndex, 0) % generatedImageBackgrounds.length],
+                    "relative h-[68vh] w-[min(68vh,70vw)] origin-center overflow-hidden rounded-[14px] shadow-[0_24px_80px_rgba(0,0,0,0.36)] transition-transform duration-200",
+                    previewImage.src
+                      ? "bg-slate-100"
+                      : generatedImageBackgrounds[Math.max(previewImageIndex, 0) % generatedImageBackgrounds.length],
                   )}
                   onWheel={(event) => {
                     event.preventDefault();
@@ -890,7 +998,15 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                   }}
                   style={{ transform: `scale(${previewZoom})` }}
                 >
-                  <div className="h-full w-full rounded-[14px] bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
+                  {previewImage.src ? (
+                    <img
+                      alt={previewImage.title}
+                      className="absolute inset-0 h-full w-full object-contain"
+                      draggable={false}
+                      src={previewImage.src}
+                    />
+                  ) : null}
+                  <div className="absolute inset-0 rounded-[14px] bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
                 </div>
                 <div className="rounded-full bg-black/32 px-4 py-2 text-sm font-medium text-white backdrop-blur-md">
                   {previewImage.title}
@@ -922,9 +1038,18 @@ function GeneratedDetailCanvas({ detailImages }: { detailImages: GeneratedDetail
                     }}
                     type="button"
                   >
-                    <span
-                      className={cn("block h-full w-full", generatedImageBackgrounds[index % generatedImageBackgrounds.length])}
-                    />
+                    {image.src ? (
+                      <img
+                        alt={`缩略图 ${image.title}`}
+                        className="block h-full w-full object-cover"
+                        draggable={false}
+                        src={image.src}
+                      />
+                    ) : (
+                      <span
+                        className={cn("block h-full w-full", generatedImageBackgrounds[index % generatedImageBackgrounds.length])}
+                      />
+                    )}
                   </button>
                 ))}
               </div>
@@ -950,7 +1075,7 @@ function GeneratedSourceImageCard({ image }: { image: GeneratedDetailImage }) {
       className="relative aspect-square overflow-hidden rounded-[8px] border-2 border-white/80 bg-slate-100 shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
       data-testid="generated-source-image-card"
     >
-      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-black/64 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/85 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
         原图
       </div>
       {sourceImages.length > 0 ? (
@@ -976,12 +1101,15 @@ function GeneratedListingCopyCard({
   image,
   onCopy,
   onOpen,
+  onRetry,
 }: {
   image: GeneratedDetailImage;
   onCopy: (copy: ProductListingCopy) => void;
   onOpen: () => void;
+  onRetry: () => void;
 }) {
   const complete = image.status === "complete";
+  const failed = image.status === "failed";
   const copy = image.listingCopy;
 
   return (
@@ -1022,6 +1150,27 @@ function GeneratedListingCopyCard({
             <ListingCopyPreviewSection title="搜索关键词/属性词" value={copy.keywords} />
           </div>
         </div>
+      ) : failed ? (
+        <div className="absolute inset-0 flex flex-col bg-white p-4 text-left">
+          <span className="w-fit rounded-[6px] bg-blue-50 px-1.5 py-1 text-[12px] font-medium leading-none text-app-blue">
+            商品上架文案
+          </span>
+          <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
+            <div className="grid size-11 place-items-center rounded-full border-[3px] border-slate-500/70 text-[28px] font-semibold leading-none text-slate-500/80">
+              !
+            </div>
+            <h2 className="mt-4 text-[15px] font-medium text-slate-500">生成失败</h2>
+            {image.errorMessage ? <p className="mt-2 line-clamp-2 text-[12px] leading-5 text-slate-400">{image.errorMessage}</p> : null}
+          </div>
+          <button
+            aria-label="重新生成商品上架文案"
+            className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
+            onClick={onRetry}
+            type="button"
+          >
+            重新生成
+          </button>
+        </div>
       ) : (
         <div className="absolute inset-0 grid place-items-center bg-[linear-gradient(135deg,#eef2f7,#e2e8f0)] text-slate-500">
           <div className="flex flex-col items-center gap-3">
@@ -1060,6 +1209,8 @@ function GeneratedFailedResultCard({
   onSelect: (selected: boolean) => void;
   selected: boolean;
 }) {
+  const failedTitle = image.errorMessage === "生成中断" ? "生成中断" : "生成失败";
+
   return (
     <article
       className={cn(
@@ -1086,7 +1237,7 @@ function GeneratedFailedResultCard({
         <div className="grid size-11 place-items-center rounded-full border-[3px] border-slate-500/70 text-[28px] font-semibold leading-none text-slate-500/80">
           !
         </div>
-        <h2 className="mt-4 text-[15px] font-medium text-slate-500">生成失败</h2>
+        <h2 className="mt-4 text-[15px] font-medium text-slate-500">{failedTitle}</h2>
       </div>
       <div className="absolute inset-x-2.5 bottom-2.5 translate-y-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100">
         <button
@@ -1226,6 +1377,7 @@ function GeneratedDetailImageCard({
         complete ? "cursor-zoom-in" : "cursor-default",
         selected ? "border-2 border-slate-950" : "border-2 border-white/80",
       )}
+      data-prompt={image.prompt}
       data-testid="generated-detail-image-card"
       onClick={() => {
         if (complete) {
@@ -1236,11 +1388,19 @@ function GeneratedDetailImageCard({
       <div
         className={cn(
           "absolute inset-0",
-          complete
+          complete && !image.src
             ? generatedImageBackgrounds[index % generatedImageBackgrounds.length]
             : "bg-[linear-gradient(135deg,#eef2f7,#e2e8f0)]",
         )}
       />
+      {complete && image.src ? (
+        <img
+          alt={image.title}
+          className="absolute inset-0 h-full w-full object-cover"
+          draggable={false}
+          src={image.src}
+        />
+      ) : null}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
 
       {complete ? (

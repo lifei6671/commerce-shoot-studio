@@ -44,7 +44,7 @@ const BASELINE_MIGRATIONS: &[Migration] = &[Migration::new(
         attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
         idempotency_key TEXT,
         workspace TEXT NOT NULL CHECK (workspace IN ('product', 'clothing', 'scene')),
-        kind TEXT NOT NULL CHECK (kind IN ('prompt-plan', 'image-generation', 'image-edit')),
+        kind TEXT NOT NULL CHECK (kind IN ('prompt-plan', 'image-generation', 'image-edit', 'listing-copy')),
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
         stage TEXT NOT NULL CHECK (stage IN ('queued', 'validating', 'rendering-prompt', 'calling-provider', 'polling-provider', 'downloading-result', 'saving-result', 'completed', 'failed')),
         title TEXT NOT NULL,
@@ -52,6 +52,7 @@ const BASELINE_MIGRATIONS: &[Migration] = &[Migration::new(
         prompt_plan_id TEXT,
         input_json TEXT,
         prompt_plan_snapshot_json TEXT,
+        output_json TEXT,
         resolved_prompt_hash TEXT,
         error_json TEXT,
         hidden_at TEXT,
@@ -314,7 +315,110 @@ fn repair_baseline_schema(
     // 交付前 baseline schema 会持续补表。开发期旧 workspace 已记录 migration 1 时，
     // 仍需要重放 IF NOT EXISTS 语句来补齐新增表，避免要求用户手动删库。
     connection.execute_batch(migration.sql)?;
+    repair_generation_tasks_listing_copy_schema(connection)?;
     repair_model_secrets_version_column(connection)?;
+    Ok(())
+}
+
+fn repair_generation_tasks_listing_copy_schema(
+    connection: &Connection,
+) -> Result<(), DatabaseError> {
+    let task_table_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'",
+        [],
+        |row| row.get(0),
+    )?;
+    if task_table_count == 0 {
+        return Ok(());
+    }
+
+    let output_column_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('generation_tasks') WHERE name = 'output_json'",
+        [],
+        |row| row.get(0),
+    )?;
+    if output_column_count == 0 {
+        connection.execute_batch("ALTER TABLE generation_tasks ADD COLUMN output_json TEXT;")?;
+    }
+
+    let create_sql: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !create_sql.contains("'listing-copy'") {
+        rebuild_generation_tasks_table(connection)?;
+    }
+
+    Ok(())
+}
+
+fn rebuild_generation_tasks_table(connection: &Connection) -> Result<(), DatabaseError> {
+    connection.execute_batch(
+        "
+        PRAGMA foreign_keys = OFF;
+        PRAGMA legacy_alter_table = ON;
+
+        DROP INDEX IF EXISTS idx_generation_tasks_idempotency_key;
+        DROP INDEX IF EXISTS idx_generation_tasks_workspace_created_at;
+        DROP INDEX IF EXISTS idx_generation_tasks_status_created_at;
+        DROP INDEX IF EXISTS idx_generation_tasks_hidden_at;
+
+        ALTER TABLE generation_tasks RENAME TO generation_tasks_old;
+
+        CREATE TABLE generation_tasks (
+            id TEXT PRIMARY KEY,
+            retry_of_task_id TEXT,
+            attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
+            idempotency_key TEXT,
+            workspace TEXT NOT NULL CHECK (workspace IN ('product', 'clothing', 'scene')),
+            kind TEXT NOT NULL CHECK (kind IN ('prompt-plan', 'image-generation', 'image-edit', 'listing-copy')),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+            stage TEXT NOT NULL CHECK (stage IN ('queued', 'validating', 'rendering-prompt', 'calling-provider', 'polling-provider', 'downloading-result', 'saving-result', 'completed', 'failed')),
+            title TEXT NOT NULL,
+            input_summary TEXT,
+            prompt_plan_id TEXT,
+            input_json TEXT,
+            prompt_plan_snapshot_json TEXT,
+            output_json TEXT,
+            resolved_prompt_hash TEXT,
+            error_json TEXT,
+            hidden_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT,
+            FOREIGN KEY (retry_of_task_id) REFERENCES generation_tasks(id) ON DELETE SET NULL
+        );
+
+        INSERT INTO generation_tasks (
+            id, retry_of_task_id, attempt_no, idempotency_key, workspace, kind,
+            status, stage, title, input_summary, prompt_plan_id, input_json,
+            prompt_plan_snapshot_json, output_json, resolved_prompt_hash, error_json,
+            hidden_at, created_at, updated_at, completed_at
+        )
+        SELECT
+            id, retry_of_task_id, attempt_no, idempotency_key, workspace, kind,
+            status, stage, title, input_summary, prompt_plan_id, input_json,
+            prompt_plan_snapshot_json, output_json, resolved_prompt_hash, error_json,
+            hidden_at, created_at, updated_at, completed_at
+        FROM generation_tasks_old;
+
+        DROP TABLE generation_tasks_old;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_tasks_idempotency_key
+            ON generation_tasks(idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_generation_tasks_workspace_created_at
+            ON generation_tasks(workspace, created_at);
+        CREATE INDEX IF NOT EXISTS idx_generation_tasks_status_created_at
+            ON generation_tasks(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_generation_tasks_hidden_at
+            ON generation_tasks(hidden_at);
+
+        PRAGMA foreign_keys = ON;
+        PRAGMA legacy_alter_table = OFF;
+        ",
+    )?;
     Ok(())
 }
 

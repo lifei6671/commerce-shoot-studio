@@ -4,6 +4,7 @@ import type {
   GenerationTaskDetail,
   GenerationTaskPage,
   GenerationTaskQuery,
+  LocalTaskExecutionResult,
   RetryGenerationTaskInput,
 } from "../types";
 
@@ -15,4 +16,6 @@ export interface GenerationPort {
   getTask(taskId: string): Promise<GenerationTask>;
   getTaskDetail(taskId: string): Promise<GenerationTaskDetail>;
   listTasks(query?: GenerationTaskQuery): Promise<GenerationTaskPage>;
+  runNext(): Promise<LocalTaskExecutionResult | null>;
+  runTask(taskId: string): Promise<LocalTaskExecutionResult | null>;
 }

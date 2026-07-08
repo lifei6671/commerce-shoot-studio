@@ -9,8 +9,9 @@ import { SelectPill } from "../../../shared/ui/select-pill";
 import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
-import type { AiAssistPort } from "../../../runtime";
+import type { AiAssistPort, PromptPlan, PromptPlanItem, PromptPlanPort } from "../../../runtime";
 import { localAiAssistPort } from "../../../runtime/local/ai-assist";
+import { localPromptPlanPort } from "../../../runtime/local/prompt-plan";
 import { useToast } from "../../../shared/ui/toast";
 import {
   type ProductImageAsset,
@@ -40,11 +41,11 @@ type GenerationConfigPanelProps = {
   onViralStylesChange?: (styles: ViralStyleAnalysisResult[]) => void;
   productImages: ProductImageAsset[];
   productPrompt: string;
+  promptPlanPort?: PromptPlanPort;
   strategyDrafting: boolean;
 };
 
 const maxProductImageCount = 3;
-const strategyDraftDelayMs = 2500;
 const aiWritingDisclaimerAcceptedStorageKey = "commerce-shoot-studio.ai-writing-disclaimer.accepted.v1";
 const aiWritingDisclaimerTitle = "图片上传与使用免责声明";
 const aiWritingDisclaimerParagraphs = [
@@ -142,6 +143,7 @@ export function GenerationConfigPanel({
   onViralStylesChange,
   productImages,
   productPrompt,
+  promptPlanPort = localPromptPlanPort,
   strategyDrafting,
 }: GenerationConfigPanelProps) {
   const { showToast } = useToast();
@@ -156,6 +158,12 @@ export function GenerationConfigPanel({
   const [viralStyles, setViralStyles] = useState<ViralStyleAnalysisResult[]>([]);
   const [selectedViralStyleTitles, setSelectedViralStyleTitles] = useState<Set<string>>(() => new Set());
   const [viralStyleStatus, setViralStyleStatus] = useState<"idle" | "loading" | "ready">("idle");
+  const [generatedPromptPlan, setGeneratedPromptPlan] = useState<PromptPlan | null>(null);
+  const [cachedPromptPlan, setCachedPromptPlan] = useState<{
+    cacheKey: string;
+    plan: PromptPlan;
+  } | null>(null);
+  const [strategyPlanning, setStrategyPlanning] = useState(false);
   const selectedViralStyles = useMemo(
     () =>
       generationSettings.viralStyleAnalysisEnabled
@@ -164,6 +172,8 @@ export function GenerationConfigPanel({
     [generationSettings.viralStyleAnalysisEnabled, selectedViralStyleTitles, viralStyles],
   );
   const generationReady = hasProductImages && hasProductPrompt && hasSelectedModules;
+  const generationBlocked = strategyPlanning || viralStyleStatus === "loading";
+  const generationActionReady = generationReady && !generationBlocked;
   const generationCtaLabel = !hasProductImages
     ? "请上传产品图"
     : !hasProductPrompt
@@ -319,6 +329,52 @@ export function GenerationConfigPanel({
     void startViralStyleAnalysis();
   }
 
+  function handleGenerateStrategyClick() {
+    if (!generationReady || generationBlocked) {
+      return;
+    }
+
+    const promptPlanIntent = createProductDetailPromptPlanIntent(
+      modules,
+      generationSettings,
+      productPrompt,
+      selectedViralStyles,
+    );
+    const promptPlanCacheKey = createProductDetailPromptPlanCacheKey(
+      modules,
+      generationSettings,
+      productImages,
+      productPrompt,
+      selectedViralStyles,
+    );
+    if (cachedPromptPlan?.cacheKey === promptPlanCacheKey) {
+      setGeneratedPromptPlan(cachedPromptPlan.plan);
+      onGenerateStrategy();
+      return;
+    }
+
+    setGeneratedPromptPlan(null);
+    setStrategyPlanning(true);
+    onGenerateStrategy();
+
+    void promptPlanPort
+      .createPlan({
+        workspace: "product",
+        intent: promptPlanIntent,
+      })
+      .then((plan) => {
+        validateProductDetailPromptPlan(plan, modules, selectedViralStyles);
+        setCachedPromptPlan({ cacheKey: promptPlanCacheKey, plan });
+        setGeneratedPromptPlan(plan);
+      })
+      .catch((error) => {
+        setGeneratedPromptPlan(null);
+        showToast({ message: promptPlanErrorMessage(error), variant: "error" });
+        onBackToProductInputs();
+      })
+      .finally(() => setStrategyPlanning(false));
+  }
+
   useEffect(() => {
     onViralStylesChange?.(selectedViralStyles);
   }, [onViralStylesChange, selectedViralStyles]);
@@ -331,8 +387,10 @@ export function GenerationConfigPanel({
         modules={modules}
         onBack={onBackToProductInputs}
         onGenerateDetails={onGenerateDetails}
-        productPrompt={productPrompt}
-        selectedViralStyleCount={selectedViralStyles.length}
+        onDraftChanged={() => setCachedPromptPlan(null)}
+        promptPlan={generatedPromptPlan}
+        promptPlanLoading={strategyPlanning}
+        selectedViralStyles={selectedViralStyles}
       />
     );
   }
@@ -527,15 +585,15 @@ export function GenerationConfigPanel({
         <Button
           className={cn(
             "h-10 w-full justify-center rounded-control border font-semibold",
-            generationReady
+            generationActionReady
               ? "border-slate-950/10 bg-[linear-gradient(180deg,#111827,#071022)] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_24px_rgba(15,23,42,0.22)] hover:bg-[linear-gradient(180deg,#172033,#0b1220)]"
               : "cursor-not-allowed border-slate-300 bg-slate-300 text-slate-700 shadow-none hover:bg-slate-300 hover:shadow-none",
           )}
-          disabled={!generationReady}
-          onClick={onGenerateStrategy}
+          disabled={!generationActionReady}
+          onClick={handleGenerateStrategyClick}
           type="button"
         >
-          {generationCtaLabel}
+          {strategyPlanning ? "生成中..." : generationCtaLabel}
         </Button>
       </div>
     </aside>
@@ -576,6 +634,16 @@ function aiWritingErrorMessage(error: unknown) {
     return error;
   }
   return "AI 帮写失败，请检查模型配置后重试";
+}
+
+function promptPlanErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return "场景描述生成失败，将使用本地草稿继续";
 }
 
 function normalizeViralStyleAnalysisResult(data: unknown): ViralStyleAnalysisResult[] {
@@ -876,9 +944,18 @@ function ProductExtraFeatureSwitch({
 
 export type StrategyModuleDraft = {
   content: string;
+  contentEdited?: boolean;
   description: string;
   id: string;
+  promptPlanItems?: StrategyModulePromptPlanItem[];
   title: string;
+};
+
+export type StrategyModulePromptPlanItem = {
+  imagePrompt: string;
+  sceneDescription: string;
+  styleId?: string;
+  styleTitle?: string;
 };
 
 type StrategyModuleDragPreview = {
@@ -898,9 +975,11 @@ type ProductStrategyDraftingPanelProps = {
   generationSettings: ProductGenerationSettings;
   modules: ModuleOption[];
   onBack: () => void;
+  onDraftChanged: () => void;
   onGenerateDetails: (drafts: StrategyModuleDraft[]) => void;
-  productPrompt: string;
-  selectedViralStyleCount: number;
+  promptPlan?: PromptPlan | null;
+  promptPlanLoading: boolean;
+  selectedViralStyles: ViralStyleAnalysisResult[];
 };
 
 function ProductStrategyDraftingPanel({
@@ -908,28 +987,38 @@ function ProductStrategyDraftingPanel({
   generationSettings,
   modules,
   onBack,
+  onDraftChanged,
   onGenerateDetails,
-  productPrompt,
-  selectedViralStyleCount,
+  promptPlan,
+  promptPlanLoading,
+  selectedViralStyles,
 }: ProductStrategyDraftingPanelProps) {
-  const [draftReady, setDraftReady] = useState(false);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
   const [draggingModuleId, setDraggingModuleId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<StrategyModuleDragPreview | null>(null);
   const draggingModuleIdRef = useRef<string | null>(null);
-  const [moduleDrafts, setModuleDrafts] = useState<StrategyModuleDraft[]>(() =>
-    modules.filter((module) => module.checked).map((module) => createStrategyModuleDraft(module, generationSettings.language)),
-  );
+  const appliedPromptPlanIdRef = useRef<string | null>(null);
+  const [moduleDrafts, setModuleDrafts] = useState<StrategyModuleDraft[]>([]);
   const draggingModule = dragPreview
     ? moduleDrafts.find((moduleDraft) => moduleDraft.id === dragPreview.id)
     : undefined;
-  const generationImageCount = moduleDrafts.length * Math.max(selectedViralStyleCount, 1);
+  const generationImageCount = moduleDrafts.length * Math.max(selectedViralStyles.length, 1);
 
   useEffect(() => {
-    const readyTimer = window.setTimeout(() => setDraftReady(true), strategyDraftDelayMs);
-
-    return () => window.clearTimeout(readyTimer);
-  }, []);
+    if (!promptPlan || appliedPromptPlanIdRef.current === promptPlan.id) {
+      return;
+    }
+    appliedPromptPlanIdRef.current = promptPlan.id;
+    setModuleDrafts((currentDrafts) => {
+      if (currentDrafts.some((draft) => draft.contentEdited)) {
+        return currentDrafts;
+      }
+      return modules
+        .filter((module) => module.checked)
+        .map((module) => createStrategyModuleDraft(module, promptPlan))
+        .filter((draft): draft is StrategyModuleDraft => draft !== null);
+    });
+  }, [modules, promptPlan]);
 
   useEffect(() => {
     if (!draggingModuleId || detailGenerating) {
@@ -978,6 +1067,7 @@ function ProductStrategyDraftingPanel({
     }
 
     setModuleDrafts((currentDrafts) => currentDrafts.filter((draft) => draft.id !== moduleId));
+    onDraftChanged();
   }
 
   function rewriteModule(moduleId: string, content: string) {
@@ -986,8 +1076,9 @@ function ProductStrategyDraftingPanel({
     }
 
     setModuleDrafts((currentDrafts) =>
-      currentDrafts.map((draft) => (draft.id === moduleId ? { ...draft, content } : draft)),
+      currentDrafts.map((draft) => (draft.id === moduleId ? { ...draft, content, contentEdited: true } : draft)),
     );
+    onDraftChanged();
   }
 
   function handleModulePointerDown(event: ReactPointerEvent<HTMLElement>, moduleId: string) {
@@ -1061,12 +1152,13 @@ function ProductStrategyDraftingPanel({
         ...remainingDrafts.slice(insertIndex),
       ];
     });
+    onDraftChanged();
     if (shouldClearDragging) {
       clearDraggingModule();
     }
   }
 
-  if (!draftReady) {
+  if (promptPlanLoading || !promptPlan) {
     return (
       <aside
         aria-label="模块策略与设计规范"
@@ -1122,8 +1214,7 @@ function ProductStrategyDraftingPanel({
             )}
             data-testid="strategy-summary-copy"
           >
-            产品：{productPrompt || "已上传商品图"}
-            {"\n"}卖点：围绕商品核心利益点、使用场景、视觉层级和平台规范组织内容
+            {promptPlan.userEditableSummary || "模型未返回产品与卖点摘要"}
             {"\n"}目标语言：{generationSettings.language}
           </p>
           <button
@@ -1247,13 +1338,143 @@ function ProductStrategyDraftingPanel({
   );
 }
 
-function createStrategyModuleDraft(module: ModuleOption, language: string): StrategyModuleDraft {
+function createStrategyModuleDraft(
+  module: ModuleOption,
+  promptPlan: PromptPlan,
+): StrategyModuleDraft | null {
+  const promptPlanItems = normalizePromptPlanItemsForModule(promptPlan, module.id);
+  if (promptPlanItems.length > 0) {
+    return {
+      content: promptPlanItems[0].sceneDescription,
+      description: module.description,
+      id: module.id,
+      promptPlanItems,
+      title: module.title,
+    };
+  }
+  return null;
+}
+
+function validateProductDetailPromptPlan(
+  promptPlan: PromptPlan,
+  modules: ModuleOption[],
+  selectedViralStyles: ViralStyleAnalysisResult[],
+) {
+  const checkedModules = modules.filter((module) => module.checked);
+  for (const module of checkedModules) {
+    const moduleItems = normalizePromptPlanItemsForModule(promptPlan, module.id);
+    if (moduleItems.length === 0) {
+      throw new Error(`场景描述生成缺少已选模块：${module.title}`);
+    }
+    for (const style of selectedViralStyles) {
+      const hasStyleItem = moduleItems.some(
+        (item) => (item.styleId && style.id && item.styleId === style.id) || item.styleTitle === style.title,
+      );
+      if (!hasStyleItem) {
+        throw new Error(`场景描述生成缺少已选风格：${style.title}`);
+      }
+    }
+  }
+}
+
+function normalizePromptPlanItemsForModule(
+  promptPlan: PromptPlan | null | undefined,
+  moduleId: string,
+): StrategyModulePromptPlanItem[] {
+  if (!promptPlan?.items?.length) {
+    return [];
+  }
+
+  return promptPlan.items
+    .map((item) => normalizePromptPlanItem(item))
+    .filter((item): item is StrategyModulePromptPlanItem & { moduleId: string } => item?.moduleId === moduleId)
+    .map(({ moduleId: _moduleId, ...item }) => item);
+}
+
+function normalizePromptPlanItem(item: PromptPlanItem):
+  | (StrategyModulePromptPlanItem & {
+      moduleId: string;
+    })
+  | null {
+  if (!item.intent || typeof item.intent !== "object") {
+    return null;
+  }
+  const intent = item.intent as Record<string, unknown>;
+  const moduleId = stringField(intent.moduleId);
+  const sceneDescription = stringField(intent.sceneDescription) || item.displaySummary.trim();
+  const imagePrompt = stringField(intent.imagePrompt);
+  if (!moduleId || !sceneDescription || !imagePrompt) {
+    return null;
+  }
+
   return {
-    content: `主标题: "${module.title}"，排版: 粗圆润无衬线体，画面层级清晰\n副标题: "${module.description}"，排版: 中等干净无衬线体\n目标语言: ${language}`,
-    description: module.description,
-    id: module.id,
-    title: module.title,
+    imagePrompt,
+    moduleId,
+    sceneDescription,
+    styleId: stringField(intent.styleId),
+    styleTitle: stringField(intent.styleTitle),
   };
+}
+
+function createProductDetailPromptPlanIntent(
+  modules: ModuleOption[],
+  settings: ProductGenerationSettings,
+  productPrompt: string,
+  selectedViralStyles: ViralStyleAnalysisResult[],
+) {
+  const ratio = settings.advancedFormats.length > 0 ? settings.advancedFormats.join("、") : settings.format;
+  return {
+    language: settings.language,
+    market: settings.market,
+    modules: modules
+      .filter((module) => module.checked)
+      .map((module) => ({
+        description: module.description,
+        moduleId: module.id,
+        moduleTitle: module.title,
+      })),
+    platform: settings.platform,
+    productSellingPoints: productPrompt.trim(),
+    ratio,
+    viralStyles: selectedViralStyles.map((style, index) => ({
+      colors: style.colors,
+      designFocus: style.designFocus ?? "",
+      styleId: style.id || `style-${index + 1}`,
+      styleTitle: style.title,
+      subtitle: style.subtitle,
+    })),
+  };
+}
+
+function createProductDetailPromptPlanCacheKey(
+  modules: ModuleOption[],
+  settings: ProductGenerationSettings,
+  productImages: ProductImageAsset[],
+  productPrompt: string,
+  selectedViralStyles: ViralStyleAnalysisResult[],
+) {
+  return JSON.stringify({
+    modules: modules.map((module) => ({
+      checked: module.checked,
+      description: module.description,
+      id: module.id,
+      title: module.title,
+    })),
+    productImages: productImages.map((image) => ({
+      id: image.id,
+      name: image.name,
+      src: image.src,
+    })),
+    productPrompt: productPrompt.trim(),
+    selectedViralStyles: selectedViralStyles.map((style) => ({
+      colors: style.colors,
+      designFocus: style.designFocus ?? "",
+      id: style.id ?? "",
+      subtitle: style.subtitle,
+      title: style.title,
+    })),
+    settings,
+  });
 }
 
 type ProductFormatSelectProps = {

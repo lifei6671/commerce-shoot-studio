@@ -65,6 +65,36 @@ fn run_next_executes_oldest_queued_task_with_model_gateway_and_events() {
 }
 
 #[test]
+fn run_task_executes_requested_task_without_consuming_older_queue() {
+    let workspace_dir = initialized_workspace("local-executor-targeted-task");
+    let generation_service = GenerationService::new();
+    let older = generation_service
+        .create_task(&workspace_dir, create_scene_task("scene-targeted-old"))
+        .expect("older task should create");
+    let target = generation_service
+        .create_task(&workspace_dir, create_scene_task("scene-targeted-new"))
+        .expect("target task should create");
+
+    let result = LocalTaskExecutor::new()
+        .run_task(&workspace_dir, &target.id)
+        .expect("executor should run")
+        .expect("target task should exist");
+    let older_task = generation_service
+        .get_task(&workspace_dir, &older.id)
+        .expect("older task should reload");
+    let target_task = generation_service
+        .get_task(&workspace_dir, &target.id)
+        .expect("target task should reload");
+
+    assert_eq!(result.task_id, target.id);
+    assert_eq!(older_task.status, GenerationTaskStatus::Queued);
+    assert_eq!(target_task.status, GenerationTaskStatus::Succeeded);
+    assert_eq!(target_task.stage, GenerationTaskStage::Completed);
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
 fn run_next_persists_generated_result_asset_for_scene_task() {
     let workspace_dir = initialized_workspace("local-executor-generated-asset");
     let generation_service = GenerationService::new();
@@ -96,6 +126,147 @@ fn run_next_persists_generated_result_asset_for_scene_task() {
     assert_eq!(
         task_event_count(&workspace_dir, &task.id, "task.result-saved"),
         1
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn run_next_persists_listing_copy_output_for_history_card() {
+    let workspace_dir = initialized_workspace("local-executor-listing-copy");
+    let generation_service = GenerationService::new();
+    let task = generation_service
+        .create_task(
+            &workspace_dir,
+            create_listing_copy_task("listing-copy-exec-1"),
+        )
+        .expect("listing copy task should create");
+
+    let result = LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should run")
+        .expect("queued task should exist");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+    let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+    let invocation_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM model_invocations WHERE id = ?1 AND capability_id = 'listing-copy'",
+            [result.invocation_id.as_deref().expect("invocation id")],
+            |row| row.get(0),
+        )
+        .expect("invocation count should query");
+
+    assert_eq!(result.task_id, task.id);
+    assert_eq!(detail.task.status, GenerationTaskStatus::Succeeded);
+    assert_eq!(detail.output_assets.len(), 0);
+    assert_eq!(
+        detail
+            .output
+            .as_ref()
+            .and_then(|value| value.get("platform"))
+            .and_then(serde_json::Value::as_str),
+        Some("taobao")
+    );
+    assert_eq!(
+        detail
+            .output
+            .as_ref()
+            .and_then(|value| value.get("title"))
+            .and_then(serde_json::Value::as_str),
+        Some("藏青运动风字母印花圆领短袖T恤")
+    );
+    assert_eq!(invocation_count, 1);
+    assert_eq!(
+        task_event_count(&workspace_dir, &task.id, "task.output-saved"),
+        1
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn run_next_invokes_product_detail_model_once_per_item_in_one_task() {
+    let workspace_dir = initialized_workspace("local-executor-product-detail-items");
+    let generation_service = GenerationService::new();
+    let task = generation_service
+        .create_task(
+            &workspace_dir,
+            create_product_detail_task("product-detail-items-exec-1"),
+        )
+        .expect("product detail task should create");
+
+    let result = LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should run")
+        .expect("queued task should exist");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+    let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+    let task_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM generation_tasks WHERE idempotency_key = 'product-detail-items-exec-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("task count should query");
+    let invocation_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM model_invocations WHERE capability_id = 'product-detail-generation'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("invocation count should query");
+
+    assert_eq!(result.task_id, task.id);
+    assert_eq!(task_count, 1);
+    assert_eq!(invocation_count, 3);
+    assert_eq!(detail.output_assets.len(), 3);
+    assert_eq!(
+        detail
+            .output_assets
+            .iter()
+            .map(|asset| asset.sort_order)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn run_next_preserves_unique_sort_orders_when_items_return_multiple_images() {
+    let workspace_dir = initialized_workspace("local-executor-product-detail-multi-image");
+    let generation_service = GenerationService::new();
+    let task = generation_service
+        .create_task(
+            &workspace_dir,
+            create_product_detail_multi_image_task("product-detail-multi-image-exec-1"),
+        )
+        .expect("product detail task should create");
+
+    LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should run")
+        .expect("queued task should exist");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+
+    assert_eq!(detail.task.status, GenerationTaskStatus::Succeeded);
+    assert_eq!(detail.output_assets.len(), 4);
+    assert_eq!(
+        detail
+            .output_assets
+            .iter()
+            .map(|asset| asset.sort_order)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
     );
 
     remove_workspace(&workspace_dir);
@@ -196,6 +367,10 @@ fn run_next_marks_task_failed_when_model_capability_is_unavailable() {
     assert!(result.invocation_id.is_none());
     assert_eq!(failed.status, GenerationTaskStatus::Failed);
     assert_eq!(failed.stage, GenerationTaskStage::Failed);
+    assert!(
+        failed.completed_at.is_some(),
+        "failed terminal tasks should record completed_at"
+    );
     assert_eq!(
         failed.error.as_ref().map(|error| error.code.as_str()),
         Some("MODEL_CAPABILITY_UNAVAILABLE")
@@ -215,6 +390,87 @@ fn create_scene_task(idempotency_key: &str) -> CreateGenerationTaskInput {
         input: Some(serde_json::json!({
             "prompt": "白色摄影棚，柔光",
         })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_listing_copy_task(idempotency_key: &str) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Product,
+        kind: GenerationTaskKind::ListingCopy,
+        title: "商品上架文案".to_string(),
+        prompt_plan_id: Some("local-product-plan".to_string()),
+        input: Some(serde_json::json!({
+            "platform": "taobao",
+            "productSellingPoints": "藏青运动风字母印花圆领短袖T恤",
+            "scenes": [
+                {
+                    "moduleId": "hero",
+                    "sceneDescription": "首屏主视觉展示商品上身效果。"
+                }
+            ]
+        })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_product_detail_task(idempotency_key: &str) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Product,
+        kind: GenerationTaskKind::ImageGeneration,
+        title: "商品详情图".to_string(),
+        prompt_plan_id: Some("local-product-plan".to_string()),
+        input: Some(serde_json::json!({
+            "items": [
+                {
+                    "imageId": "hero",
+                    "moduleId": "hero",
+                    "imagePrompt": "首屏主视觉，保留文字安全区。"
+                },
+                {
+                    "imageId": "selling-point",
+                    "moduleId": "selling-point",
+                    "imagePrompt": "核心卖点图，展示商品外观。"
+                },
+                {
+                    "imageId": "detail",
+                    "moduleId": "detail",
+                    "imagePrompt": "商品细节图，展示印花与面料。"
+                }
+            ]
+        })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_product_detail_multi_image_task(idempotency_key: &str) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Product,
+        kind: GenerationTaskKind::ImageGeneration,
+        title: "商品详情图".to_string(),
+        prompt_plan_id: Some("local-product-plan".to_string()),
+        input: Some(serde_json::json!({
+            "mockImageCount": 2,
+            "items": [
+                {
+                    "imageId": "hero",
+                    "moduleId": "hero",
+                    "imagePrompt": "首屏主视觉，保留文字安全区。"
+                },
+                {
+                    "imageId": "detail",
+                    "moduleId": "detail",
+                    "imagePrompt": "商品细节图，展示印花与面料。"
+                }
+            ]
+        })),
+        prompt_plan_snapshot: None,
         input_assets: Vec::new(),
     }
 }

@@ -1,4 +1,4 @@
-import { Clock3, FolderPlus, History, Settings } from "lucide-react";
+import { FolderPlus, History, Settings } from "lucide-react";
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "../../shared/ui/button";
@@ -66,21 +66,15 @@ export function StudioToolbar({
 
       <div
         aria-label="任务操作区"
-        className="flex h-full min-w-0 items-center justify-between gap-3 pl-4 pr-3 [@media(platform:windows)]:gap-2 [@media(platform:windows)]:pr-0"
+        className="flex h-full min-w-0 items-center justify-end gap-3 pl-4 pr-3 [@media(platform:windows)]:gap-2 [@media(platform:windows)]:pr-0"
       >
-        {hidePrimaryAction ? (
-          <div />
-        ) : (
-          <Button data-window-interactive onClick={onNewTask} size="sm" variant="soft">
-            <FolderPlus className="size-3.5" />
-            新建任务
-          </Button>
-        )}
         <div className="flex items-center gap-2 [@media(platform:windows)]:h-full [@media(platform:windows)]:gap-1">
-          <Button data-window-interactive size="sm" variant="ghost">
-            <Clock3 className="size-3.5 text-amber-500" />
-            160
-          </Button>
+          {hidePrimaryAction ? null : (
+            <Button data-window-interactive onClick={onNewTask} size="sm" variant="soft">
+              <FolderPlus className="size-3.5" />
+              新建任务
+            </Button>
+          )}
           <div className="relative" data-generation-history-root data-window-interactive>
             <Button
               aria-expanded={historyOpen}

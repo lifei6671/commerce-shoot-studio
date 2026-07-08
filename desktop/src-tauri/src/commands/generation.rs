@@ -6,6 +6,7 @@ use crate::services::generation::{
     CreateGenerationTaskInput, GenerationService, GenerationTaskPage, GenerationTaskQuery,
     RetryGenerationTaskInput,
 };
+use crate::services::local_task_executor::{LocalTaskExecutionResult, LocalTaskExecutor};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +80,23 @@ pub fn generation_list_tasks(
     GenerationService::new()
         .list_tasks(&default_workspace_directory(), query.unwrap_or_default())
         .map(GenerationTaskPageDto::from)
+        .map_err(GenerationCommandError::from)
+}
+
+#[tauri::command]
+pub fn generation_run_next_task() -> Result<Option<LocalTaskExecutionResult>, GenerationCommandError>
+{
+    LocalTaskExecutor::background()
+        .start_next(&default_workspace_directory())
+        .map_err(GenerationCommandError::from)
+}
+
+#[tauri::command]
+pub fn generation_run_task(
+    task_id: String,
+) -> Result<Option<LocalTaskExecutionResult>, GenerationCommandError> {
+    LocalTaskExecutor::background()
+        .start_task(&default_workspace_directory(), &task_id)
         .map_err(GenerationCommandError::from)
 }
 

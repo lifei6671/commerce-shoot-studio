@@ -44,6 +44,7 @@ pub enum GenerationTaskKind {
     PromptPlan,
     ImageGeneration,
     ImageEdit,
+    ListingCopy,
 }
 
 impl GenerationTaskKind {
@@ -52,6 +53,7 @@ impl GenerationTaskKind {
             Self::PromptPlan => "prompt-plan",
             Self::ImageGeneration => "image-generation",
             Self::ImageEdit => "image-edit",
+            Self::ListingCopy => "listing-copy",
         }
     }
 }
@@ -64,6 +66,7 @@ impl FromStr for GenerationTaskKind {
             "prompt-plan" => Ok(Self::PromptPlan),
             "image-generation" => Ok(Self::ImageGeneration),
             "image-edit" => Ok(Self::ImageEdit),
+            "listing-copy" => Ok(Self::ListingCopy),
             _ => Err(GenerationError::InvalidValue(format!(
                 "不支持的任务类型：{value}"
             ))),
@@ -206,6 +209,9 @@ pub struct TaskEvent {
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskDetail {
     pub task: GenerationTask,
+    pub input: Option<serde_json::Value>,
+    pub prompt_plan_snapshot: Option<serde_json::Value>,
+    pub output: Option<serde_json::Value>,
     pub input_assets: Vec<GenerationTaskAsset>,
     pub output_assets: Vec<GenerationTaskAsset>,
     pub events: Vec<TaskEvent>,

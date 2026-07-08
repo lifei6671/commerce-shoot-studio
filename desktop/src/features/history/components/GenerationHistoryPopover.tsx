@@ -9,6 +9,9 @@ export type GenerationRecord = {
   images: GeneratedDetailImage[];
   inputSummary: string;
   kind: "product-detail" | "clothing-scene";
+  promptPlanId?: string;
+  persistedTaskId?: string;
+  relatedTaskIds?: string[];
   status: "complete" | "failed" | "generating";
   title: string;
   workspace: "product" | "clothing";
@@ -235,7 +238,10 @@ function GenerationHistoryRow({
 }
 
 function HistoryThumbnailStack({ images }: { images: GeneratedDetailImage[] }) {
-  const previewImages = images.slice(0, 3);
+  const generatedImagesWithPreview = images.filter(
+    (image) => image.kind !== "source-image" && image.kind !== "listing-copy" && Boolean(image.src),
+  );
+  const previewImages = (generatedImagesWithPreview.length > 0 ? generatedImagesWithPreview : images).slice(0, 3);
 
   return (
     <div className="relative h-14 w-[58px] shrink-0">
@@ -249,6 +255,14 @@ function HistoryThumbnailStack({ images }: { images: GeneratedDetailImage[] }) {
             key={image.id}
             style={{ left: index * 10, zIndex: 3 - index }}
           >
+            {image.src ? (
+              <img
+                alt={image.title}
+                className="absolute inset-0 h-full w-full rounded-[9px] object-cover"
+                draggable={false}
+                src={image.src}
+              />
+            ) : null}
             <div className="absolute inset-x-1.5 bottom-1.5 h-1 rounded-full bg-white/42" />
           </div>
         ))

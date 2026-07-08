@@ -138,6 +138,8 @@ describe("Runtime public contract", () => {
           }),
         ),
         retryTask: vi.fn(() => Promise.resolve({ ...task, attemptNo: 2, retryOfTaskId: task.id })),
+        runNext: vi.fn(() => Promise.resolve({ invocationId: "inv_1", taskId: task.id })),
+        runTask: vi.fn(() => Promise.resolve({ invocationId: "inv_1", taskId: task.id })),
       },
       modelConfig: {
         deleteConfig: vi.fn(() => Promise.resolve()),
@@ -162,10 +164,7 @@ describe("Runtime public contract", () => {
         ),
       },
       promptPlans: {
-        confirmPlan: vi.fn(),
         createPlan: vi.fn(),
-        getPlan: vi.fn(),
-        updatePlan: vi.fn(),
       },
       runtimeInfo: {
         getRuntimeInfo: vi.fn(() => Promise.resolve(runtimeInfo)),

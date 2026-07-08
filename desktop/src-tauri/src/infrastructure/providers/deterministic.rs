@@ -19,18 +19,31 @@ impl ModelGatewayAdapter for DeterministicModelGatewayAdapter {
                 | "clothing-tryon-generation"
                 | "image-edit"
         ) {
-            serde_json::json!([
-                {
-                    "mimeType": "image/png",
-                    "dataUrl": TRANSPARENT_PNG_DATA_URL
-                }
-            ])
+            let image_count = request
+                .input
+                .get("mockImageCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1)
+                .max(1);
+            serde_json::Value::Array(
+                (0..image_count)
+                    .map(|_| {
+                        serde_json::json!({
+                        "mimeType": "image/png",
+                        "dataUrl": TRANSPARENT_PNG_DATA_URL
+                            })
+                    })
+                    .collect(),
+            )
         } else {
             serde_json::json!([])
         };
 
         Ok(ModelGatewayAdapterResult {
-            output_text: Some(deterministic_output_text(request.capability_id)),
+            output_text: Some(deterministic_output_text(
+                request.capability_id,
+                request.input,
+            )),
             output_json: serde_json::json!({
                 "mock": true,
                 "capabilityId": request.capability_id,
@@ -46,7 +59,7 @@ impl ModelGatewayAdapter for DeterministicModelGatewayAdapter {
     }
 }
 
-fn deterministic_output_text(capability_id: &str) -> String {
+fn deterministic_output_text(capability_id: &str, input: &serde_json::Value) -> String {
     if capability_id == "product-selling-points" {
         return [
             "1、产品名称：黑色休闲翻领长袖衬衫",
@@ -108,5 +121,148 @@ fn deterministic_output_text(capability_id: &str) -> String {
         .to_string();
     }
 
+    if capability_id == "listing-copy" {
+        return serde_json::json!({
+            "platform": "taobao",
+            "title": "藏青运动风字母印花圆领短袖T恤",
+            "sellingPoints": ["运动风印花", "圆领短袖版型"],
+            "promotionBenefits": ["清爽休闲", "日常好搭"],
+            "detailCopy": "适合日常通勤与户外休闲穿搭。",
+            "searchKeywords": ["藏青T恤", "运动风T恤"],
+            "attributeWords": ["藏青色", "圆领", "短袖"],
+            "mainImageGuidance": ["首图突出上身效果", "细节图放大胸口印花"]
+        })
+        .to_string();
+    }
+
+    if capability_id == "prompt-plan" {
+        return deterministic_prompt_plan_output(input).to_string();
+    }
+
     format!("mock output for {capability_id}")
+}
+
+fn deterministic_prompt_plan_output(input: &serde_json::Value) -> serde_json::Value {
+    let context = input
+        .get("context")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let product_summary = context
+        .get("productSellingPoints")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("已上传商品图");
+    let ratio = context
+        .get("ratio")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("1:1");
+    let modules = context
+        .get("modules")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let viral_styles = context
+        .get("viralStyles")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let groups = if viral_styles.is_empty() {
+        vec![deterministic_prompt_plan_group(
+            "default-style",
+            "默认电商风格",
+            ratio,
+            product_summary,
+            &modules,
+        )]
+    } else {
+        viral_styles
+            .iter()
+            .enumerate()
+            .map(|(index, style)| {
+                let style_id = style
+                    .get("styleId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("style-{}", index + 1));
+                let style_title = style
+                    .get("styleTitle")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("爆款风格方向");
+                deterministic_prompt_plan_group(
+                    &style_id,
+                    style_title,
+                    ratio,
+                    product_summary,
+                    &modules,
+                )
+            })
+            .collect()
+    };
+
+    serde_json::json!({
+        "version": "v1",
+        "productSummary": format!("模型整理后的产品与卖点：{product_summary}"),
+        "groups": groups,
+    })
+}
+
+fn deterministic_prompt_plan_group(
+    style_id: &str,
+    style_title: &str,
+    ratio: &str,
+    product_summary: &str,
+    modules: &[serde_json::Value],
+) -> serde_json::Value {
+    let items = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| {
+            let module_id = module
+                .get("moduleId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("module-{}", index + 1));
+            let module_title = module
+                .get("moduleTitle")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("商品详情图");
+            let description = module
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("展示商品卖点");
+            serde_json::json!({
+                "moduleId": module_id,
+                "moduleTitle": module_title,
+                "sceneTitle": format!("{style_title}{module_title}"),
+                "sceneDescription": format!("画面围绕{product_summary}，采用{style_title}表达，用于{module_title}，{description}。"),
+                "imagePrompt": format!("适配 {ratio} 比例的电商详情页画面，围绕{product_summary}，采用{style_title}表达，用于{module_title}；禁止生成品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标。"),
+                "textOverlay": {
+                    "headline": module_title,
+                    "subheadline": style_title,
+                },
+                "constraints": [
+                    "不得编造商品参数",
+                    "不得生成品牌 Logo",
+                    "不得生成价格、销量、认证标识",
+                    "图片中只预留文字安全区，不直接生成可读文字",
+                    "imagePrompt 必须与 sceneDescription 保持一致"
+                ],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "styleId": style_id,
+        "styleTitle": style_title,
+        "colors": ["#111827", "#F8FAFC"],
+        "visualConsistency": {
+            "productAnchor": product_summary,
+            "backgroundAnchor": "干净电商摄影棚背景",
+            "lightingAnchor": "柔和自然光",
+            "compositionAnchor": "主体清晰并保留信息区",
+            "textAreaAnchor": "干净留白构图"
+        },
+        "items": items,
+    })
 }

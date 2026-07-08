@@ -69,6 +69,7 @@ fn recover_running_tasks_marks_them_interrupted_and_writes_event() {
                 title: "异常恢复任务".to_string(),
                 prompt_plan_id: None,
                 input: None,
+                prompt_plan_snapshot: None,
                 input_assets: Vec::new(),
             },
         )

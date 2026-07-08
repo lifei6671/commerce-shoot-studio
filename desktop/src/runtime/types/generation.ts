@@ -15,7 +15,7 @@ export type GenerationTaskStage =
   | "completed"
   | "failed";
 
-export type GenerationTaskKind = "prompt-plan" | "image-generation" | "image-edit";
+export type GenerationTaskKind = "prompt-plan" | "image-generation" | "image-edit" | "listing-copy";
 export type GenerationTaskInputAssetRole = "source" | "reference" | "model";
 
 export type GenerationTaskInputAssetInput = {
@@ -58,6 +58,9 @@ export type TaskEvent = {
 
 export type GenerationTaskDetail = {
   task: GenerationTask;
+  input?: unknown;
+  promptPlanSnapshot?: unknown;
+  output?: unknown;
   inputAssets: GenerationTaskAsset[];
   outputAssets: GenerationTaskAsset[];
   events: TaskEvent[];
@@ -70,6 +73,11 @@ export type GenerationTaskQuery = PageRequest & {
 
 export type GenerationTaskPage = PageResult<GenerationTask>;
 
+export type LocalTaskExecutionResult = {
+  taskId: string;
+  invocationId?: string;
+};
+
 export type CreateGenerationTaskInput = {
   idempotencyKey?: string;
   workspace: WorkspaceKind;
@@ -77,6 +85,7 @@ export type CreateGenerationTaskInput = {
   title: string;
   promptPlanId?: string;
   input?: unknown;
+  promptPlanSnapshot?: unknown;
   inputAssets?: GenerationTaskInputAssetInput[];
 };
 

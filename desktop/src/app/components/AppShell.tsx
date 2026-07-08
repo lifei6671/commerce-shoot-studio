@@ -5,6 +5,7 @@ type AppShellProps = {
   navigation: ReactNode;
   configPanel: ReactNode;
   canvas: ReactNode;
+  hideConfigPanel?: boolean;
   workspaceContent?: ReactNode;
 };
 
@@ -14,8 +15,9 @@ const studioLayoutVars = {
   "--studio-side-width": "calc(var(--studio-nav-width) + var(--studio-panel-width))",
 } as CSSProperties;
 
-export function AppShell({ toolbar, navigation, configPanel, canvas, workspaceContent }: AppShellProps) {
+export function AppShell({ toolbar, navigation, configPanel, canvas, hideConfigPanel = false, workspaceContent }: AppShellProps) {
   const hasWorkspaceContent = Boolean(workspaceContent);
+  const sidePanelHidden = hasWorkspaceContent || hideConfigPanel;
 
   return (
     <div className="h-screen overflow-hidden bg-transparent text-app-text">
@@ -27,25 +29,30 @@ export function AppShell({ toolbar, navigation, configPanel, canvas, workspaceCo
         <div
           aria-hidden="true"
           className={
-            hasWorkspaceContent
+            sidePanelHidden
               ? "pointer-events-none absolute bottom-0 left-[var(--studio-nav-width)] top-[52px] z-30 w-px bg-slate-200/70 shadow-[1px_0_0_rgba(255,255,255,0.72)] [@media(platform:windows)]:top-11"
               : "pointer-events-none absolute inset-y-0 left-[var(--studio-side-width)] z-30 w-px bg-slate-200/70 shadow-[1px_0_0_rgba(255,255,255,0.72)]"
           }
           data-testid="studio-side-divider"
         />
         {toolbar}
-        {hasWorkspaceContent ? (
-          <div className="grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_minmax(0,1fr)]">
-            {navigation}
-            {workspaceContent}
-          </div>
-        ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_var(--studio-panel-width)_minmax(0,1fr)]">
-            {navigation}
-            {configPanel}
-            {canvas}
-          </div>
-        )}
+        <div
+          className={
+            sidePanelHidden
+              ? "grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_minmax(0,1fr)]"
+              : "grid min-h-0 flex-1 grid-cols-[var(--studio-nav-width)_var(--studio-panel-width)_minmax(0,1fr)]"
+          }
+        >
+          {navigation}
+          {sidePanelHidden ? null : (
+            <div className="contents">
+              {configPanel}
+              {canvas}
+            </div>
+          )}
+          {!hasWorkspaceContent && hideConfigPanel ? canvas : null}
+          {hasWorkspaceContent ? workspaceContent : null}
+        </div>
       </div>
     </div>
   );

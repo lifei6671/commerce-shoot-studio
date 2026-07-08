@@ -73,6 +73,15 @@ fn open_workspace_database_creates_db_and_configures_sqlite_pragmas() {
             .expect("query generation table");
         assert_eq!(table_count, 1, "{table_name} should exist");
     }
+    let task_output_column_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('generation_tasks') WHERE name = 'output_json'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query generation task output column");
+    assert_eq!(task_output_column_count, 1);
 
     remove_workspace(&workspace_dir);
 }
@@ -101,6 +110,124 @@ fn open_workspace_database_repairs_missing_baseline_tables_during_development() 
         .expect("query repaired table");
 
     assert_eq!(table_count, 1);
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn open_workspace_database_repairs_generation_task_listing_copy_schema() {
+    let workspace_dir = initialized_workspace("baseline-task-listing-copy-repair");
+    {
+        let database =
+            WorkspaceDatabase::open(&workspace_dir).expect("workspace database should open");
+        database
+            .connection()
+            .execute_batch(
+                "
+                INSERT INTO generation_tasks (
+                    id, attempt_no, idempotency_key, workspace, kind, status, stage, title
+                )
+                VALUES (
+                    'task_existing_image', 1, 'old-task-image', 'product',
+                    'image-generation', 'queued', 'queued', '旧图片任务'
+                );
+                INSERT INTO task_events (id, task_id, event_type, stage)
+                VALUES ('event_existing_image', 'task_existing_image', 'task.created', 'queued');
+
+                PRAGMA foreign_keys = OFF;
+                PRAGMA legacy_alter_table = ON;
+                DROP INDEX IF EXISTS idx_generation_tasks_idempotency_key;
+                DROP INDEX IF EXISTS idx_generation_tasks_workspace_created_at;
+                DROP INDEX IF EXISTS idx_generation_tasks_status_created_at;
+                DROP INDEX IF EXISTS idx_generation_tasks_hidden_at;
+                ALTER TABLE generation_tasks RENAME TO generation_tasks_current;
+                CREATE TABLE generation_tasks (
+                    id TEXT PRIMARY KEY,
+                    retry_of_task_id TEXT,
+                    attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
+                    idempotency_key TEXT,
+                    workspace TEXT NOT NULL CHECK (workspace IN ('product', 'clothing', 'scene')),
+                    kind TEXT NOT NULL CHECK (kind IN ('prompt-plan', 'image-generation', 'image-edit')),
+                    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+                    stage TEXT NOT NULL CHECK (stage IN ('queued', 'validating', 'rendering-prompt', 'calling-provider', 'polling-provider', 'downloading-result', 'saving-result', 'completed', 'failed')),
+                    title TEXT NOT NULL,
+                    input_summary TEXT,
+                    prompt_plan_id TEXT,
+                    input_json TEXT,
+                    prompt_plan_snapshot_json TEXT,
+                    resolved_prompt_hash TEXT,
+                    error_json TEXT,
+                    hidden_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    completed_at TEXT,
+                    FOREIGN KEY (retry_of_task_id) REFERENCES generation_tasks(id) ON DELETE SET NULL
+                );
+                INSERT INTO generation_tasks (
+                    id, retry_of_task_id, attempt_no, idempotency_key, workspace, kind,
+                    status, stage, title, input_summary, prompt_plan_id, input_json,
+                    prompt_plan_snapshot_json, resolved_prompt_hash, error_json,
+                    hidden_at, created_at, updated_at, completed_at
+                )
+                SELECT
+                    id, retry_of_task_id, attempt_no, idempotency_key, workspace, kind,
+                    status, stage, title, input_summary, prompt_plan_id, input_json,
+                    prompt_plan_snapshot_json, resolved_prompt_hash, error_json,
+                    hidden_at, created_at, updated_at, completed_at
+                FROM generation_tasks_current;
+                DROP TABLE generation_tasks_current;
+                PRAGMA legacy_alter_table = OFF;
+                PRAGMA foreign_keys = ON;
+                ",
+            )
+            .expect("rewrite generation task table to old schema");
+    }
+
+    let database =
+        WorkspaceDatabase::open(&workspace_dir).expect("workspace database should reopen");
+    let output_column_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('generation_tasks') WHERE name = 'output_json'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query repaired output column");
+    let create_sql: String = database
+        .connection()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'generation_tasks'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query repaired task table sql");
+    let event_parent_table: String = database
+        .connection()
+        .query_row(
+            "SELECT \"table\" FROM pragma_foreign_key_list('task_events')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query task event foreign key");
+
+    assert_eq!(output_column_count, 1);
+    assert!(create_sql.contains("'listing-copy'"));
+    assert_eq!(event_parent_table, "generation_tasks");
+    database
+        .connection()
+        .execute(
+            "
+            INSERT INTO generation_tasks (
+                id, attempt_no, idempotency_key, workspace, kind, status, stage, title
+            )
+            VALUES (
+                'task_listing_copy', 1, 'listing-copy-task', 'product',
+                'listing-copy', 'queued', 'queued', '上架文案'
+            )
+            ",
+            [],
+        )
+        .expect("listing copy task kind should be accepted");
 
     remove_workspace(&workspace_dir);
 }

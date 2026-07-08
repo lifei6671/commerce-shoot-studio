@@ -129,6 +129,7 @@ fn initialize_workspace_recovers_running_tasks() {
                 title: "启动恢复任务".to_string(),
                 prompt_plan_id: None,
                 input: None,
+                prompt_plan_snapshot: None,
                 input_assets: Vec::new(),
             },
         )

@@ -106,4 +106,15 @@ describe("StudioToolbar", () => {
     expect(within(actionRegion).getByRole("button", { name: "生成记录" })).toBeInTheDocument();
     expect(within(actionRegion).getByRole("button", { name: "设置" })).toBeInTheDocument();
   });
+
+  it("places new task before generation history and removes the balance button", () => {
+    render(<StudioToolbar />);
+
+    const actionRegion = screen.getByLabelText("任务操作区");
+    const newTaskButton = within(actionRegion).getByRole("button", { name: "新建任务" });
+    const historyButton = within(actionRegion).getByRole("button", { name: "生成记录" });
+
+    expect(within(actionRegion).queryByRole("button", { name: "160" })).not.toBeInTheDocument();
+    expect(newTaskButton.compareDocumentPosition(historyButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });

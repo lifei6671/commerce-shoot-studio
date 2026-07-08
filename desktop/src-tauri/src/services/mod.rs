@@ -7,6 +7,7 @@ pub mod local_task_executor;
 pub mod model_config;
 pub mod model_gateway;
 pub mod notification_sound;
+pub mod prompt_plan;
 pub mod prompt_registry;
 pub mod provider_connection;
 pub mod secrets;

@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
@@ -43,6 +43,7 @@ impl HttpModelGatewayAdapter {
         let Some(path) = self.diagnostic_log_path.as_deref() else {
             return;
         };
+        eprintln!("[model-gateway-diagnostics] {payload}");
         let _ = append_diagnostic_json_line(path, payload);
     }
 
@@ -82,25 +83,39 @@ impl HttpModelGatewayAdapter {
                 &request_body,
             ),
         }));
-        let mut response = self
+        let request_started_at = Instant::now();
+        let mut response = match self
             .client
             .post(endpoint)
             .bearer_auth(api_key)
             .header(CONTENT_TYPE, "application/json")
-            .timeout(Duration::from_secs(90))
+            .timeout(model_gateway_request_timeout(request.capability_id))
             .body(request_body.to_string())
             .send()
-            .map_err(|source| {
-                if source.is_timeout() {
-                    ModelGatewayError::ProviderUnavailable("Provider 调用超时。".to_string())
+        {
+            Ok(response) => response,
+            Err(source) => {
+                let message = if source.is_timeout() {
+                    "Provider 调用超时。"
                 } else {
-                    ModelGatewayError::ProviderUnavailable("Provider 网络调用失败。".to_string())
-                }
-            })?;
+                    "Provider 网络调用失败。"
+                };
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "request_error",
+                    "elapsedMs": request_started_at.elapsed().as_millis(),
+                    "isTimeout": source.is_timeout(),
+                    "error": message,
+                    "source": source.to_string(),
+                }));
+                return Err(ModelGatewayError::ProviderUnavailable(message.to_string()));
+            }
+        };
         let status = response.status();
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "stream_response_status",
+            "elapsedMs": request_started_at.elapsed().as_millis(),
             "status": status.as_u16(),
             "success": status.is_success(),
         }));
@@ -125,6 +140,11 @@ impl HttpModelGatewayAdapter {
 
             pending.extend_from_slice(&buffer[..bytes_read]);
             for block in drain_complete_sse_blocks(&mut pending)? {
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "stream_response_block",
+                    "blockByteLength": block.len(),
+                }));
                 if let Some(event) = parse_model_gateway_sse_event(&block) {
                     match event {
                         ModelGatewaySseEvent::Delta(delta) => {
@@ -153,6 +173,11 @@ impl HttpModelGatewayAdapter {
                 )
             })?;
             if let Some(event) = parse_model_gateway_sse_event(pending) {
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "stream_response_tail",
+                    "blockByteLength": pending.len(),
+                }));
                 match event {
                     ModelGatewaySseEvent::Delta(delta) => {
                         on_delta(&delta)?;
@@ -238,28 +263,42 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 &request_body,
             ),
         }));
-        let response = self
+        let request_started_at = Instant::now();
+        let response = match self
             .client
             .post(endpoint)
             .bearer_auth(api_key)
             .header(CONTENT_TYPE, "application/json")
-            .timeout(Duration::from_secs(90))
+            .timeout(model_gateway_request_timeout(request.capability_id))
             .body(request_body.to_string())
             .send()
-            .map_err(|source| {
-                if source.is_timeout() {
-                    ModelGatewayError::ProviderUnavailable("Provider 调用超时。".to_string())
+        {
+            Ok(response) => response,
+            Err(source) => {
+                let message = if source.is_timeout() {
+                    "Provider 调用超时。"
                 } else {
-                    ModelGatewayError::ProviderUnavailable("Provider 网络调用失败。".to_string())
-                }
-            })?;
+                    "Provider 网络调用失败。"
+                };
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "request_error",
+                    "elapsedMs": request_started_at.elapsed().as_millis(),
+                    "isTimeout": source.is_timeout(),
+                    "error": message,
+                    "source": source.to_string(),
+                }));
+                return Err(ModelGatewayError::ProviderUnavailable(message.to_string()));
+            }
+        };
         let status = response.status();
         let response_text = response.text().map_err(|_| {
             ModelGatewayError::ProviderUnavailable("读取 Provider 响应失败。".to_string())
         })?;
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
-            "event": "response_status",
+            "event": "response",
+            "elapsedMs": request_started_at.elapsed().as_millis(),
             "status": status.as_u16(),
             "success": status.is_success(),
             "responseByteLength": response_text.len(),
@@ -291,6 +330,13 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 }));
                 ModelGatewayError::ProviderUnavailable(source.to_string())
             })?;
+        self.write_diagnostic(json!({
+            "timestampMs": current_timestamp_ms(),
+            "event": "normalized_response",
+            "hasOutputText": normalized.output_text.is_some(),
+            "outputShape": summarize_provider_response_shape(&normalized.output_json),
+            "usageJson": normalized.usage_json.clone(),
+        }));
 
         Ok(ModelGatewayAdapterResult {
             output_text: normalized.output_text,
@@ -306,12 +352,16 @@ pub fn build_model_gateway_request_body(
 ) -> Result<Value, ModelGatewayError> {
     let prompt = parse_prompt(input)?;
     let images = parse_user_images(input)?;
+    let max_output_tokens = input
+        .get("maxOutputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(2000);
 
     if uses_responses_api(config.provider_profile_id, config.endpoint_path) {
         let mut body = json!({
             "model": config.model,
             "input": responses_input(&images, &prompt.user),
-            "max_output_tokens": 2000,
+            "max_output_tokens": max_output_tokens,
         });
         if !prompt.system.trim().is_empty() {
             body["instructions"] = Value::String(prompt.system);
@@ -328,18 +378,25 @@ pub fn build_model_gateway_request_body(
         return Ok(json!({
             "model": config.model,
             "messages": chat_completion_messages(&prompt, &images),
-            "max_tokens": 2000,
+            "max_tokens": max_output_tokens,
             "temperature": 0.2,
         }));
     }
 
-    Ok(json!({
+    let mut body = json!({
         "model": config.model,
         "prompt": prompt.roleless,
         "images": images,
-        "max_tokens": 2000,
+        "max_tokens": max_output_tokens,
         "temperature": 0.2,
-    }))
+    });
+    if config.provider_profile_id == "volcengine"
+        && config.endpoint_path.contains("/images/generations")
+    {
+        body["watermark"] = Value::Bool(false);
+    }
+
+    Ok(body)
 }
 
 pub fn build_model_gateway_stream_request_body(
@@ -349,6 +406,13 @@ pub fn build_model_gateway_stream_request_body(
     let mut body = build_model_gateway_request_body(config, input)?;
     body["stream"] = Value::Bool(true);
     Ok(body)
+}
+
+pub fn model_gateway_request_timeout(capability_id: &str) -> Duration {
+    if capability_id == "prompt-plan" {
+        return Duration::from_secs(300);
+    }
+    Duration::from_secs(90)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -489,22 +553,29 @@ fn chat_completion_messages(prompt: &PromptPayload, images: &[String]) -> Value 
         }));
     }
 
-    let mut user_content = vec![json!({
-        "type": "text",
-        "text": prompt.user,
-    })];
-    user_content.extend(images.iter().map(|image| {
-        json!({
-            "type": "image_url",
-            "image_url": {
-                "url": image,
-            },
-        })
-    }));
-    messages.push(json!({
-        "role": "user",
-        "content": user_content,
-    }));
+    if images.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": prompt.user,
+        }));
+    } else {
+        let mut user_content = vec![json!({
+            "type": "text",
+            "text": prompt.user,
+        })];
+        user_content.extend(images.iter().map(|image| {
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": image,
+                },
+            })
+        }));
+        messages.push(json!({
+            "role": "user",
+            "content": user_content,
+        }));
+    }
 
     Value::Array(messages)
 }

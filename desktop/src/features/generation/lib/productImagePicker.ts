@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 export const PRODUCT_IMAGE_DIR_STORAGE_KEY = "commerce-shoot-studio:product-image-dir";
 
 export type ProductImageAsset = {
+  assetId?: string;
   id: string;
   name: string;
   path: string;
