@@ -507,7 +507,7 @@ fn parses_responses_stream_completed_event() {
 }
 
 #[test]
-fn sanitizes_model_gateway_request_diagnostics_without_prompt_or_image_data() {
+fn model_gateway_request_diagnostics_keep_prompt_and_summarize_image_data() {
     let body = build_model_gateway_request_body(
         &HttpModelGatewayRequestConfig {
             endpoint_path: "/v1/responses",
@@ -519,14 +519,14 @@ fn sanitizes_model_gateway_request_diagnostics_without_prompt_or_image_data() {
                 "messages": [
                     {
                         "role": "system",
-                        "content": "系统规则不能写入日志"
+                        "content": "系统规则需要写入日志"
                     },
                     {
                         "role": "user",
-                        "content": "用户任务不能写入日志"
+                        "content": "用户任务需要写入日志"
                     }
                 ],
-                "rolelessPrompt": "完整合并 prompt 也不能写入日志"
+                "rolelessPrompt": "完整合并 prompt 也需要写入日志"
             },
             "userImages": [
                 {
@@ -548,10 +548,9 @@ fn sanitizes_model_gateway_request_diagnostics_without_prompt_or_image_data() {
     );
     let serialized = sanitized.to_string();
 
-    assert!(serialized.contains("\"textCharCount\""));
     assert!(serialized.contains("\"imageDataUrlLength\""));
-    assert!(!serialized.contains("系统规则不能写入日志"));
-    assert!(!serialized.contains("用户任务不能写入日志"));
+    assert!(serialized.contains("系统规则需要写入日志"));
+    assert!(serialized.contains("用户任务需要写入日志"));
     assert!(!serialized.contains("data:image/png;base64,abcdefghijklmnopqrstuvwxyz"));
 }
 

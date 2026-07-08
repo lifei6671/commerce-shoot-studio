@@ -317,7 +317,7 @@ fn task_detail_returns_persisted_generation_prompts_for_later_image_edits() {
                 "imageId": "scenario",
                 "title": "使用场景图",
                 "sceneDescription": "画面以儿童骑行头盔为主体，右侧预留卖点信息区。",
-                "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止生成品牌 Logo、价格、销量、认证标识。"
+                "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止新增未提供的品牌 Logo、价格、销量、认证标识。"
             }
         ]
     });
@@ -329,7 +329,7 @@ fn task_detail_returns_persisted_generation_prompts_for_later_image_edits() {
                 "id": "scenario",
                 "title": "使用场景图",
                 "intent": {
-                    "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止生成品牌 Logo、价格、销量、认证标识。"
+                    "imagePrompt": "场景描述：画面以儿童骑行头盔为主体，右侧预留卖点信息区。\n禁止项：禁止新增未提供的品牌 Logo、价格、销量、认证标识。"
                 }
             }
         ]

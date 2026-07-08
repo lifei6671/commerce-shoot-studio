@@ -458,7 +458,7 @@ describe("App shell", () => {
               const styleId = String(style.styleId ?? `style-${styleIndex + 1}`);
               const styleTitle = String(style.styleTitle ?? "中性电商风格");
               const sceneDescription = `画面以${intent.productSellingPoints || "商品"}为主体，采用${styleTitle}的统一背景、光影和构图，右侧预留信息区，用于${moduleTitle}模块，不添加品牌、价格或认证。`;
-              const imagePrompt = `模型生成 imagePrompt：${sceneDescription} 禁止生成品牌 Logo、价格、销量、认证标识。`;
+              const imagePrompt = `模型生成 imagePrompt：${sceneDescription} 禁止新增未提供的品牌 Logo、价格、销量、认证标识。`;
               return {
                 createdAt: now,
                 displaySummary: sceneDescription,
@@ -2915,6 +2915,7 @@ describe("App shell", () => {
 
   it("uses the user-edited scene description as the image generation prompt source", async () => {
     const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -2924,6 +2925,62 @@ describe("App shell", () => {
         src: "asset://helmet.png",
       },
     ]);
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "prompt_plan_create") {
+        const intent = (args as { input?: { intent?: Record<string, unknown> } } | undefined)?.input?.intent ?? {};
+        const modules = Array.isArray(intent.modules)
+          ? (intent.modules as Array<Record<string, unknown>>)
+          : [];
+        const now = "2026-07-02T00:00:00.000Z";
+        return Promise.resolve({
+          createdAt: now,
+          id: "prompt_plan_split_prompt_copy",
+          items: modules.map((module, moduleIndex) => {
+            const moduleId = String(module.moduleId ?? `module-${moduleIndex + 1}`);
+            const moduleTitle = String(module.moduleTitle ?? "模块");
+            return {
+              createdAt: now,
+              displaySummary: `主标题: "${moduleTitle}", 排版: 中等偏粗无衬线体, 右侧信息区, 大号\n副标题: "轻量透气", 排版: 常规无衬线体, 主标题下方, 中号\n目标语言: 中文`,
+              editable: true,
+              id: `style-1-${moduleId}`,
+              intent: {
+                copyRequirements: `主标题: "${moduleTitle}", 排版: 中等偏粗无衬线体, 右侧信息区, 大号\n副标题: "轻量透气", 排版: 常规无衬线体, 主标题下方, 中号\n目标语言: 中文`,
+                designSpec: "产品与卖点\n产品：儿童骑行头盔，轻量透气，适合日常通勤。\n卖点：轻量透气 / 日常通勤 / 佩戴舒适\n顾虑：佩戴闷热 / 安全感不足 / 日常不百搭\n视觉重心：儿童骑行头盔主体作为画面第一视觉中心，直观展示轻量透气与通勤价值\n\n视觉定调\n风格：通勤质感风，突出简洁通勤质感\n色彩：浅灰摄影棚背景作为统一基调，产品保持原色\n字体：中等偏粗无衬线标题体 + 干净无衬线正文\n色温：中性（全套统一）\n光质：柔和左上方光源，突出商品轮廓与材质",
+                imagePrompt: `不可见核心 image_prompt：${moduleTitle}，商品主体居中偏左，浅灰摄影棚背景，禁止新增未提供的品牌 Logo、价格、销量、认证标识。`,
+                imageType: `${moduleTitle}: 模型返回${moduleTitle}核心卖点`,
+                index: moduleIndex + 1,
+                moduleId,
+                moduleTitle,
+                sceneDescription: `主标题: "${moduleTitle}", 排版: 中等偏粗无衬线体, 右侧信息区, 大号\n副标题: "轻量透气", 排版: 常规无衬线体, 主标题下方, 中号\n目标语言: 中文`,
+                sceneTitle: moduleTitle,
+                styleId: "style-1",
+                styleTitle: "通勤质感风",
+                targetLanguage: "中文",
+                visualConsistency: {
+                  backgroundAnchor: "浅灰摄影棚背景",
+                  compositionAnchor: "主体居中偏左，右侧信息区",
+                  lightingAnchor: "柔和左上方光源",
+                  productAnchor: "儿童骑行头盔主体",
+                  textAreaAnchor: "右侧信息区生成清晰中文标题",
+                },
+              },
+              required: true,
+              sortOrder: moduleIndex,
+              title: `通勤质感风 · ${moduleTitle}`,
+              type: "scene",
+              updatedAt: now,
+            };
+          }),
+          resolverVersion: "product-detail-scene-description-v1",
+          status: "draft",
+          templateVersion: "v1",
+          updatedAt: now,
+          userEditableSummary: "模型整理后的产品与卖点：儿童骑行头盔，轻量透气，适合日常通勤。",
+          workspace: "product",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.resolve(undefined);
+    });
 
     renderApp();
 
@@ -2943,10 +3000,14 @@ describe("App shell", () => {
     vi.useRealTimers();
 
     const sceneDescriptionInput = await screen.findByRole("textbox", { name: "改写 使用场景图" });
+    expect(screen.getByText("使用场景图: 模型返回使用场景图核心卖点")).toBeInTheDocument();
+    expect(screen.queryByText("使用场景图: 呈现真实使用场景")).not.toBeInTheDocument();
+    expect((sceneDescriptionInput as HTMLTextAreaElement).value).toContain('主标题: "使用场景图"');
+    expect((sceneDescriptionInput as HTMLTextAreaElement).value).not.toContain("不可见核心 image_prompt");
     await user.clear(sceneDescriptionInput);
     await user.type(
       sceneDescriptionInput,
-      "画面以儿童骑行头盔为主体，放在浅灰摄影棚背景中，左侧保留商品正面，右侧预留卖点信息区，强调轻量透气和日常通勤场景。",
+      '主标题: "通勤轻量骑行", 排版: 中等偏粗无衬线体, 右侧信息区, 大号\n副标题: "轻量透气", 排版: 常规无衬线体, 主标题下方, 中号\n目标语言: 中文',
     );
 
     fireEvent.click(screen.getByRole("button", { name: /生成详情图/ }));
@@ -2965,8 +3026,16 @@ describe("App shell", () => {
           input: expect.objectContaining({
             items: expect.arrayContaining([
               expect.objectContaining({
-                sceneDescription: expect.stringContaining("画面以儿童骑行头盔为主体"),
+                copyRequirements: expect.stringContaining('主标题: "通勤轻量骑行"'),
+                designSpec: expect.stringContaining("风格：通勤质感风，突出简洁通勤质感"),
+                imageType: "使用场景图: 模型返回使用场景图核心卖点",
+                imagePrompt: expect.stringContaining("不可见核心 image_prompt：使用场景图"),
+                sceneDescription: expect.stringContaining('主标题: "通勤轻量骑行"'),
                 title: "使用场景图",
+                visualConsistency: expect.objectContaining({
+                  backgroundAnchor: "浅灰摄影棚背景",
+                  textAreaAnchor: "右侧信息区生成清晰中文标题",
+                }),
               }),
             ]),
           }),
@@ -2975,7 +3044,14 @@ describe("App shell", () => {
             items: expect.arrayContaining([
               expect.objectContaining({
                 intent: expect.objectContaining({
-                  sceneDescription: expect.stringContaining("画面以儿童骑行头盔为主体"),
+                  copyRequirements: expect.stringContaining('主标题: "通勤轻量骑行"'),
+                  designSpec: expect.stringContaining("风格：通勤质感风，突出简洁通勤质感"),
+                  imageType: "使用场景图: 模型返回使用场景图核心卖点",
+                  imagePrompt: expect.stringContaining("不可见核心 image_prompt：使用场景图"),
+                  sceneDescription: expect.stringContaining('主标题: "通勤轻量骑行"'),
+                  visualConsistency: expect.objectContaining({
+                    productAnchor: "儿童骑行头盔主体",
+                  }),
                 }),
               }),
             ]),
@@ -2986,12 +3062,36 @@ describe("App shell", () => {
       }),
     );
     const imageTaskPayload = JSON.stringify((imageTaskCreateCall?.[1] as { input?: unknown }).input);
-    expect(imageTaskPayload).not.toContain("imagePrompt");
+    expect(imageTaskPayload).toContain("不可见核心 image_prompt：使用场景图");
+    expect(imageTaskPayload).toContain("产品与卖点");
+    expect(imageTaskPayload).toContain("视觉定调");
+    expect(imageTaskPayload).toContain("风格：");
+    expect(imageTaskPayload).toContain("使用场景图:");
+    expect(imageTaskPayload).not.toContain("不得出现任何可读文字");
+    expect(imageTaskPayload).not.toContain("后期叠字");
+    const imageTaskItems =
+      ((imageTaskCreateCall?.[1] as { input?: { input?: { items?: unknown[] } } }).input?.input?.items ?? []) as Array<
+        Record<string, unknown>
+      >;
+    expect(imageTaskItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          copyRequirements: expect.stringContaining('主标题: "通勤轻量骑行"'),
+          designSpec: expect.stringContaining("风格：通勤质感风，突出简洁通勤质感"),
+          imageType: "使用场景图: 模型返回使用场景图核心卖点",
+          imagePrompt: expect.stringContaining("不可见核心 image_prompt：使用场景图"),
+          visualConsistency: expect.objectContaining({
+            lightingAnchor: "柔和左上方光源",
+          }),
+        }),
+      ]),
+    );
     expect(sceneResultCard).toHaveAttribute(
       "data-prompt",
-      expect.stringContaining("画面以儿童骑行头盔为主体"),
+      expect.stringContaining('主标题: "通勤轻量骑行"'),
     );
-    expect(sceneResultCard).toHaveAttribute("data-prompt", expect.stringContaining("禁止生成品牌 Logo、价格、销量、认证标识"));
+    expect(sceneResultCard).toHaveAttribute("data-prompt", expect.stringContaining("不可见核心 image_prompt：使用场景图"));
+    expect(sceneResultCard).toHaveAttribute("data-prompt", expect.stringContaining("禁止新增未提供的品牌 Logo、价格、销量、认证标识"));
   });
 
   it("prefills editable scene descriptions from the prompt plan text model", async () => {
@@ -3028,7 +3128,7 @@ describe("App shell", () => {
                   editable: true,
                   id: `default-${moduleId}`,
                   intent: {
-                    imagePrompt: `模型返回 imagePrompt：${sceneDescription} 禁止生成品牌 Logo、价格、销量、认证标识。`,
+                    imagePrompt: `模型返回 imagePrompt：${sceneDescription} 禁止新增未提供的品牌 Logo、价格、销量、认证标识。`,
                     moduleId,
                     moduleTitle,
                     sceneDescription,
@@ -3138,7 +3238,7 @@ describe("App shell", () => {
               editable: true,
               id: `default-${moduleId}`,
               intent: {
-                imagePrompt: `${sceneDescription} 禁止生成品牌 Logo、价格、销量、认证标识。`,
+                imagePrompt: `${sceneDescription} 禁止新增未提供的品牌 Logo、价格、销量、认证标识。`,
                 moduleId,
                 moduleTitle,
                 sceneDescription,
@@ -3212,7 +3312,7 @@ describe("App shell", () => {
               editable: true,
               id: `${styleId}-${moduleId}`,
               intent: {
-                imagePrompt: `${sceneDescription} 禁止生成品牌 Logo、价格、销量、认证标识。`,
+                imagePrompt: `${sceneDescription} 禁止新增未提供的品牌 Logo、价格、销量、认证标识。`,
                 moduleId,
                 moduleTitle,
                 sceneDescription,
@@ -3967,8 +4067,9 @@ describe("App shell", () => {
     expect(imageTaskCreateCall).toBeDefined();
     const imageTaskPayload = JSON.stringify((imageTaskCreateCall?.[1] as { input?: unknown }).input);
     expect(imageTaskPayload).not.toContain("data:image/");
-    expect(imageTaskPayload).not.toContain("模型生成 imagePrompt");
-    expect(imageTaskPayload).not.toContain("imagePrompt");
+    expect(imageTaskPayload).toContain("模型生成 imagePrompt");
+    expect(imageTaskPayload).toContain("imagePrompt");
+    expect(imageTaskPayload).toContain("copyRequirements");
     expect(invokeMock).toHaveBeenCalledWith("asset_import_images", {
       input: {
         kind: "source",
@@ -3998,11 +4099,7 @@ describe("App shell", () => {
               kind: "product-listing-copy",
               platform: "淘宝天猫",
               productSellingPoints: expect.stringContaining("黑色宽松落肩夹克"),
-              scenes: expect.arrayContaining([
-                expect.objectContaining({
-                  sceneDescription: expect.any(String),
-                }),
-              ]),
+              designSpec: expect.stringContaining("产品与卖点"),
             }),
             kind: "listing-copy",
             title: "商品上架文案",
@@ -4017,6 +4114,7 @@ describe("App shell", () => {
     });
     const listingTaskInput = (listingTaskCreateCall?.[1] as { input?: { input?: Record<string, unknown> } } | undefined)
       ?.input?.input;
+    expect(listingTaskInput).not.toHaveProperty("scenes");
     expect(listingTaskInput?.prompt).toEqual(
       expect.objectContaining({
         messages: expect.arrayContaining([
@@ -4028,10 +4126,24 @@ describe("App shell", () => {
             content: expect.stringContaining("黑色宽松落肩夹克"),
             role: "user",
           }),
+          expect.objectContaining({
+            content: expect.stringContaining("产品与卖点"),
+            role: "user",
+          }),
+          expect.objectContaining({
+            content: expect.stringContaining("只输出一个 JSON 对象"),
+            role: "user",
+          }),
+          expect.objectContaining({
+            content: expect.stringContaining("不要输出 Markdown"),
+            role: "user",
+          }),
         ]),
         rolelessPrompt: expect.stringContaining("黑色宽松落肩夹克"),
       }),
     );
+    expect(JSON.stringify(listingTaskInput)).not.toContain("模型生成 imagePrompt");
+    expect(JSON.stringify(listingTaskInput)).not.toContain("copyRequirements");
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("generation_run_task", {
         taskId: "task_image-generation",
@@ -4722,6 +4834,113 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "商品上架文案生成" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("checkbox", { name: "通勤质感风" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "换一批风格" })).toBeInTheDocument();
+  });
+
+  it("passes viral style generation guidance into product detail prompt planning", async () => {
+    const user = userEvent.setup();
+    let promptPlanIntent: Record<string, unknown> | undefined;
+
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/shirt.png",
+        name: "shirt.png",
+        path: "/Users/demo/Pictures/shirt.png",
+        src: "asset://shirt.png",
+      },
+    ]);
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "ai_assist_viral_style_analysis") {
+        return Promise.resolve({
+          capabilityId: "viral-style-analysis",
+          data: {
+            platform: "淘宝天猫",
+            items: [
+              {
+                colors: ["#122344", "#F0F2F5", "#3377FF"],
+                colorDescription: "深藏青（产品固有原色），浅米灰（大面积背景），雾霾蓝（卖点强调）",
+                designFocus: "突出版型、质感、场景和人群标签。",
+                fontStyleDescription: "常规字重无衬线体，规整端正，沉稳商务感",
+                globalStyleNote: "柔和侧光，均匀漫射，低饱和氛围，细腻呈现面料肌理",
+                iconStyle: "细线性简约商务风格",
+                id: "style-1",
+                reasoning: "适配上班族日常穿搭需求",
+                subtitle: "适配通勤穿搭",
+                title: "通勤质感风",
+              },
+              {
+                colors: ["#102142", "#F5F7FA", "#FF7722"],
+                colorDescription: "深藏青（产品固有原色），云亮白（大面积背景），暖橙色（卖点强调）",
+                designFocus: "凸显速干高弹的运动属性。",
+                fontStyleDescription: "稍粗字重无衬线体，利落方正，轻快活力感",
+                globalStyleNote: "明亮自然光，顺向柔光铺设，通透清爽，阳光舒展氛围",
+                iconStyle: "实心面性运动风格",
+                id: "style-2",
+                reasoning: "凸显速干高弹的运动属性",
+                subtitle: "轻运动活力感",
+                title: "轻运动活力风",
+              },
+              {
+                colors: ["#132445", "#E8E9EB", "#555577"],
+                colorDescription: "深藏青（产品固有原色），雅灰色（大面积背景），灰藏蓝（卖点强调）",
+                designFocus: "契合极简穿搭人群审美。",
+                fontStyleDescription: "中等字重无衬线体，间距宽松，简约高级感",
+                globalStyleNote: "柔化顶侧光，低对比度光影，克制高级，干净沉静氛围",
+                iconStyle: "极细线性极简风格",
+                id: "style-3",
+                reasoning: "契合极简穿搭人群审美",
+                subtitle: "简约高级审美",
+                title: "简约高级风",
+              },
+              {
+                colors: ["#112243", "#EEF1EF", "#44AA66"],
+                colorDescription: "深藏青（产品固有原色），雾青白（大面积背景），青绿色（卖点强调）",
+                designFocus: "贴合城市漫步出行场景。",
+                fontStyleDescription: "适中字重无衬线体，松弛舒展，休闲亲和感",
+                globalStyleNote: "清透户外漫射光，明暗过渡自然，松弛随性，日常氛围感",
+                iconStyle: "粗细结合休闲风格",
+                id: "style-4",
+                reasoning: "贴合城市漫步出行场景",
+                subtitle: "城市休闲氛围",
+                title: "城市休闲风",
+              },
+            ],
+          },
+          promptId: "viral-style-analysis",
+          text: "",
+        });
+      }
+      if (command === "prompt_plan_create") {
+        promptPlanIntent = (args as { input?: { intent?: Record<string, unknown> } } | undefined)?.input?.intent;
+        return new Promise(() => {});
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "爆款风格分析" }));
+    await user.click(screen.getByRole("button", { name: "上传图片" }));
+    await user.type(screen.getByPlaceholderText(/建议包含以下信息生成更精准/), "深藏青速干T恤，适合通勤和轻运动。");
+    await user.click(screen.getByRole("button", { name: "开始爆款风格分析" }));
+    await screen.findByRole("checkbox", { name: "通勤质感风" });
+    await user.click(screen.getByRole("checkbox", { name: "通勤质感风" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    await waitFor(() => expect(promptPlanIntent).toBeDefined());
+    expect(promptPlanIntent).toEqual(
+      expect.objectContaining({
+        viralStyles: expect.arrayContaining([
+          expect.objectContaining({
+            colorDescription: "深藏青（产品固有原色），浅米灰（大面积背景），雾霾蓝（卖点强调）",
+            fontStyleDescription: "常规字重无衬线体，规整端正，沉稳商务感",
+            globalStyleNote: "柔和侧光，均匀漫射，低饱和氛围，细腻呈现面料肌理",
+            iconStyle: "细线性简约商务风格",
+            reasoning: "适配上班族日常穿搭需求",
+            styleTitle: "通勤质感风",
+          }),
+        ]),
+      }),
+    );
   });
 
   it("returns viral style analysis to the start state after model failure", async () => {

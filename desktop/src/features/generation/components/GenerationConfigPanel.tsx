@@ -101,9 +101,14 @@ const marketLanguageMap: Record<string, string> = {
 };
 
 export type ViralStyleAnalysisResult = {
+  colorDescription?: string;
   colors: string[];
   designFocus?: string;
+  fontStyleDescription?: string;
+  globalStyleNote?: string;
   id?: string;
+  iconStyle?: string;
+  reasoning?: string;
   subtitle: string;
   title: string;
 };
@@ -667,9 +672,14 @@ function normalizeViralStyleAnalysisResult(data: unknown): ViralStyleAnalysisRes
       throw new Error("爆款风格分析返回结构无效");
     }
     return {
+      colorDescription: stringField(source.colorDescription),
       colors,
       designFocus: stringField(source.designFocus),
+      fontStyleDescription: stringField(source.fontStyleDescription),
+      globalStyleNote: stringField(source.globalStyleNote),
       id: stringField(source.id) || `style-${index + 1}`,
+      iconStyle: stringField(source.iconStyle),
+      reasoning: stringField(source.reasoning),
       subtitle: compactViralStyleSubtitle(subtitle),
       title,
     };
@@ -952,10 +962,14 @@ export type StrategyModuleDraft = {
 };
 
 export type StrategyModulePromptPlanItem = {
+  copyRequirements: string;
+  designSpec?: string;
+  imageType?: string;
   imagePrompt: string;
   sceneDescription: string;
   styleId?: string;
   styleTitle?: string;
+  visualConsistency?: Record<string, unknown>;
 };
 
 type StrategyModuleDragPreview = {
@@ -1246,7 +1260,7 @@ function ProductStrategyDraftingPanel({
             >
               <div className="mb-3 flex items-start justify-between gap-3">
                 <h4 className="min-w-0 text-[13px] font-medium text-slate-950">
-                  {moduleDraft.title}: {moduleDraft.description}
+                  {moduleDraft.promptPlanItems?.[0]?.imageType || `${moduleDraft.title}: ${moduleDraft.description}`}
                 </h4>
                 <div className="flex shrink-0 items-center gap-1 text-slate-400">
                   <button
@@ -1323,7 +1337,8 @@ function ProductStrategyDraftingPanel({
             >
               <div className="mb-3 flex items-start justify-between gap-3">
                 <h4 className="min-w-0 text-[13px] font-medium text-slate-950">
-                  {draggingModule.title}: {draggingModule.description}
+                  {draggingModule.promptPlanItems?.[0]?.imageType ||
+                    `${draggingModule.title}: ${draggingModule.description}`}
                 </h4>
                 <GripVertical className="mt-1 size-4 shrink-0 text-slate-400" />
               </div>
@@ -1345,7 +1360,7 @@ function createStrategyModuleDraft(
   const promptPlanItems = normalizePromptPlanItemsForModule(promptPlan, module.id);
   if (promptPlanItems.length > 0) {
     return {
-      content: promptPlanItems[0].sceneDescription,
+      content: promptPlanItems[0].copyRequirements,
       description: module.description,
       id: module.id,
       promptPlanItems,
@@ -1401,18 +1416,28 @@ function normalizePromptPlanItem(item: PromptPlanItem):
   }
   const intent = item.intent as Record<string, unknown>;
   const moduleId = stringField(intent.moduleId);
-  const sceneDescription = stringField(intent.sceneDescription) || item.displaySummary.trim();
+  const copyRequirements =
+    stringField(intent.copyRequirements) || stringField(intent.sceneDescription) || item.displaySummary.trim();
+  const sceneDescription = copyRequirements;
   const imagePrompt = stringField(intent.imagePrompt);
-  if (!moduleId || !sceneDescription || !imagePrompt) {
+  const visualConsistency =
+    intent.visualConsistency && typeof intent.visualConsistency === "object"
+      ? (intent.visualConsistency as Record<string, unknown>)
+      : undefined;
+  if (!moduleId || !copyRequirements || !imagePrompt) {
     return null;
   }
 
   return {
+    copyRequirements,
+    designSpec: stringField(intent.designSpec) || stringField(intent.design_spec),
+    imageType: stringField(intent.imageType) || stringField(intent.image_type),
     imagePrompt,
     moduleId,
     sceneDescription,
     styleId: stringField(intent.styleId),
     styleTitle: stringField(intent.styleTitle),
+    visualConsistency,
   };
 }
 
@@ -1437,8 +1462,13 @@ function createProductDetailPromptPlanIntent(
     productSellingPoints: productPrompt.trim(),
     ratio,
     viralStyles: selectedViralStyles.map((style, index) => ({
+      colorDescription: style.colorDescription ?? "",
       colors: style.colors,
       designFocus: style.designFocus ?? "",
+      fontStyleDescription: style.fontStyleDescription ?? "",
+      globalStyleNote: style.globalStyleNote ?? "",
+      iconStyle: style.iconStyle ?? "",
+      reasoning: style.reasoning ?? "",
       styleId: style.id || `style-${index + 1}`,
       styleTitle: style.title,
       subtitle: style.subtitle,
@@ -1467,9 +1497,14 @@ function createProductDetailPromptPlanCacheKey(
     })),
     productPrompt: productPrompt.trim(),
     selectedViralStyles: selectedViralStyles.map((style) => ({
+      colorDescription: style.colorDescription ?? "",
       colors: style.colors,
       designFocus: style.designFocus ?? "",
+      fontStyleDescription: style.fontStyleDescription ?? "",
+      globalStyleNote: style.globalStyleNote ?? "",
       id: style.id ?? "",
+      iconStyle: style.iconStyle ?? "",
+      reasoning: style.reasoning ?? "",
       subtitle: style.subtitle,
       title: style.title,
     })),

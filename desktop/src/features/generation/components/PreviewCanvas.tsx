@@ -48,16 +48,20 @@ export type GeneratedReferenceImage = {
 };
 
 export type GeneratedDetailImage = {
+  designSpec?: string;
   errorMessage?: string;
   groupId?: string;
   groupTitle?: string;
   id: string;
   imageNo?: number;
+  imageType?: string;
   assetId?: string;
   assetLocalPath?: string;
   assetRelativePath?: string;
   kind?: "image" | "listing-copy" | "source-image";
   listingCopy?: ProductListingCopy;
+  copyRequirements?: string;
+  coreImagePrompt?: string;
   prompt?: string;
   ratio?: string;
   referenceImages?: GeneratedReferenceImage[];
@@ -66,6 +70,7 @@ export type GeneratedDetailImage = {
   src?: string;
   status: "generating" | "complete" | "failed";
   title: string;
+  visualConsistency?: Record<string, unknown>;
 };
 
 export type ProductListingCopy = {

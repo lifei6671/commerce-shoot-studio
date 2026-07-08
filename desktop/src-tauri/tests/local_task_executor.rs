@@ -226,6 +226,14 @@ fn run_next_invokes_product_detail_model_once_per_item_in_one_task() {
     assert_eq!(result.task_id, task.id);
     assert_eq!(task_count, 1);
     assert_eq!(invocation_count, 3);
+    assert_eq!(
+        task_event_count(&workspace_dir, &task.id, "task.item-provider-called"),
+        3
+    );
+    assert_eq!(
+        task_event_count(&workspace_dir, &task.id, "task.item-provider-succeeded"),
+        3
+    );
     assert_eq!(detail.output_assets.len(), 3);
     assert_eq!(
         detail
@@ -267,6 +275,43 @@ fn run_next_preserves_unique_sort_orders_when_items_return_multiple_images() {
             .map(|asset| asset.sort_order)
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3]
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn run_next_keeps_successful_product_detail_items_when_one_item_is_invalid() {
+    let workspace_dir = initialized_workspace("local-executor-product-detail-partial-failure");
+    let generation_service = GenerationService::new();
+    let task = generation_service
+        .create_task(
+            &workspace_dir,
+            create_product_detail_task_with_invalid_item("product-detail-partial-failure-exec-1"),
+        )
+        .expect("product detail task should create");
+
+    LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should run")
+        .expect("queued task should exist");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("task detail should load");
+
+    assert_eq!(detail.task.status, GenerationTaskStatus::Succeeded);
+    assert_eq!(detail.output_assets.len(), 2);
+    assert_eq!(
+        detail
+            .output_assets
+            .iter()
+            .map(|asset| asset.sort_order)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(
+        task_event_count(&workspace_dir, &task.id, "task.item-failed"),
+        1
     );
 
     remove_workspace(&workspace_dir);
@@ -467,6 +512,38 @@ fn create_product_detail_multi_image_task(idempotency_key: &str) -> CreateGenera
                     "imageId": "detail",
                     "moduleId": "detail",
                     "imagePrompt": "商品细节图，展示印花与面料。"
+                }
+            ]
+        })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_product_detail_task_with_invalid_item(
+    idempotency_key: &str,
+) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Product,
+        kind: GenerationTaskKind::ImageGeneration,
+        title: "商品详情图".to_string(),
+        prompt_plan_id: Some("local-product-plan".to_string()),
+        input: Some(serde_json::json!({
+            "items": [
+                {
+                    "imageId": "hero",
+                    "moduleId": "hero",
+                    "imagePrompt": "首屏主视觉。"
+                },
+                {
+                    "imageId": "invalid",
+                    "moduleId": "invalid"
+                },
+                {
+                    "imageId": "detail",
+                    "moduleId": "detail",
+                    "imagePrompt": "商品细节图。"
                 }
             ]
         })),

@@ -70,15 +70,6 @@ type ProductGenerationInputSnapshot = {
   settings: ProductGenerationSettings;
 };
 
-type ProductListingCopyPromptScene = {
-  groupTitle?: string;
-  imageNo?: number;
-  imagePrompt?: string;
-  ratio?: string;
-  sceneDescription?: string;
-  title: string;
-};
-
 function createProductGenerationInputSnapshot(
   settings: ProductGenerationSettings,
   productPrompt: string,
@@ -95,40 +86,26 @@ function createProductGenerationInputSnapshot(
 }
 
 function createProductListingCopyPrompt(input: {
+  designSpec: string;
   groupTitle?: string;
   language: string;
   market: string;
   platform: string;
   productSellingPoints: string;
-  scenes: ProductListingCopyPromptScene[];
 }) {
-  const scenesSummary =
-    input.scenes.length > 0
-      ? input.scenes
-          .map((scene, index) => {
-            const sceneNo = scene.imageNo ?? index + 1;
-            const description = scene.sceneDescription || scene.imagePrompt || "未提供场景描述";
-            return [
-              `${sceneNo}. ${scene.title}`,
-              scene.groupTitle ? `分组：${scene.groupTitle}` : "",
-              scene.ratio ? `画幅：${scene.ratio}` : "",
-              `场景：${description}`,
-            ]
-              .filter(Boolean)
-              .join("\n");
-          })
-          .join("\n\n")
-      : "暂无详情图场景，请仅基于商品卖点生成通用上架文案。";
   const systemPrompt =
-    "你是专业电商商品上架文案助手。只基于用户提供的商品卖点和详情图场景写文案，不编造品牌、价格、销量、认证或未提供参数。";
+    "你是专业电商商品上架文案助手。只基于用户提供的商品卖点和设计规范写文案，不编造品牌、价格、销量、认证或未提供参数。必须只输出一个合法 JSON 对象。";
   const userPrompt = [
     `目标平台：${input.platform}`,
     `目标市场：${input.market}`,
     `目标语言：${input.language}`,
     input.groupTitle ? `风格分组：${input.groupTitle}` : "",
     `商品卖点：${input.productSellingPoints || "未提供商品卖点"}`,
-    `详情图场景：\n${scenesSummary}`,
-    "请输出严格 JSON 对象，字段必须包含 title, sellingPoints, promotionBenefits, detailCopy, searchKeywords, attributeWords, mainImageGuidance。",
+    `设计规范：\n${input.designSpec || "未提供设计规范"}`,
+    "输出要求：只输出一个 JSON 对象，不要输出 Markdown、代码块、解释、前后缀文本或多余字段。",
+    "字段必须严格包含 title, sellingPoints, promotionBenefits, detailCopy, searchKeywords, attributeWords, mainImageGuidance。",
+    "字段类型要求：title 和 detailCopy 必须是非空字符串；sellingPoints、promotionBenefits、searchKeywords、attributeWords、mainImageGuidance 必须是字符串数组。",
+    "JSON 示例结构：{\"title\":\"商品标题\",\"sellingPoints\":[\"卖点1\"],\"promotionBenefits\":[\"利益点1\"],\"detailCopy\":\"详情页文案\",\"searchKeywords\":[\"搜索词\"],\"attributeWords\":[\"属性词\"],\"mainImageGuidance\":[\"主图指引\"]}",
   ]
     .filter(Boolean)
     .join("\n");
@@ -313,14 +290,19 @@ export function App() {
                 style,
               );
               return {
+                copyRequirements: imagePlan.copyRequirements,
+                coreImagePrompt: imagePlan.coreImagePrompt,
+                designSpec: imagePlan.designSpec,
                 groupId,
                 groupTitle: style.title,
                 id: `${groupId}-${draft.id}`,
                 imageNo: styleIndex * drafts.length + draftIndex + 1,
+                imageType: imagePlan.imageType,
                 prompt: imagePlan.imagePrompt,
                 sceneDescription: imagePlan.sceneDescription,
                 status: "generating" as const,
                 title: draft.title,
+                visualConsistency: imagePlan.visualConsistency,
               };
             });
             const sourceImage: GeneratedDetailImage = {
@@ -632,8 +614,12 @@ export function App() {
     const generationItems = imageItems.map((image, index) => {
       const draft = drafts.find((item) => image.id.endsWith(`-${item.id}`)) ?? drafts[index % Math.max(drafts.length, 1)];
       return {
+        copyRequirements: image.copyRequirements ?? image.sceneDescription ?? draft?.content ?? "",
+        designSpec: image.designSpec ?? "",
         imageId: image.id,
         imageNo: image.imageNo ?? index + 1,
+        imageType: image.imageType ?? `${image.title}: ${draft?.description ?? image.sceneDescription ?? ""}`,
+        imagePrompt: image.coreImagePrompt ?? image.prompt ?? "",
         moduleId: draft?.id ?? image.id,
         title: image.title,
         groupId: image.groupId,
@@ -644,6 +630,7 @@ export function App() {
             ? inputSnapshot.settings.advancedFormats.join("、")
             : inputSnapshot.settings.format,
         sortOrder: index,
+        visualConsistency: image.visualConsistency ?? {},
       };
     });
     const promptPlanSnapshot = {
@@ -663,8 +650,13 @@ export function App() {
           groupId: item.groupId,
           groupTitle: item.groupTitle,
           imageNo: item.imageNo,
+          copyRequirements: item.copyRequirements,
+          designSpec: item.designSpec,
+          imageType: item.imageType,
+          imagePrompt: item.imagePrompt,
           sceneDescription: item.sceneDescription,
           ratio: item.ratio,
+          visualConsistency: item.visualConsistency,
         },
       })),
     };
@@ -697,6 +689,7 @@ export function App() {
         (item) => !listingCopyItem.groupId || item.groupId === listingCopyItem.groupId,
       );
       const listingScenes = relatedGenerationItems.length > 0 ? relatedGenerationItems : generationItems;
+      const listingDesignSpec = createListingCopyDesignSpec(listingScenes);
       const listingTask = await localGenerationPort.createTask({
           idempotencyKey: `${listingCopyItem.id}:listing-copy`,
           workspace: "product",
@@ -709,16 +702,16 @@ export function App() {
             market: inputSnapshot.settings.market,
             language: inputSnapshot.settings.language,
             productSellingPoints: inputSnapshot.productPrompt,
+            designSpec: listingDesignSpec,
             groupId: listingCopyItem.groupId,
             groupTitle: listingCopyItem.groupTitle,
-            scenes: listingScenes,
             prompt: createProductListingCopyPrompt({
+              designSpec: listingDesignSpec,
               groupTitle: listingCopyItem.groupTitle,
               language: inputSnapshot.settings.language,
               market: inputSnapshot.settings.market,
               platform: inputSnapshot.settings.platform,
               productSellingPoints: inputSnapshot.productPrompt,
-              scenes: listingScenes,
             }),
           },
           promptPlanSnapshot,
@@ -960,6 +953,7 @@ export function App() {
     publishImages(latestImages);
 
     try {
+      const listingDesignSpec = createListingCopyDesignSpec(relatedScenes);
       const listingTask = await localGenerationPort.createTask({
         idempotencyKey: `${image.id}:listing-copy-retry:${Date.now()}`,
         workspace: "product",
@@ -972,16 +966,16 @@ export function App() {
           market: productGenerationSettings.market,
           language: productGenerationSettings.language,
           productSellingPoints: productPrompt || parentRecord.inputSummary,
+          designSpec: listingDesignSpec,
           groupId: image.groupId,
           groupTitle: image.groupTitle,
-          scenes: relatedScenes,
           prompt: createProductListingCopyPrompt({
+            designSpec: listingDesignSpec,
             groupTitle: image.groupTitle,
             language: productGenerationSettings.language,
             market: productGenerationSettings.market,
             platform: productGenerationSettings.platform,
             productSellingPoints: productPrompt || parentRecord.inputSummary,
-            scenes: relatedScenes,
           }),
         },
         inputAssets: [],
@@ -2037,6 +2031,8 @@ function createTaskPollSignature(detail: GenerationTaskDetail) {
   return [
     detail.task.status,
     detail.task.stage,
+    detail.task.updatedAt,
+    detail.events.length,
     detail.outputAssets.length,
     detail.output ? "has-output" : "no-output",
   ].join("|");
@@ -2139,14 +2135,18 @@ function createProductDetailRetryPrompt(
 ) {
   const basePrompt = image.prompt || image.sceneDescription || `场景描述：${image.title}`;
   return [
+    image.designSpec,
+    image.imageType ? `场景核心卖点：${image.imageType}` : "",
     basePrompt,
+    image.sceneDescription ? `用户可修改文案要求：${image.sceneDescription}` : "",
     "单图重新生成要求：必须与参考图保持一致，严格保持商品主体、颜色、版型、图案、材质观感和关键外观特征一致，不得替换商品，不得改变已提供事实。",
     `平台与语言：${settings.platform}，${settings.market}，${settings.language}`,
     createLocalePromptConstraint(settings),
     `商品卖点事实边界：${productPrompt.trim() || "需补充商品卖点信息"}`,
-    createNoVisibleTextPromptConstraint(),
-    "禁止项：禁止生成品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
-  ].join("\n");
+    createOriginalImageFidelityConstraint(),
+    createVisibleTextPromptConstraint(),
+    "禁止项：禁止新增未提供的品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
+  ].filter(Boolean).join("\n");
 }
 
 function parseListingCopyOutput(output: unknown): ProductListingCopy | null {
@@ -2331,12 +2331,17 @@ function createFlatProductResultItems(
   const images: GeneratedDetailImage[] = drafts.map((draft, index) => {
     const imagePlan = createProductDetailImagePlan(draft, settings, productPrompt);
     return {
+      copyRequirements: imagePlan.copyRequirements,
+      coreImagePrompt: imagePlan.coreImagePrompt,
+      designSpec: imagePlan.designSpec,
       id: `${recordId}-${draft.id}`,
       imageNo: index + 1,
+      imageType: imagePlan.imageType,
       prompt: imagePlan.imagePrompt,
       sceneDescription: imagePlan.sceneDescription,
       status: "generating" as const,
       title: draft.title,
+      visualConsistency: imagePlan.visualConsistency,
     };
   });
 
@@ -2361,18 +2366,53 @@ function createProductDetailImagePlan(
   productPrompt: string,
   viralStyle?: ViralStyleAnalysisResult,
 ) {
-  const promptPlanItem = draft.contentEdited ? undefined : findPromptPlanItemForStyle(draft, viralStyle);
+  const promptPlanItem = findPromptPlanItemForStyle(draft, viralStyle);
   const sceneDescription = draft.contentEdited
     ? draft.content
-    : promptPlanItem?.sceneDescription || draft.content;
-  const imagePrompt = promptPlanItem?.imagePrompt
-    ? appendProductDetailPromptSafeguards(promptPlanItem.imagePrompt, settings, productPrompt, viralStyle)
-    : createProductDetailImagePrompt(draft, settings, productPrompt, viralStyle, sceneDescription);
+    : promptPlanItem?.copyRequirements || promptPlanItem?.sceneDescription || draft.content;
+  const coreImagePrompt = promptPlanItem?.imagePrompt;
+  const imageType = promptPlanItem?.imageType || `${draft.title}: ${draft.description}`;
+  const designSpec = promptPlanItem?.designSpec || createProductDetailDesignSpec(productPrompt, viralStyle, promptPlanItem);
+  const imagePrompt = coreImagePrompt
+    ? appendProductDetailPromptSafeguards(
+        combineProductDetailImagePromptAndCopy(coreImagePrompt, sceneDescription),
+        settings,
+        productPrompt,
+        viralStyle,
+        draft,
+        promptPlanItem,
+        imageType,
+        designSpec,
+      )
+    : createProductDetailImagePrompt(
+        draft,
+        settings,
+        productPrompt,
+        viralStyle,
+        sceneDescription,
+        promptPlanItem,
+        imageType,
+        designSpec,
+      );
 
   return {
+    copyRequirements: sceneDescription,
+    coreImagePrompt: coreImagePrompt ?? imagePrompt,
+    designSpec,
+    imageType,
     imagePrompt,
     sceneDescription,
+    visualConsistency: promptPlanItem?.visualConsistency,
   };
+}
+
+function combineProductDetailImagePromptAndCopy(imagePrompt: string, copyRequirements: string) {
+  return [
+    imagePrompt,
+    copyRequirements.trim() ? `用户可修改文案要求：${copyRequirements.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function createProductDetailImagePrompt(
@@ -2381,31 +2421,31 @@ function createProductDetailImagePrompt(
   productPrompt: string,
   viralStyle: ViralStyleAnalysisResult | undefined,
   sceneDescription: string,
+  promptPlanItem: StrategyModulePromptPlanItem | undefined,
+  imageType: string,
+  designSpec: string,
 ) {
   const formatLabel =
     settings.advancedFormats.length > 0 ? settings.advancedFormats.join("、") : settings.format;
   const styleAnchor = viralStyle
-    ? [
-        `爆款风格：${viralStyle.title}`,
-        viralStyle.subtitle ? `风格语气：${viralStyle.subtitle}` : "",
-        viralStyle.designFocus ? `设计重点：${viralStyle.designFocus}` : "",
-        viralStyle.colors.length > 0 ? `沿用颜色：${viralStyle.colors.join("、")}` : "颜色：沿用输入风格，不新增颜色值",
-      ]
-        .filter(Boolean)
-        .join("；")
+    ? createViralStylePromptAnchor(viralStyle)
     : "爆款风格：未选择，采用中性、干净、可泛化的电商摄影棚视觉。";
 
   return [
+    designSpec,
+    `场景核心卖点：${imageType}`,
     `场景描述：${sceneDescription}`,
     `商品卖点：${productPrompt.trim() || "需补充商品卖点信息"}`,
     `模块目的：${draft.title}，${draft.description}`,
+    createVisualConsistencyPromptAnchor(promptPlanItem?.visualConsistency),
     `平台与语言：${settings.platform}，${settings.market}，${settings.language}`,
     createLocalePromptConstraint(settings),
     `画面比例：适配 ${formatLabel} 比例的电商详情页画面`,
     styleAnchor,
-    createNoVisibleTextPromptConstraint(),
-    "禁止项：禁止生成品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
-  ].join("\n");
+    createOriginalImageFidelityConstraint(),
+    createVisibleTextPromptConstraint(),
+    "禁止项：禁止新增未提供的品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
+  ].filter(Boolean).join("\n");
 }
 
 function appendProductDetailPromptSafeguards(
@@ -2413,20 +2453,207 @@ function appendProductDetailPromptSafeguards(
   settings: typeof defaultProductGenerationSettings,
   productPrompt: string,
   viralStyle?: ViralStyleAnalysisResult,
+  draft?: StrategyModuleDraft,
+  promptPlanItem?: StrategyModulePromptPlanItem,
+  imageType?: string,
+  designSpec?: string,
 ) {
   const formatLabel =
     settings.advancedFormats.length > 0 ? settings.advancedFormats.join("、") : settings.format;
-  const styleLine = viralStyle ? `爆款风格：${viralStyle.title}` : "爆款风格：未选择";
+  const styleLine = viralStyle ? createViralStylePromptAnchor(viralStyle) : "爆款风格：未选择";
   return [
+    designSpec,
+    imageType ? `场景核心卖点：${imageType}` : "",
+    draft ? `当前场景：${draft.title}，${draft.description}` : "",
     imagePrompt,
     `商品卖点事实边界：${productPrompt.trim() || "需补充商品卖点信息"}`,
+    createVisualConsistencyPromptAnchor(promptPlanItem?.visualConsistency),
     `平台与语言：${settings.platform}，${settings.market}，${settings.language}`,
     createLocalePromptConstraint(settings),
     `画面比例：适配 ${formatLabel} 比例的电商详情页画面`,
     styleLine,
-    createNoVisibleTextPromptConstraint(),
-    "禁止项：禁止生成品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
+    createOriginalImageFidelityConstraint(),
+    createVisibleTextPromptConstraint(),
+    "禁止项：禁止新增未提供的品牌 Logo、价格、销量、认证标识、虚构参数、侵权 IP、名人肖像、第三方商标、未提供的材质或功效。",
+  ].filter(Boolean).join("\n");
+}
+
+function createProductDetailDesignSpec(
+  productPrompt: string,
+  viralStyle: ViralStyleAnalysisResult | undefined,
+  promptPlanItem: StrategyModulePromptPlanItem | undefined,
+) {
+  const productSentence = createProductSummarySentence(productPrompt);
+  const sellingPoints = createShortTerms(productPrompt, ["需补充卖点"], 3);
+  const concerns = createConcernTerms(productPrompt);
+
+  return [
+    "产品与卖点",
+    `产品：${productSentence}`,
+    `卖点：${sellingPoints.join(" / ")}`,
+    `顾虑：${concerns.join(" / ")}`,
+    `视觉重心：${createVisualFocusSentence(sellingPoints, concerns, promptPlanItem?.visualConsistency)}`,
+    "",
+    "视觉定调",
+    `风格：${createStyleDirectionSentence(viralStyle)}`,
+    `色彩：${createColorDirectionSentence(viralStyle, promptPlanItem?.visualConsistency)}`,
+    `字体：${createFontDirectionSentence(viralStyle)}`,
+    `色温：${createColorTemperatureSentence(viralStyle)}`,
+    `光质：${createLightQualitySentence(viralStyle, promptPlanItem?.visualConsistency)}`,
   ].join("\n");
+}
+
+function createProductSummarySentence(productPrompt: string) {
+  const value = productPrompt.trim();
+  if (!value) {
+    return "需补充产品信息。";
+  }
+  return /[。.!！?？]$/.test(value) ? value : `${value}。`;
+}
+
+function createShortTerms(productPrompt: string, fallback: string[], limit: number) {
+  const terms = productPrompt
+    .split(/[，,、；;。.!！?？\n\r]+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0 && term.length <= 16);
+  const uniqueTerms = Array.from(new Set(terms)).slice(0, limit);
+  return uniqueTerms.length > 0 ? uniqueTerms : fallback;
+}
+
+function createConcernTerms(productPrompt: string) {
+  const source = productPrompt.toLowerCase();
+  if (/头盔|骑行|护具|安全帽|helmet/.test(source)) {
+    return ["佩戴闷热", "安全感不足", "日常不百搭"];
+  }
+  if (/洁面|洗面奶|护肤|精华|面霜|乳液|防晒|cleanser|skincare/.test(source)) {
+    return ["清洁刺激", "洗后紧绷", "成分不明"];
+  }
+  if (/衣|裤|裙|鞋|包|背心|夹克|外套|t恤|t-shirt|jacket|dress|shoe|bag/.test(source)) {
+    return ["版型显臃肿", "闷汗不透气", "质感不稳定"];
+  }
+  if (/食品|零食|饮料|茶|咖啡|饼干|food|drink|coffee|tea/.test(source)) {
+    return ["口味不直观", "配料不清晰", "包装无质感"];
+  }
+  return ["效果不直观", "质感不稳定", "信息不可信"];
+}
+
+function createVisualFocusSentence(
+  sellingPoints: string[],
+  concerns: string[],
+  visualConsistency?: Record<string, unknown>,
+) {
+  const productAnchor = readVisualConsistencyText(visualConsistency, "productAnchor");
+  const compositionAnchor = readVisualConsistencyText(visualConsistency, "compositionAnchor");
+  const focusSubject = productAnchor || "商品主体";
+  const sellingPointText = sellingPoints.slice(0, 2).join("+") || "核心卖点";
+  const concernText = concerns[0] || "购买";
+  const compositionText = compositionAnchor ? `，保持${compositionAnchor}` : "";
+  return `${focusSubject}作为画面第一视觉中心${compositionText}，直观展示${sellingPointText}，打消用户${concernText}顾虑`;
+}
+
+function createStyleDirectionSentence(viralStyle?: ViralStyleAnalysisResult) {
+  if (!viralStyle) {
+    return "中性干净的电商详情页视觉，突出商品识别和转化效率";
+  }
+  const styleText = [viralStyle.title, viralStyle.subtitle, viralStyle.designFocus]
+    .map((item) => item?.trim())
+    .filter(Boolean)
+    .join(" / ");
+  return styleText || "中性干净的电商详情页视觉，突出商品识别和转化效率";
+}
+
+function createColorDirectionSentence(
+  viralStyle: ViralStyleAnalysisResult | undefined,
+  visualConsistency?: Record<string, unknown>,
+) {
+  const colors = viralStyle?.colors?.filter((color) => color.trim()).join("/");
+  const colorDescription = viralStyle?.colorDescription?.trim();
+  const backgroundAnchor = readVisualConsistencyText(visualConsistency, "backgroundAnchor");
+  if (colors && colorDescription) {
+    return `${colors}作为统一配色，${colorDescription}，产品保持原色`;
+  }
+  if (colors) {
+    return `${colors}作为统一配色，产品保持原色，重点信息使用高对比强调`;
+  }
+  if (backgroundAnchor) {
+    return `${backgroundAnchor}作为统一背景基调，产品保持原色，重点信息使用高对比强调`;
+  }
+  return "中性色背景基调，产品保持原色，重点信息使用高对比强调";
+}
+
+function createFontDirectionSentence(viralStyle?: ViralStyleAnalysisResult) {
+  return (
+    viralStyle?.fontStyleDescription?.trim() ||
+    "中等偏粗无衬线体用于标题，干净无衬线体用于正文信息"
+  );
+}
+
+function createColorTemperatureSentence(viralStyle?: ViralStyleAnalysisResult) {
+  const note = viralStyle?.globalStyleNote?.trim();
+  if (note && /暖|warm/i.test(note)) {
+    return "暖色温（全套统一）";
+  }
+  if (note && /冷|cold|cool/i.test(note)) {
+    return "冷色温（全套统一）";
+  }
+  return "中性（全套统一）";
+}
+
+function createLightQualitySentence(
+  viralStyle: ViralStyleAnalysisResult | undefined,
+  visualConsistency?: Record<string, unknown>,
+) {
+  const lightingAnchor = readVisualConsistencyText(visualConsistency, "lightingAnchor");
+  const globalStyleNote = viralStyle?.globalStyleNote?.trim();
+  if (lightingAnchor && globalStyleNote) {
+    return `${lightingAnchor} + ${globalStyleNote}`;
+  }
+  if (lightingAnchor) {
+    return `${lightingAnchor}，突出商品轮廓、材质和关键信息`;
+  }
+  if (globalStyleNote) {
+    return globalStyleNote;
+  }
+  return "自然柔光为主，局部轮廓光突出商品边缘与材质";
+}
+
+function readVisualConsistencyText(visualConsistency: Record<string, unknown> | undefined, key: string) {
+  const value = visualConsistency?.[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function createListingCopyDesignSpec(items: Array<{ designSpec?: string; groupTitle?: string }>) {
+  const specs = Array.from(
+    new Set(
+      items
+        .map((item) => item.designSpec?.trim())
+        .filter((value): value is string => Boolean(value)),
+    ),
+  );
+  if (specs.length === 0) {
+    return "设计规范：未提供明确设计规范，仅根据商品卖点生成上架文案。";
+  }
+  return specs.join("\n\n");
+}
+
+function createOriginalImageFidelityConstraint() {
+  return "原图忠实约束：用户上传原图是商品唯一视觉事实源；核心商品主体只能做光影、背景、构图、清晰度和额外画面文案层面的微调，禁止重绘、换款、换包装、改颜色、改结构、改 Logo、改图案、改比例或新增未提供配件。必须逐项保留参考图中商品主体的原始色块、渐变、纹理、缝线、轮廓、版型、比例、Logo 位置、胸前英文印花文字、包装上的原有印花文字、图案和图形；这些原有文字和图案属于商品外观事实，不是需要生成的新文案，不得翻译、重写、删除或弱化，不得遮挡、改色或替换。";
+}
+
+function createViralStylePromptAnchor(viralStyle: ViralStyleAnalysisResult) {
+  return [
+    `爆款风格：${viralStyle.title}`,
+    viralStyle.subtitle ? `风格语气：${viralStyle.subtitle}` : "",
+    viralStyle.reasoning ? `推荐理由：${viralStyle.reasoning}` : "",
+    viralStyle.designFocus ? `设计重点：${viralStyle.designFocus}` : "",
+    viralStyle.globalStyleNote ? `全局光影氛围：${viralStyle.globalStyleNote}` : "",
+    viralStyle.fontStyleDescription ? `字体气质：${viralStyle.fontStyleDescription}` : "",
+    viralStyle.colors.length > 0 ? `沿用颜色：${viralStyle.colors.join("、")}` : "颜色：沿用输入风格，不新增颜色值",
+    viralStyle.colorDescription ? `配色用途：${viralStyle.colorDescription}` : "",
+    viralStyle.iconStyle ? `辅助图标风格：${viralStyle.iconStyle}` : "",
+  ]
+    .filter(Boolean)
+    .join("；");
 }
 
 function createLocalePromptConstraint(settings: typeof defaultProductGenerationSettings) {
@@ -2446,8 +2673,24 @@ function createLocalePromptConstraint(settings: typeof defaultProductGenerationS
   return "国家与语言约束：人物、场景和文字语言必须匹配目标市场与目标语言。";
 }
 
-function createNoVisibleTextPromptConstraint() {
-  return "生图文字约束：画面中不得出现任何可读文字、汉字、英文、数字、标注条、说明牌、占位标签或文字框；需要放置文案的位置只保留干净空白构图，由后期叠字完成。";
+function createVisualConsistencyPromptAnchor(visualConsistency?: Record<string, unknown>) {
+  if (!visualConsistency) {
+    return "";
+  }
+  const entries = [
+    ["商品主体锚点", visualConsistency.productAnchor],
+    ["背景锚点", visualConsistency.backgroundAnchor],
+    ["光影锚点", visualConsistency.lightingAnchor],
+    ["构图锚点", visualConsistency.compositionAnchor],
+    ["文字区锚点", visualConsistency.textAreaAnchor],
+  ]
+    .map(([label, value]) => (typeof value === "string" && value.trim() ? `${label}：${value.trim()}` : ""))
+    .filter(Boolean);
+  return entries.length > 0 ? `视觉一致性：${entries.join("；")}` : "";
+}
+
+function createVisibleTextPromptConstraint() {
+  return "生图文字约束：必须按照用户可修改文案要求生成画面内文字、结构化信息和已启用标注；文字必须清晰可读并使用目标语言；未在文案要求中列出的文字、乱码、伪文字、价格、销量、认证标识和虚假参数一律禁止。";
 }
 
 function findPromptPlanItemForStyle(

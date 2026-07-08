@@ -389,6 +389,26 @@ fn parse_viral_style_analysis_output(output_text: &str) -> Result<Value, AiAssis
                 "爆款风格分析返回结构缺少标题或副标题。".to_string(),
             ));
         }
+        for field_name in [
+            "reasoning",
+            "designFocus",
+            "globalStyleNote",
+            "fontStyleDescription",
+            "colorDescription",
+            "iconStyle",
+        ] {
+            if item
+                .get(field_name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                return Err(AiAssistError::Validation(
+                    "爆款风格分析返回结构缺少生图指导字段。".to_string(),
+                ));
+            }
+        }
         let colors = item
             .get("colors")
             .and_then(Value::as_array)

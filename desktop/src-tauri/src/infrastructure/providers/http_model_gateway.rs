@@ -218,6 +218,11 @@ impl HttpModelGatewayAdapter {
                 "Provider 流式响应没有返回可用文本。".to_string(),
             ));
         }
+        self.write_diagnostic(json!({
+            "timestampMs": current_timestamp_ms(),
+            "event": "stream_output_text",
+            "outputText": output_text,
+        }));
 
         Ok(ModelGatewayAdapterResult {
             output_text: Some(output_text),
@@ -302,6 +307,7 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
             "status": status.as_u16(),
             "success": status.is_success(),
             "responseByteLength": response_text.len(),
+            "rawResponse": response_text,
         }));
         if !status.is_success() {
             return Err(ModelGatewayError::ProviderUnavailable(
@@ -313,6 +319,7 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 "timestampMs": current_timestamp_ms(),
                 "event": "response_parse_failed",
                 "responseByteLength": response_text.len(),
+                "rawResponse": response_text,
             }));
             ModelGatewayError::ProviderUnavailable("Provider 返回的 JSON 无法解析。".to_string())
         })?;
@@ -689,10 +696,8 @@ fn sanitize_diagnostic_string(key: Option<&str>, text: &str) -> Value {
     }
 
     match key {
-        Some("model") | Some("role") | Some("type") => Value::String(text.to_string()),
-        Some("text") | Some("content") | Some("prompt") | Some("instructions") => json!({
-            "textCharCount": text.chars().count(),
-        }),
+        Some("model") | Some("role") | Some("type") | Some("text") | Some("content")
+        | Some("prompt") | Some("instructions") => Value::String(text.to_string()),
         Some("image_url") | Some("url") => json!({
             "urlCharCount": text.chars().count(),
         }),
@@ -804,7 +809,12 @@ fn value_kind(value: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_complete_sse_blocks, parse_model_gateway_sse_event, ModelGatewaySseEvent};
+    use super::{
+        drain_complete_sse_blocks, parse_model_gateway_sse_event,
+        sanitize_model_gateway_request_for_diagnostics, HttpModelGatewayRequestConfig,
+        ModelGatewaySseEvent,
+    };
+    use serde_json::json;
 
     #[test]
     fn drains_sse_blocks_without_corrupting_split_utf8_characters() {
@@ -832,5 +842,25 @@ mod tests {
             Some(ModelGatewaySseEvent::Delta("卖点内容".to_string()))
         );
         assert!(!blocks[0].contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn diagnostic_request_keeps_full_prompt_text_for_debugging() {
+        let diagnostic = sanitize_model_gateway_request_for_diagnostics(
+            &HttpModelGatewayRequestConfig {
+                endpoint_path: "/images/generations",
+                model: "doubao-seedream-4-0-250828",
+                provider_profile_id: "volcengine",
+            },
+            &json!({
+                "model": "doubao-seedream-4-0-250828",
+                "prompt": "完整商品生图 prompt",
+                "images": ["data:image/png;base64,abc123"],
+            }),
+        );
+
+        assert_eq!(diagnostic["body"]["prompt"], "完整商品生图 prompt");
+        assert_eq!(diagnostic["body"]["images"][0]["mimeType"], "image/png");
+        assert_eq!(diagnostic["body"]["images"][0]["kind"], "imageDataUrl");
     }
 }
