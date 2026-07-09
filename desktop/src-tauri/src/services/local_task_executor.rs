@@ -935,10 +935,10 @@ fn locale_visual_constraint(market: &str, language: &str) -> &'static str {
         || normalized_language.contains("chinese");
 
     if is_china_market && is_chinese_language {
-        return "国家与语言约束：如果画面中出现人物，必须是中国人或中国电商模特气质；如果画面中出现任何文字、标识或信息区文字，必须使用中文，不得出现英文或外文。";
+        return "国家与语言约束：如果画面中出现人物，必须是中国人或中国电商模特气质；新增画面文案、信息区文字和标注标签必须使用中文，不得新增英文或外文。参考图商品主体上已有英文、Logo、印花文字和图案不受目标语言影响，必须按原图原样保留，不得翻译、重写、删除或替换。";
     }
     if is_chinese_language {
-        return "语言约束：如果画面中出现任何文字、标识或信息区文字，必须使用中文，不得出现英文或外文。";
+        return "语言约束：新增画面文案、信息区文字和标注标签必须使用中文，不得新增英文或外文。参考图商品主体上已有英文、Logo、印花文字和图案不受目标语言影响，必须按原图原样保留，不得翻译、重写、删除或替换。";
     }
     "国家与语言约束：人物、场景和文字语言必须匹配目标市场与目标语言。"
 }
@@ -1706,7 +1706,12 @@ mod tests {
         assert!(user_prompt.contains("目标语言：中文"));
         assert!(user_prompt.contains("当前模块目标语言：中文"));
         assert!(user_prompt.contains("必须是中国人或中国电商模特气质"));
-        assert!(user_prompt.contains("必须使用中文"));
+        assert!(user_prompt.contains("新增画面文案、信息区文字和标注标签必须使用中文"));
+        assert!(
+            user_prompt.contains("参考图商品主体上已有英文、Logo、印花文字和图案不受目标语言影响")
+        );
+        assert!(user_prompt.contains("必须按原图原样保留，不得翻译、重写、删除或替换"));
+        assert!(!user_prompt.contains("任何文字、标识或信息区文字"));
         assert!(!user_prompt.contains("文字安全区"));
         assert!(!user_prompt.contains("预留文字安全区"));
         assert!(user_prompt.contains("必须严格按照用户可修改文案要求生成画面内文字"));

@@ -2665,10 +2665,10 @@ function createLocalePromptConstraint(settings: typeof defaultProductGenerationS
     settings.language.includes("中文") || language === "zh" || language.startsWith("zh-") || language.includes("chinese");
 
   if (isChinaMarket && isChineseLanguage) {
-    return "国家与语言约束：若画面出现人物，必须是中国人或中国电商模特气质；若画面出现任何文字、标识或信息区文字，必须使用中文，不得出现英文或外文。";
+    return "国家与语言约束：若画面出现人物，必须是中国人或中国电商模特气质；新增画面文案、信息区文字和标注标签必须使用中文，不得新增英文或外文。参考图商品主体上已有英文、Logo、印花文字和图案不受目标语言影响，必须按原图原样保留，不得翻译、重写、删除或替换。";
   }
   if (isChineseLanguage) {
-    return "语言约束：若画面出现任何文字、标识或信息区文字，必须使用中文，不得出现英文或外文。";
+    return "语言约束：新增画面文案、信息区文字和标注标签必须使用中文，不得新增英文或外文。参考图商品主体上已有英文、Logo、印花文字和图案不受目标语言影响，必须按原图原样保留，不得翻译、重写、删除或替换。";
   }
   return "国家与语言约束：人物、场景和文字语言必须匹配目标市场与目标语言。";
 }
