@@ -10,6 +10,8 @@ export type ProductImageAsset = {
   name: string;
   path: string;
   src: string;
+  /** 模特库展示用缩略图；path/src 仍指向全身原图。 */
+  thumbnailSrc?: string;
   aiAssistDataUrl?: string;
   aiAssistMimeType?: string;
 };

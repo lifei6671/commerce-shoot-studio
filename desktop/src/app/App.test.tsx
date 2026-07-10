@@ -54,6 +54,7 @@ const appTestProviderProfiles = [
       "listing-copy",
       "prompt-plan",
       "product-selling-points",
+      "clothing-scene-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -74,6 +75,7 @@ const appTestProviderProfiles = [
       "listing-copy",
       "prompt-plan",
       "product-selling-points",
+      "clothing-scene-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -94,6 +96,7 @@ const appTestProviderProfiles = [
       "listing-copy",
       "prompt-plan",
       "product-selling-points",
+      "clothing-scene-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
@@ -147,6 +150,7 @@ const appTestModelConfigs = [
   appTestModelConfig("listing-copy", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("prompt-plan", "OpenAI 场景描述", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("product-selling-points", "OpenAI 商品卖点提取", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+  appTestModelConfig("clothing-scene-planning", "OpenAI 服饰场景规划", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("scene-image-generation", "OpenAI 文生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("clothing-tryon-generation", "OpenAI 图生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("viral-style-analysis", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
@@ -162,6 +166,94 @@ function renderApp() {
       <App />
     </ToastProvider>,
   );
+}
+
+function installBuiltinClothingModelMock() {
+  const defaultInvoke = invokeMock.getMockImplementation();
+  invokeMock.mockImplementation((command, args) => {
+    if (command === "asset_list_builtin_models") {
+      return Promise.resolve([
+        {
+          fileName: "model-01.png",
+          id: "model-01",
+          label: "内置模特 01",
+          path: "/app/resources/builtin-models/model-01.png",
+          thumbnailPath: "/app/resources/builtin-model-thumbnails/model-01.png",
+        },
+      ]);
+    }
+    return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+  });
+}
+
+function createClothingPlanningTaskDetail(taskId: string, scene: string) {
+  return {
+    events: [],
+    inputAssets: [],
+    output: {
+      scenes: [
+        {
+          recommendedPoses: [
+            {
+              cameraSetup: { framing: "全身", perspective: "正面", shootingPosition: "平视机位" },
+              poseAction: `${scene}站姿`,
+            },
+          ],
+          scene,
+          scenePromptSegment: `${scene}商业服饰摄影`,
+          sceneVisualAnchor: `${scene}视觉锚点`,
+        },
+      ],
+    },
+    outputAssets: [],
+    task: {
+      id: taskId,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+    },
+  };
+}
+
+function createRestoredClothingTaskDetail(taskId: string, title: string) {
+  return {
+    events: [],
+    input: {
+      items: [
+        {
+          id: `${taskId}-item-1`,
+          poseAction: "自然站立展示服装版型",
+          ratio: "3:4",
+          scene: "都市街头",
+        },
+      ],
+      kind: "clothing-tryon-generation",
+      ratio: "3:4",
+    },
+    inputAssets: [],
+    outputAssets: [
+      {
+        asset: {
+          id: `${taskId}-output-1`,
+          localPath: `/workspace/current/assets/generated/${taskId}.png`,
+          relativePath: `assets/generated/${taskId}.png`,
+        },
+        role: "output",
+        sortOrder: 0,
+      },
+    ],
+    task: {
+      completedAt: "2026-07-02T10:50:00.000Z",
+      createdAt: "2026-07-02T10:49:00.000Z",
+      id: taskId,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+      title,
+      updatedAt: "2026-07-02T10:50:00.000Z",
+      workspace: "clothing",
+    },
+  };
 }
 
 class MockAudioParam {
@@ -284,6 +376,17 @@ describe("App shell", () => {
       if (command === "workspace_run_garbage_collection") {
         return Promise.resolve({ deletedFiles: 0, reclaimedBytes: 0 });
       }
+      if (command === "asset_list_builtin_models") {
+        return Promise.resolve([]);
+      }
+      if (command === "asset_list") {
+        return Promise.resolve({
+          items: [],
+          page: 1,
+          pageSize: 100,
+          total: 0,
+        });
+      }
       if (command === "asset_import_images") {
         const input = (args as { input?: { paths?: string[]; kind?: string } } | undefined)?.input;
         const paths = input?.paths ?? [];
@@ -296,6 +399,7 @@ describe("App shell", () => {
             originalName: path.split(/[\\/]/).pop() ?? `source-${index + 1}.png`,
             mimeType: "image/png",
             relativePath: `assets/${kind}/asset_imported_${index + 1}.png`,
+            localPath: `/workspace/current/assets/${kind}/asset_imported_${index + 1}.png`,
             sha256: `sha256-${index + 1}`,
             sizeBytes: 128,
             lifecycle: "active",
@@ -312,10 +416,15 @@ describe("App shell", () => {
         });
       }
       if (command === "generation_create_task") {
-        const input = (args as { input?: { idempotencyKey?: string; kind?: string } } | undefined)?.input;
+        const input = (args as { input?: { idempotencyKey?: string; input?: { kind?: string }; kind?: string; workspace?: string } } | undefined)?.input;
+        const taskInputKind = input?.input?.kind;
+        const taskIdKind =
+          taskInputKind === "clothing-scene-planning" || taskInputKind === "clothing-tryon-generation"
+            ? taskInputKind
+            : input?.kind;
         const id = input?.idempotencyKey?.includes("listing-copy")
           ? `task_listing_${input.idempotencyKey}`
-          : `task_${input?.kind ?? "generation"}`;
+          : `task_${taskIdKind ?? "generation"}`;
         return Promise.resolve({
           attemptNo: 1,
           createdAt: "2026-07-02T00:00:00.000Z",
@@ -325,7 +434,7 @@ describe("App shell", () => {
           status: "queued",
           title: "测试任务",
           updatedAt: "2026-07-02T00:00:00.000Z",
-          workspace: "product",
+          workspace: input?.workspace ?? "product",
         });
       }
       if (command === "generation_run_next_task") {
@@ -337,6 +446,66 @@ describe("App shell", () => {
       }
       if (command === "generation_get_task_detail") {
         const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId.includes("clothing-scene-planning")) {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            output: {
+              scenes: [
+                {
+                  scene: "都市街头",
+                  sceneVisualAnchor: "城市核心商圈人行道，午后暖调阳光洒落",
+                  scenePromptSegment: "街头时尚摄影，自然光充足照明，8K高清商业电商质感",
+                  recommendedPoses: [
+                    {
+                      cameraSetup: { framing: "全身", perspective: "正面", shootingPosition: "平视机位" },
+                      poseAction: "自然站立，双手插裤兜，肩膀微抬，直视镜头，清晰展示背心正面印花",
+                    },
+                    {
+                      cameraSetup: { framing: "四分之三", perspective: "3/4 侧", shootingPosition: "平视机位" },
+                      poseAction: "侧身迈步向前走，一只手自然搭在裤边，转头看向前方，展示背心侧部剪裁",
+                    },
+                    {
+                      cameraSetup: { framing: "半身", perspective: "侧面", shootingPosition: "平视机位" },
+                      poseAction: "侧身靠在路牌上，一只手随意抬至脑后，展示背心肩线与手臂线条",
+                    },
+                    {
+                      cameraSetup: { framing: "全身", perspective: "正面", shootingPosition: "平视机位" },
+                      checked: false,
+                      poseAction: "身体微向前倾，双手自然垂在身侧，下颌微抬，展示背心整体版型",
+                    },
+                  ],
+                },
+                {
+                  scene: "街角咖啡",
+                  sceneVisualAnchor: "临街咖啡馆外摆座位，背景为玻璃窗和木质桌椅",
+                  scenePromptSegment: "都市通勤服饰摄影，柔和自然侧光，商业成片质感",
+                  recommendedPoses: [
+                    {
+                      cameraSetup: { framing: "全身", perspective: "正面", shootingPosition: "平视机位" },
+                      poseAction: "坐在户外木椅上，身体放松靠向椅背，双手搭在桌沿，清晰展示背心正面",
+                    },
+                    {
+                      cameraSetup: { framing: "四分之三", perspective: "3/4 侧", shootingPosition: "平视机位" },
+                      poseAction: "站在咖啡店旁，一只手拿着冰咖啡，转头看向侧边，展示背心胸部轮廓",
+                    },
+                    {
+                      cameraSetup: { framing: "半身", perspective: "侧面", shootingPosition: "平视机位" },
+                      poseAction: "侧身倚靠在咖啡店门框远方，展示背心肩线，姿态放松自然",
+                    },
+                  ],
+                },
+              ],
+            },
+            outputAssets: [],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+            },
+          });
+        }
         if (taskId.includes("listing")) {
           return Promise.resolve({
             events: [],
@@ -692,14 +861,119 @@ describe("App shell", () => {
               updatedAt: "2026-07-02T10:42:00.000Z",
               workspace: "product",
             },
+            {
+              attemptNo: 1,
+              completedAt: "2026-07-02T10:50:00.000Z",
+              createdAt: "2026-07-02T10:49:00.000Z",
+              id: "task_persisted_clothing_scene",
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              title: "服饰场景图",
+              updatedAt: "2026-07-02T10:50:00.000Z",
+              workspace: "clothing",
+            },
           ],
           page: 1,
           pageSize: 20,
-          total: 4,
+          total: 5,
         });
       }
       if (command === "generation_get_task_detail") {
         const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId === "task_persisted_clothing_scene") {
+          return Promise.resolve({
+            events: [],
+            input: {
+              kind: "clothing-tryon-generation",
+              ratio: "3:4",
+              items: [
+                {
+                  id: "scene-1-pose-1",
+                  scene: "都市街头",
+                  sceneVisualAnchor: "城市核心商圈人行道，午后暖调阳光洒落",
+                  scenePromptSegment: "街头时尚摄影，自然光充足照明",
+                  poseAction: "站立于街头，双手自然垂在身侧，展示T恤版型",
+                  cameraSetup: {
+                    framing: "全身",
+                    perspective: "正面",
+                    shootingPosition: "平视机位",
+                  },
+                },
+                {
+                  id: "scene-1-pose-2",
+                  scene: "都市街头",
+                  sceneVisualAnchor: "城市核心商圈人行道，午后暖调阳光洒落",
+                  scenePromptSegment: "街头时尚摄影，自然光充足照明",
+                  poseAction: "呈行走步姿，展示T恤动态穿着效果",
+                  cameraSetup: {
+                    framing: "四分之三",
+                    perspective: "3/4 侧",
+                    shootingPosition: "平视机位",
+                  },
+                },
+              ],
+            },
+            inputAssets: [
+              {
+                asset: {
+                  id: "asset_clothing_source",
+                  localPath: "/workspace/current/assets/source/tshirt.png",
+                  name: "tshirt.png",
+                  originalName: "tshirt.png",
+                  relativePath: "assets/source/tshirt.png",
+                  url: "asset://localhost/workspace/current/assets/source/tshirt.png",
+                },
+                role: "source",
+                sortOrder: 0,
+              },
+              {
+                asset: {
+                  id: "asset_clothing_model",
+                  localPath: "/workspace/current/assets/model/model.png",
+                  name: "model.png",
+                  originalName: "model.png",
+                  relativePath: "assets/model/model.png",
+                  url: "asset://localhost/workspace/current/assets/model/model.png",
+                },
+                role: "model",
+                sortOrder: 1,
+              },
+            ],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_clothing_output_1",
+                  localPath: "/workspace/current/assets/generated/clothing-1.jpeg",
+                  relativePath: "assets/generated/clothing-1.jpeg",
+                  url: "asset://localhost/workspace/current/assets/generated/clothing-1.jpeg",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+              {
+                asset: {
+                  id: "asset_clothing_output_2",
+                  localPath: "/workspace/current/assets/generated/clothing-2.jpeg",
+                  relativePath: "assets/generated/clothing-2.jpeg",
+                  url: "asset://localhost/workspace/current/assets/generated/clothing-2.jpeg",
+                },
+                role: "output",
+                sortOrder: 1,
+              },
+            ],
+            task: {
+              createdAt: "2026-07-02T10:49:00.000Z",
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              title: "服饰场景图",
+              updatedAt: "2026-07-02T10:50:00.000Z",
+              workspace: "clothing",
+            },
+          });
+        }
         if (taskId === "task_persisted_product_detail") {
           return Promise.resolve({
             events: [],
@@ -947,8 +1221,14 @@ describe("App shell", () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", expect.any(Object)));
     await user.click(screen.getByRole("button", { name: /生成记录/ }));
 
-    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    expect(screen.getByText("2 条本地记录")).toBeInTheDocument();
     expect(screen.getByText("商品详情图")).toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+    expect(screen.getByText("服饰场景图")).toBeInTheDocument();
+    expect(screen.queryByTestId("generation-history-empty-state")).not.toBeInTheDocument();
+    expect(screen.getByText(/都市街头 · 3:4 · 2 张/)).toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "商品" }));
     expect(screen.queryByText("重新生成 核心卖点图")).not.toBeInTheDocument();
     expect(screen.getByText(/淘宝天猫 · 中国 · 中文/)).toBeInTheDocument();
 
@@ -1023,6 +1303,308 @@ describe("App shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
       taskId: "task_persisted_listing_copy_retry",
     });
+  });
+
+  it("loads later clothing history pages when auxiliary tasks fill the first page", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const auxiliaryTasks = Array.from({ length: 20 }, (_, index) => ({
+      attemptNo: 1,
+      completedAt: "2026-07-02T10:50:00.000Z",
+      createdAt: `2026-07-02T10:${String(59 - index).padStart(2, "0")}:00.000Z`,
+      id: `task_clothing_auxiliary_${index + 1}`,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+      title: "生成基准模特",
+      updatedAt: "2026-07-02T10:50:00.000Z",
+      workspace: "clothing",
+    }));
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const query = (args as { query?: { page?: number; workspace?: string } } | undefined)?.query;
+        if (query?.workspace === "product") {
+          return Promise.resolve({ items: [], page: 1, pageSize: 20, total: 0 });
+        }
+        if (query?.workspace === "clothing" && query.page === 1) {
+          return Promise.resolve({ items: auxiliaryTasks, page: 1, pageSize: 20, total: 21 });
+        }
+        if (query?.workspace === "clothing" && query.page === 2) {
+          return Promise.resolve({
+            items: [
+              {
+                attemptNo: 1,
+                completedAt: "2026-07-02T09:00:00.000Z",
+                createdAt: "2026-07-02T08:59:00.000Z",
+                id: "task_clothing_result_page_2",
+                kind: "image-generation",
+                stage: "completed",
+                status: "succeeded",
+                title: "服饰场景图",
+                updatedAt: "2026-07-02T09:00:00.000Z",
+                workspace: "clothing",
+              },
+            ],
+            page: 2,
+            pageSize: 20,
+            total: 21,
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId.startsWith("task_clothing_auxiliary_")) {
+          return Promise.resolve({
+            events: [],
+            input: { kind: "clothing-base-model-generation" },
+            inputAssets: [],
+            outputAssets: [],
+            task: auxiliaryTasks.find((task) => task.id === taskId),
+          });
+        }
+        if (taskId === "task_clothing_result_page_2") {
+          return Promise.resolve({
+            events: [],
+            input: {
+              items: [{ id: "scene-1", poseAction: "自然站立", ratio: "3:4", scene: "都市街头" }],
+              kind: "clothing-tryon-generation",
+              ratio: "3:4",
+            },
+            inputAssets: [],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_clothing_page_2",
+                  localPath: "/workspace/current/assets/generated/clothing-page-2.png",
+                  relativePath: "assets/generated/clothing-page-2.png",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              createdAt: "2026-07-02T08:59:00.000Z",
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              title: "服饰场景图",
+              updatedAt: "2026-07-02T09:00:00.000Z",
+              workspace: "clothing",
+            },
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", {
+        query: { page: 2, pageSize: 20, workspace: "clothing" },
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+
+    expect(screen.getByText("服饰场景图")).toBeInTheDocument();
+    expect(screen.getByText(/都市街头 · 3:4 · 1 张/)).toBeInTheDocument();
+  });
+
+  it("loads the sixth clothing history page instead of truncating restored records", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const laterTask = createRestoredClothingTaskDetail(
+      "task_clothing_result_page_6",
+      "第六页服饰场景图",
+    );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const query = (args as { query?: { page?: number; workspace?: string } } | undefined)?.query;
+        if (query?.workspace === "product") {
+          return Promise.resolve({ items: [], page: 1, pageSize: 20, total: 0 });
+        }
+        if (query?.workspace === "clothing" && query.page && query.page <= 5) {
+          return Promise.resolve({
+            items: Array.from({ length: 20 }, (_, index) => ({
+              id: `task_clothing_planning_${query.page}_${index + 1}`,
+              kind: "prompt-plan",
+              stage: "completed",
+              status: "succeeded",
+              workspace: "clothing",
+            })),
+            page: query.page,
+            pageSize: 20,
+            total: 101,
+          });
+        }
+        if (query?.workspace === "clothing" && query.page === 6) {
+          return Promise.resolve({
+            items: [laterTask.task],
+            page: 6,
+            pageSize: 20,
+            total: 101,
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === laterTask.task.id) {
+          return Promise.resolve(laterTask);
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", {
+        query: { page: 6, pageSize: 20, workspace: "clothing" },
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(within(screen.getByRole("dialog", { name: "生成记录" })).getByRole("button", { name: "服饰" }));
+
+    expect(screen.getByText("第六页服饰场景图")).toBeInTheDocument();
+  });
+
+  it("restores clothing history when listing product tasks fails", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const warnMock = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const clothingTask = createRestoredClothingTaskDetail(
+      "task_clothing_after_product_list_failure",
+      "商品历史读取失败后保留的服饰图",
+    );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        if (workspace === "product") {
+          return Promise.reject(new Error("product task list failed"));
+        }
+        if (workspace === "clothing") {
+          return Promise.resolve({ items: [clothingTask.task], page: 1, pageSize: 20, total: 1 });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        return Promise.resolve(clothingTask);
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_get_task_detail", {
+        taskId: clothingTask.task.id,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+
+    expect(screen.getByText(clothingTask.task.title)).toBeInTheDocument();
+    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    expect(warnMock).toHaveBeenCalledWith("restore product generation task list failed", expect.any(Error));
+  });
+
+  it("restores healthy history records when another task detail fails", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const warnMock = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failedTaskId = "task_clothing_detail_failure";
+    const healthyTask = createRestoredClothingTaskDetail(
+      "task_clothing_after_detail_failure",
+      "单条详情失败后保留的服饰图",
+    );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        if (workspace === "product") {
+          return Promise.resolve({ items: [], page: 1, pageSize: 20, total: 0 });
+        }
+        if (workspace === "clothing") {
+          return Promise.resolve({
+            items: [
+              {
+                ...healthyTask.task,
+                id: failedTaskId,
+                title: "损坏的服饰任务",
+              },
+              healthyTask.task,
+            ],
+            page: 1,
+            pageSize: 20,
+            total: 2,
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === failedTaskId) {
+          return Promise.reject(new Error("task detail failed"));
+        }
+        if (taskId === healthyTask.task.id) {
+          return Promise.resolve(healthyTask);
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_get_task_detail", {
+        taskId: healthyTask.task.id,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+
+    expect(screen.getByText(healthyTask.task.title)).toBeInTheDocument();
+    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    expect(warnMock).toHaveBeenCalledWith(
+      `restore generation task detail failed: ${failedTaskId}`,
+      expect.any(Error),
+    );
+  });
+
+  it("limits concurrent task detail requests while restoring history", async () => {
+    const baseInvoke = invokeMock.getMockImplementation();
+    const clothingTasks = Array.from({ length: 20 }, (_, index) => ({
+      attemptNo: 1,
+      completedAt: "2026-07-02T10:50:00.000Z",
+      createdAt: `2026-07-02T10:${String(59 - index).padStart(2, "0")}:00.000Z`,
+      id: `task_clothing_restore_${index + 1}`,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+      title: "服饰场景图",
+      updatedAt: "2026-07-02T10:50:00.000Z",
+      workspace: "clothing",
+    }));
+    let detailRequestCount = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const query = (args as { query?: { workspace?: string } } | undefined)?.query;
+        if (query?.workspace === "product") {
+          return Promise.resolve({ items: [], page: 1, pageSize: 20, total: 0 });
+        }
+        if (query?.workspace === "clothing") {
+          return Promise.resolve({ items: clothingTasks, page: 1, pageSize: 20, total: 20 });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        detailRequestCount += 1;
+        return new Promise(() => {});
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(detailRequestCount).toBeGreaterThan(0));
+    expect(detailRequestCount).toBeLessThanOrEqual(4);
   });
 
   it("keeps the config panel visible when opening a running history record", async () => {
@@ -2344,6 +2926,7 @@ describe("App shell", () => {
 
   it("uploads clothing images, keeps one selected model, and hides scene controls when AI recommends", async () => {
     const user = userEvent.setup();
+    installBuiltinClothingModelMock();
 
     selectProductImagesMock
       .mockResolvedValueOnce([
@@ -2411,10 +2994,11 @@ describe("App shell", () => {
     expect(uploadedModel).toHaveAttribute("aria-pressed", "true");
     expect(within(uploadedModel).getByLabelText("已选中 model-a.png")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    const builtinModel = await screen.findByRole("button", { name: "选择内置模特 内置模特 01" });
+    await user.click(builtinModel);
 
     expect(uploadedModel).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: "柔光女模" })).toHaveAttribute("aria-pressed", "true");
+    expect(builtinModel).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByLabelText("已选中 model-a.png")).not.toBeInTheDocument();
 
     const aiRecommendSwitch = screen.getByRole("button", { name: "AI推荐" });
@@ -2443,7 +3027,7 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "性别 男" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "年龄 青年" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "人群 中国人" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "体型 标准" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "体型 匀称" })).toBeInTheDocument();
 
     const genderSelect = screen.getByRole("button", { name: "性别 男" });
 
@@ -2481,15 +3065,30 @@ describe("App shell", () => {
 
     expect(screen.getByRole("button", { name: "人群 东南亚人" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "体型 标准" }));
+    await user.click(screen.getByRole("button", { name: "体型 匀称" }));
 
-    for (const option of ["纤细", "标准", "肌肉", "微胖", "大码"]) {
+    for (const option of [
+      "纤细",
+      "苗条",
+      "精瘦",
+      "匀称",
+      "健美",
+      "运动型",
+      "肌肉型",
+      "壮硕",
+      "结实",
+      "丰满",
+      "微胖",
+      "大码",
+    ]) {
       expect(screen.getByRole("option", { name: option })).toBeInTheDocument();
     }
 
-    await user.click(screen.getByRole("option", { name: "肌肉" }));
+    expect(screen.queryByRole("option", { name: "肥胖" })).not.toBeInTheDocument();
 
-    expect(screen.getByRole("button", { name: "体型 肌肉" })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "大码" }));
+
+    expect(screen.getByRole("button", { name: "体型 大码" })).toBeInTheDocument();
 
     const detailInput = screen.getByRole("textbox", { name: "外貌细节" });
     expect(detailInput).toHaveAttribute("placeholder", "例如：小麦色皮肤、齐刘海、眼角有泪痣...");
@@ -2500,8 +3099,731 @@ describe("App shell", () => {
     expect(screen.getByRole("button", { name: "生成基准模特" })).toBeInTheDocument();
   });
 
+  it("requests text-to-image generation for clothing base model and shows the generated model", async () => {
+    const user = userEvent.setup();
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.type(screen.getByRole("textbox", { name: "外貌细节" }), "寸头，肌肉身材");
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    expect(screen.getByText("正在生成基准模特...")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("generation_create_task", {
+      input: expect.objectContaining({
+        workspace: "clothing",
+        kind: "image-generation",
+        title: "生成基准模特",
+        input: expect.objectContaining({
+          kind: "clothing-base-model-generation",
+          gender: "男",
+          age: "青年",
+          ethnicity: "中国人",
+          body: "匀称",
+          appearance: "寸头，肌肉身材",
+        }),
+      }),
+    });
+    expect(invokeMock).toHaveBeenCalledWith("generation_run_task", {
+      taskId: "task_image-generation",
+    });
+
+    const generatedModel = await screen.findByRole("button", { name: "选择生成模特 基准模特图" });
+    expect(within(generatedModel).getByAltText("基准模特图")).toHaveAttribute(
+      "src",
+      "asset://localhost/workspace/current/assets/generated/generated-1.png",
+    );
+  });
+
+  it("shows a toast when clothing base model generation fails", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_run_task") {
+        return Promise.reject(new Error("模型调用失败"));
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    expect(await screen.findByText("基准模特生成失败：模型调用失败")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "生成基准模特" })).toBeEnabled();
+  });
+
+  it("cancels a nonterminal base model task before retrying after the start request fails", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    let baseModelTaskCount = 0;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-base-model-generation") {
+        baseModelTaskCount += 1;
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id: `task_base_model_retry_${baseModelTaskCount}`,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "生成基准模特",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_run_task" && taskId === "task_base_model_retry_1") {
+        return Promise.reject(new Error("启动请求响应丢失"));
+      }
+      if (command === "generation_cancel_task" && taskId === "task_base_model_retry_1") {
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "生成基准模特",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_base_model_retry_2") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_retried_base_model",
+                localPath: "/workspace/current/assets/generated/retried-base-model.png",
+                relativePath: "assets/generated/retried-base-model.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "clothing",
+          },
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    expect(await screen.findByText("基准模特生成失败：启动请求响应丢失")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", {
+        taskId: "task_base_model_retry_1",
+      });
+    });
+    const cancelCallIndex = invokeMock.mock.calls.findIndex(
+      ([command, args]) =>
+        command === "generation_cancel_task" &&
+        (args as { taskId?: string } | undefined)?.taskId === "task_base_model_retry_1",
+    );
+    const secondCreateCallIndex = invokeMock.mock.calls.findIndex(
+      ([command, args], index) =>
+        command === "generation_create_task" &&
+        (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+          "clothing-base-model-generation" &&
+        index > cancelCallIndex,
+    );
+    expect(cancelCallIndex).toBeGreaterThanOrEqual(0);
+    expect(secondCreateCallIndex).toBeGreaterThan(cancelCallIndex);
+    expect(await screen.findByRole("button", { name: "选择生成模特 基准模特图" })).toBeInTheDocument();
+  });
+
+  it("cancels and ignores a base model task when starting a new clothing task", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolveTaskDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_get_task_detail" && taskId === "task_image-generation") {
+        return new Promise((resolve) => {
+          resolveTaskDetail = resolve;
+        });
+      }
+      if (command === "generation_cancel_task" && taskId === "task_image-generation") {
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "生成基准模特",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    await waitFor(() => expect(resolveTaskDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", { taskId: "task_image-generation" });
+    await act(async () => {
+      resolveTaskDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: [
+          {
+            asset: {
+              id: "asset_stale_base_model",
+              localPath: "/workspace/current/assets/generated/stale-base-model.png",
+              relativePath: "assets/generated/stale-base-model.png",
+            },
+            role: "output",
+            sortOrder: 0,
+          },
+        ],
+        task: {
+          id: "task_image-generation",
+          kind: "image-generation",
+          stage: "completed",
+          status: "succeeded",
+          workspace: "clothing",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    expect(screen.queryByRole("button", { name: "选择生成模特 基准模特图" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/基准模特生成失败/)).not.toBeInTheDocument();
+  });
+
+  it("cancels the previous base model task before regenerating after leaving clothing", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let baseModelTaskCount = 0;
+    let resolvePreviousTaskDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-base-model-generation") {
+        baseModelTaskCount += 1;
+        const id = `task_base_model_${baseModelTaskCount}`;
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "生成基准模特",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_base_model_1") {
+        return new Promise((resolve) => {
+          resolvePreviousTaskDetail = resolve;
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_base_model_2") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_latest_base_model",
+                localPath: "/workspace/current/assets/generated/latest-base-model.png",
+                relativePath: "assets/generated/latest-base-model.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "clothing",
+          },
+        });
+      }
+      if (command === "generation_cancel_task" && taskId === "task_base_model_1") {
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "生成基准模特",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    await waitFor(() => expect(resolvePreviousTaskDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", { taskId: "task_base_model_1" });
+    });
+    const cancelCallIndex = invokeMock.mock.calls.findIndex(
+      ([command, args]) =>
+        command === "generation_cancel_task" && (args as { taskId?: string } | undefined)?.taskId === "task_base_model_1",
+    );
+    const secondCreateCallIndex = invokeMock.mock.calls.map(
+      ([command, args]) =>
+        command === "generation_create_task" &&
+        (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+          "clothing-base-model-generation",
+    ).lastIndexOf(true);
+    expect(cancelCallIndex).toBeLessThan(secondCreateCallIndex);
+    const currentGeneratedModel = await screen.findByRole("button", { name: "选择生成模特 基准模特图" });
+    expect(within(currentGeneratedModel).getByAltText("基准模特图")).toHaveAttribute(
+      "src",
+      "asset://localhost/workspace/current/assets/generated/latest-base-model.png",
+    );
+
+    await act(async () => {
+      resolvePreviousTaskDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: [
+          {
+            asset: {
+              id: "asset_stale_base_model",
+              localPath: "/workspace/current/assets/generated/stale-base-model.png",
+              relativePath: "assets/generated/stale-base-model.png",
+            },
+            role: "output",
+            sortOrder: 0,
+          },
+        ],
+        task: {
+          id: "task_base_model_1",
+          kind: "image-generation",
+          stage: "completed",
+          status: "succeeded",
+          workspace: "clothing",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(
+      within(screen.getByRole("button", { name: "选择生成模特 基准模特图" })).getByAltText("基准模特图"),
+    ).toHaveAttribute(
+      "src",
+      "asset://localhost/workspace/current/assets/generated/latest-base-model.png",
+    );
+  });
+
+  it("shares the pending base model cancellation across consecutive reentries", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let baseModelTaskCount = 0;
+    let resolveCancellation: (() => void) | undefined;
+    let resolvePreviousTaskDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-base-model-generation") {
+        baseModelTaskCount += 1;
+        const id = `task_reentry_base_model_${baseModelTaskCount}`;
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "生成基准模特",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_reentry_base_model_1") {
+        return new Promise((resolve) => {
+          resolvePreviousTaskDetail = resolve;
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_reentry_base_model_2") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_reentry_latest_base_model",
+                localPath: "/workspace/current/assets/generated/reentry-latest-base-model.png",
+                relativePath: "assets/generated/reentry-latest-base-model.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "clothing",
+          },
+        });
+      }
+      if (command === "generation_cancel_task" && taskId === "task_reentry_base_model_1") {
+        return new Promise((resolve) => {
+          resolveCancellation = () => resolve({
+            id: taskId,
+            kind: "image-generation",
+            stage: "failed",
+            status: "cancelled",
+            title: "生成基准模特",
+            workspace: "clothing",
+          });
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    await waitFor(() => expect(resolvePreviousTaskDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    await waitFor(() => expect(resolveCancellation).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    expect(baseModelTaskCount).toBe(1);
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command, args]) =>
+          command === "generation_cancel_task" &&
+          (args as { taskId?: string } | undefined)?.taskId === "task_reentry_base_model_1",
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      resolveCancellation?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(baseModelTaskCount).toBe(2));
+    const generatedModel = await screen.findByRole("button", { name: "选择生成模特 基准模特图" });
+    expect(within(generatedModel).getByAltText("基准模特图")).toHaveAttribute(
+      "src",
+      "asset://localhost/workspace/current/assets/generated/reentry-latest-base-model.png",
+    );
+
+    await act(async () => {
+      resolvePreviousTaskDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: [],
+        task: {
+          id: "task_reentry_base_model_1",
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          workspace: "clothing",
+        },
+      });
+      await Promise.resolve();
+    });
+  });
+
+  it.each(["succeeded", "cancelled"] as const)(
+    "regenerates after cancel rejects when the previous base model task is already %s",
+    async (terminalStatus) => {
+      const user = userEvent.setup();
+      const baseInvoke = invokeMock.getMockImplementation();
+      let baseModelTaskCount = 0;
+      let previousTaskDetailCalls = 0;
+      let resolveInitialTaskDetail: ((value: unknown) => void) | undefined;
+      const previousTaskId = `task_terminal_cancel_${terminalStatus}_1`;
+      invokeMock.mockImplementation((command, args) => {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (command === "generation_create_task" && input?.input?.kind === "clothing-base-model-generation") {
+          baseModelTaskCount += 1;
+          const id = baseModelTaskCount === 1 ? previousTaskId : `task_terminal_cancel_${terminalStatus}_2`;
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id,
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "生成基准模特",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+        if (command === "generation_get_task_detail" && taskId === previousTaskId) {
+          previousTaskDetailCalls += 1;
+          if (previousTaskDetailCalls === 1) {
+            return new Promise((resolve) => {
+              resolveInitialTaskDetail = resolve;
+            });
+          }
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: terminalStatus === "succeeded" ? "completed" : "failed",
+              status: terminalStatus,
+              workspace: "clothing",
+            },
+          });
+        }
+        if (command === "generation_get_task_detail" && taskId === `task_terminal_cancel_${terminalStatus}_2`) {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [
+              {
+                asset: {
+                  id: `asset_terminal_cancel_${terminalStatus}`,
+                  localPath: `/workspace/current/assets/generated/terminal-cancel-${terminalStatus}.png`,
+                  relativePath: `assets/generated/terminal-cancel-${terminalStatus}.png`,
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              workspace: "clothing",
+            },
+          });
+        }
+        if (command === "generation_cancel_task" && taskId === previousTaskId) {
+          return Promise.reject(new Error("task already finished"));
+        }
+        return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+      });
+
+      renderApp();
+
+      await user.click(screen.getByRole("button", { name: "服饰" }));
+      await user.click(screen.getByRole("button", { name: "AI 生成" }));
+      await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+      await waitFor(() => expect(resolveInitialTaskDetail).toBeDefined());
+
+      await user.click(screen.getByRole("button", { name: "商品" }));
+      await user.click(screen.getByRole("button", { name: "服饰" }));
+      await user.click(screen.getByRole("button", { name: "AI 生成" }));
+      await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+      await waitFor(() => expect(baseModelTaskCount).toBe(2));
+      const generatedModel = await screen.findByRole("button", { name: "选择生成模特 基准模特图" });
+      expect(within(generatedModel).getByAltText("基准模特图")).toHaveAttribute(
+        "src",
+        `asset://localhost/workspace/current/assets/generated/terminal-cancel-${terminalStatus}.png`,
+      );
+      expect(
+        screen.queryByText("基准模特任务取消失败：后台任务可能仍在继续，请稍后在生成记录中检查。"),
+      ).not.toBeInTheDocument();
+
+      await act(async () => {
+        resolveInitialTaskDetail?.({
+          events: [],
+          inputAssets: [],
+          outputAssets: [],
+          task: {
+            id: previousTaskId,
+            kind: "image-generation",
+            stage: terminalStatus === "succeeded" ? "completed" : "failed",
+            status: terminalStatus,
+            workspace: "clothing",
+          },
+        });
+        await Promise.resolve();
+      });
+    },
+  );
+
+  it.each(["running", "query-error"] as const)(
+    "does not regenerate when base model cancellation confirmation is %s and retries the same task",
+    async (confirmation) => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let baseModelTaskCount = 0;
+    let cancellationAttempts = 0;
+    let previousTaskDetailCalls = 0;
+    let resolvePreviousTaskDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-base-model-generation") {
+        baseModelTaskCount += 1;
+        const id = `task_retry_cancel_base_model_${baseModelTaskCount}`;
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "生成基准模特",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_retry_cancel_base_model_1") {
+        previousTaskDetailCalls += 1;
+        if (previousTaskDetailCalls > 1) {
+          if (confirmation === "query-error") {
+            return Promise.reject(new Error("task detail unavailable"));
+          }
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: "calling-provider",
+              status: "running",
+              workspace: "clothing",
+            },
+          });
+        }
+        return new Promise((resolve) => {
+          resolvePreviousTaskDetail = resolve;
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_retry_cancel_base_model_2") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_retry_cancel_latest_base_model",
+                localPath: "/workspace/current/assets/generated/retry-cancel-latest-base-model.png",
+                relativePath: "assets/generated/retry-cancel-latest-base-model.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "clothing",
+          },
+        });
+      }
+      if (command === "generation_cancel_task" && taskId === "task_retry_cancel_base_model_1") {
+        cancellationAttempts += 1;
+        if (cancellationAttempts === 1) {
+          return Promise.reject(new Error("cancel failed"));
+        }
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "生成基准模特",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+    await waitFor(() => expect(resolvePreviousTaskDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "AI 生成" }));
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    expect(
+      await screen.findByText("基准模特任务取消失败：后台任务可能仍在继续，请稍后在生成记录中检查。"),
+    ).toBeInTheDocument();
+    expect(baseModelTaskCount).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "生成基准模特" }));
+
+    await waitFor(() => expect(cancellationAttempts).toBe(2));
+    await waitFor(() => expect(baseModelTaskCount).toBe(2));
+    const generatedModel = await screen.findByRole("button", { name: "选择生成模特 基准模特图" });
+    expect(within(generatedModel).getByAltText("基准模特图")).toHaveAttribute(
+      "src",
+      "asset://localhost/workspace/current/assets/generated/retry-cancel-latest-base-model.png",
+    );
+
+    await act(async () => {
+      resolvePreviousTaskDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: [],
+        task: {
+          id: "task_retry_cancel_base_model_1",
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          workspace: "clothing",
+        },
+      });
+      await Promise.resolve();
+    });
+    },
+  );
+
   it("drafts clothing scene selection after uploading clothing images", async () => {
     const user = userEvent.setup();
+    installBuiltinClothingModelMock();
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -2520,32 +3842,816 @@ describe("App shell", () => {
     expect(selectProductImagesMock).toHaveBeenCalledWith(5);
     expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
 
     const generateButton = screen.getByRole("button", { name: "开始生成" });
     expect(generateButton).toBeEnabled();
 
-    vi.useFakeTimers();
     fireEvent.click(generateButton);
 
     expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();
     expect(screen.getByText("生成中...")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上一步" })).toBeEnabled();
 
-    act(() => {
-      vi.advanceTimersByTime(2600);
-    });
-    vi.useRealTimers();
-
-    expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();
-    expect(screen.getByText("都市街头")).toBeInTheDocument();
+    expect(await screen.findByText("都市街头")).toBeInTheDocument();
     expect(screen.getByText("街角咖啡")).toBeInTheDocument();
     expect(screen.getAllByTestId("clothing-scene-card")).toHaveLength(7);
-    expect(screen.getByRole("button", { name: "生成场景图片（6张）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "请先选择场景" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "都市街头" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "街角咖啡" })).not.toBeChecked();
+    expect(invokeMock).toHaveBeenCalledWith(
+      "generation_create_task",
+      expect.objectContaining({
+        input: expect.objectContaining({
+          input: expect.objectContaining({
+            kind: "clothing-scene-planning",
+          }),
+          workspace: "clothing",
+        }),
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_run_task", { taskId: "task_clothing-scene-planning" });
+  });
+
+  it("reuses the workspace input assets imported by clothing planning when generating scene images", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    let importCallCount = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "asset_list_builtin_models") {
+        return Promise.resolve([
+          {
+            fileName: "model-01.png",
+            id: "model-01",
+            label: "内置模特 01",
+            path: "/app/resources/builtin-models/model-01.png",
+            thumbnailPath: "/app/resources/builtin-model-thumbnails/model-01.png",
+          },
+        ]);
+      }
+      if (command === "asset_import_images") {
+        importCallCount += 1;
+        if (importCallCount > 2) {
+          return Promise.reject(new Error("原始图片已不可访问"));
+        }
+        const input = (args as { input?: { kind?: string; paths?: string[] } } | undefined)?.input;
+        const kind = input?.kind ?? "source";
+        return Promise.resolve(
+          (input?.paths ?? []).map((path, index) => ({
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: `${kind}_persisted_${index + 1}`,
+            kind,
+            lifecycle: "active",
+            localPath: `/workspace/current/assets/${kind}/${kind}-persisted-${index + 1}.png`,
+            mimeType: "image/png",
+            name: `${kind}-persisted-${index + 1}.png`,
+            originalName: path.split(/[\\/]/).pop() ?? `${kind}.png`,
+            relativePath: `assets/${kind}/${kind}-persisted-${index + 1}.png`,
+            sha256: `sha256-${kind}-${index + 1}`,
+            sizeBytes: 128,
+            updatedAt: "2026-07-02T00:00:00.000Z",
+          })),
+        );
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId === "task_clothing-scene-planning") {
+          return Promise.resolve(createClothingPlanningTaskDetail(taskId, "可复用场景"));
+        }
+        if (taskId === "task_clothing-tryon-generation") {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_reused_clothing_result",
+                  localPath: "/workspace/current/assets/generated/reused-clothing-result.png",
+                  relativePath: "assets/generated/reused-clothing-result.png",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              workspace: "clothing",
+            },
+          });
+        }
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await user.click(await screen.findByRole("checkbox", { name: "可复用场景站姿" }));
+    await user.click(screen.getByRole("button", { name: "生成场景图片（1张）" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({ kind: "clothing-tryon-generation" }),
+            inputAssets: [
+              { assetId: "source_persisted_1", role: "source", sortOrder: 0 },
+              { assetId: "model_persisted_1", role: "model", sortOrder: 1 },
+            ],
+          }),
+        }),
+      );
+    });
+    expect(importCallCount).toBe(2);
+  });
+
+  it("does not show fallback mock scenes when clothing scene planning fails", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "asset_list_builtin_models") {
+        return Promise.resolve([
+          {
+            fileName: "model-01.png",
+            id: "model-01",
+            label: "内置模特 01",
+            path: "/app/resources/builtin-models/model-01.png",
+            thumbnailPath: "/app/resources/builtin-model-thumbnails/model-01.png",
+          },
+        ]);
+      }
+      if (command === "generation_run_task") {
+        return Promise.reject(new Error("没有可用模型"));
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(await screen.findByText("服饰场景规划失败：没有可用模型")).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "服饰配置" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "选择场景" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clothing-scene-card")).not.toBeInTheDocument();
+  });
+
+  it("cancels a nonterminal clothing planning task before retrying after the start request fails", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let planningCreateCount = 0;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-scene-planning") {
+        planningCreateCount += 1;
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id: `task_planning_retry_${planningCreateCount}`,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "服饰场景动作规划",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_run_task" && taskId === "task_planning_retry_1") {
+        return Promise.reject(new Error("规划启动响应丢失"));
+      }
+      if (command === "generation_cancel_task" && taskId === "task_planning_retry_1") {
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "服饰场景动作规划",
+          workspace: "clothing",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_planning_retry_2") {
+        return Promise.resolve(createClothingPlanningTaskDetail(taskId, "重试规划场景"));
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("服饰场景规划失败：规划启动响应丢失")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", {
+        taskId: "task_planning_retry_1",
+      });
+    });
+    const cancelCallIndex = invokeMock.mock.calls.findIndex(
+      ([command, args]) =>
+        command === "generation_cancel_task" &&
+        (args as { taskId?: string } | undefined)?.taskId === "task_planning_retry_1",
+    );
+    const secondCreateCallIndex = invokeMock.mock.calls.findIndex(
+      ([command, args], index) =>
+        command === "generation_create_task" &&
+        (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+          "clothing-scene-planning" &&
+        index > cancelCallIndex,
+    );
+    expect(cancelCallIndex).toBeGreaterThanOrEqual(0);
+    expect(secondCreateCallIndex).toBeGreaterThan(cancelCallIndex);
+    expect(await screen.findByText("重试规划场景")).toBeInTheDocument();
+  });
+
+  it("retains a stale clothing planning task when cancellation fails after task creation", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let planningCreateCount = 0;
+    let cancellationAttempts = 0;
+    let resolveStaleCreate: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_create_task" && input?.input?.kind === "clothing-scene-planning") {
+        planningCreateCount += 1;
+        const id = planningCreateCount === 1 ? "task_stale_planning_create" : "task_current_planning_create";
+        const task = {
+          attemptNo: 1,
+          createdAt: "2026-07-02T00:00:00.000Z",
+          id,
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "服饰场景动作规划",
+          updatedAt: "2026-07-02T00:00:00.000Z",
+          workspace: "clothing",
+        };
+        if (planningCreateCount === 1) {
+          return new Promise((resolve) => {
+            resolveStaleCreate = resolve;
+          });
+        }
+        return Promise.resolve(task);
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_current_planning_create") {
+        return Promise.resolve(createClothingPlanningTaskDetail(taskId, "当前规划场景"));
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_stale_planning_create") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "calling-provider",
+            status: "running",
+            workspace: "clothing",
+          },
+        });
+      }
+      if (command === "generation_cancel_task" && taskId === "task_stale_planning_create") {
+        cancellationAttempts += 1;
+        if (cancellationAttempts === 1) {
+          return Promise.reject(new Error("首次取消失败"));
+        }
+        return Promise.resolve({
+          id: taskId,
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "服饰场景动作规划",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(resolveStaleCreate).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("当前规划场景")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveStaleCreate?.({
+        attemptNo: 1,
+        createdAt: "2026-07-02T00:00:00.000Z",
+        id: "task_stale_planning_create",
+        kind: "image-generation",
+        stage: "queued",
+        status: "queued",
+        title: "服饰场景动作规划",
+        updatedAt: "2026-07-02T00:00:00.000Z",
+        workspace: "clothing",
+      });
+    });
+    expect(await screen.findByText(/服饰场景规划取消失败：后台任务可能仍在继续/)).toBeInTheDocument();
+    expect(cancellationAttempts).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await waitFor(() => expect(cancellationAttempts).toBe(2));
+  });
+
+  it("keeps the latest clothing scene plan when an earlier request completes later", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let planningCreateCount = 0;
+    let resolveOldDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-scene-planning") {
+          planningCreateCount += 1;
+          const taskId = planningCreateCount === 1 ? "task_plan_old" : "task_plan_new";
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: taskId,
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景动作规划",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_plan_old") {
+          return new Promise((resolve) => {
+            resolveOldDetail = resolve;
+          });
+        }
+        if (taskId === "task_plan_new") {
+          return Promise.resolve(createClothingPlanningTaskDetail(taskId, "新请求场景"));
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(resolveOldDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("新请求场景")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOldDetail?.(createClothingPlanningTaskDetail("task_plan_old", "旧请求场景"));
+    });
+
+    expect(screen.getByText("新请求场景")).toBeInTheDocument();
+    expect(screen.queryByText("旧请求场景")).not.toBeInTheDocument();
+  });
+
+  it("keeps the latest clothing scene plan when an earlier request fails later", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let planningCreateCount = 0;
+    let rejectOldDetail: ((reason?: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-scene-planning") {
+          planningCreateCount += 1;
+          const taskId = planningCreateCount === 1 ? "task_plan_old" : "task_plan_new";
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: taskId,
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景动作规划",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_plan_old") {
+          return new Promise((_, reject) => {
+            rejectOldDetail = reject;
+          });
+        }
+        if (taskId === "task_plan_new") {
+          return Promise.resolve(createClothingPlanningTaskDetail(taskId, "新请求场景"));
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(rejectOldDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("新请求场景")).toBeInTheDocument();
+
+    await act(async () => {
+      rejectOldDetail?.(new Error("旧请求失败"));
+    });
+
+    expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();
+    expect(screen.getByText("新请求场景")).toBeInTheDocument();
+    expect(screen.queryByText("服饰场景规划失败：旧请求失败")).not.toBeInTheDocument();
+  });
+
+  it("cancels clothing planning and stops its poll after going back", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolvePlanningDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-scene-planning") {
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: "task_plan_cancelled",
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景动作规划",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_plan_cancelled") {
+          return new Promise((resolve) => {
+            resolvePlanningDetail = resolve;
+          });
+        }
+      }
+      if (command === "generation_cancel_task") {
+        return Promise.resolve({
+          attemptNo: 1,
+          id: "task_plan_cancelled",
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "服饰场景动作规划",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(resolvePlanningDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", { taskId: "task_plan_cancelled" });
+
+    await act(async () => {
+      resolvePlanningDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: [],
+        task: {
+          id: "task_plan_cancelled",
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const planningRunCalls = invokeMock.mock.calls.filter(
+      ([command, args]) =>
+        command === "generation_run_task" &&
+        (args as { taskId?: string } | undefined)?.taskId === "task_plan_cancelled",
+    );
+    expect(planningRunCalls).toHaveLength(1);
+  });
+
+  it("cancels and invalidates clothing planning when starting a new task", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let rejectPlanningDetail: ((reason?: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_clothing-scene-planning") {
+          return new Promise((_, reject) => {
+            rejectPlanningDetail = reject;
+          });
+        }
+      }
+      if (command === "generation_cancel_task") {
+        return Promise.resolve({
+          id: "task_clothing-scene-planning",
+          kind: "image-generation",
+          stage: "failed",
+          status: "cancelled",
+          title: "服饰场景动作规划",
+          workspace: "clothing",
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(rejectPlanningDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", {
+      taskId: "task_clothing-scene-planning",
+    });
+    await act(async () => {
+      rejectPlanningDetail?.(new Error("已重置的旧规划失败"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("服饰场景规划失败：已重置的旧规划失败")).not.toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "服饰配置" })).toBeInTheDocument();
+  });
+
+  it("warns when a clothing planning task cannot be cancelled", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let planningDetailCallCount = 0;
+    let resolvePlanningDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_clothing-scene-planning") {
+          planningDetailCallCount += 1;
+          if (planningDetailCallCount > 1) {
+            return Promise.resolve({
+              events: [],
+              inputAssets: [],
+              outputAssets: [],
+              task: {
+                id: taskId,
+                kind: "image-generation",
+                stage: "calling-provider",
+                status: "running",
+                workspace: "clothing",
+              },
+            });
+          }
+          return new Promise((resolve) => {
+            resolvePlanningDetail = resolve;
+          });
+        }
+      }
+      if (command === "generation_cancel_task") {
+        return Promise.reject(new Error("取消命令失败"));
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await waitFor(() => expect(resolvePlanningDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "上一步" }));
+
+    expect(await screen.findByText(/服饰场景规划取消失败：后台任务可能仍在继续/)).toBeInTheDocument();
+  });
+
+  it("keeps a newer clothing generation locked when an older task finishes", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let tryonCreateCount = 0;
+    let resolveOldTryonDetail: ((value: unknown) => void) | undefined;
+    let resolveNewTryonDetail: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          tryonCreateCount += 1;
+          const taskId = tryonCreateCount === 1 ? "task_tryon_old" : "task_tryon_new";
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: taskId,
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景图",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_tryon_old") {
+          return new Promise((resolve) => {
+            resolveOldTryonDetail = resolve;
+          });
+        }
+        if (taskId === "task_tryon_new") {
+          return new Promise((resolve) => {
+            resolveNewTryonDetail = resolve;
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    async function startClothingGeneration() {
+      await user.click(screen.getByRole("button", { name: "服装图片" }));
+      expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+      await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+      await user.click(screen.getByRole("button", { name: "开始生成" }));
+      expect(await screen.findByText("都市街头")).toBeInTheDocument();
+      await user.click(screen.getByRole("checkbox", { name: "街角咖啡" }));
+      await user.click(screen.getByRole("button", { name: "生成场景图片（3张）" }));
+    }
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await startClothingGeneration();
+    await waitFor(() => expect(resolveOldTryonDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+    await startClothingGeneration();
+    await waitFor(() => expect(resolveNewTryonDetail).toBeDefined());
+
+    await act(async () => {
+      resolveOldTryonDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: Array.from({ length: 3 }, (_, index) => ({
+          asset: {
+            id: `asset_old_${index + 1}`,
+            localPath: `/workspace/current/assets/generated/old-${index + 1}.png`,
+            relativePath: `assets/generated/old-${index + 1}.png`,
+          },
+          role: "output",
+          sortOrder: index,
+        })),
+        task: {
+          id: "task_tryon_old",
+          kind: "image-generation",
+          stage: "completed",
+          status: "succeeded",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "场景图生成中" })).toBeDisabled();
   });
 
   it("links clothing scene selections, reveals dropdowns only for selected cards, and generates results", async () => {
     const user = userEvent.setup();
+    installBuiltinClothingModelMock();
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -2561,17 +4667,15 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
     expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
 
-    vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
-    act(() => {
-      vi.advanceTimersByTime(2600);
-    });
-    vi.useRealTimers();
+    expect(await screen.findByText("都市街头")).toBeInTheDocument();
 
     const urbanGroupCheckbox = screen.getByRole("checkbox", { name: "都市街头" });
-    expect(urbanGroupCheckbox).toHaveAttribute("aria-checked", "mixed");
+    expect(urbanGroupCheckbox).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "街角咖啡" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "请先选择场景" })).toBeDisabled();
 
     const uncheckedCard = screen.getByText(/身体微向前倾/).closest("[data-testid='clothing-scene-card']");
     expect(uncheckedCard).not.toBeNull();
@@ -2586,7 +4690,7 @@ describe("App shell", () => {
 
     await user.click(within(uncheckedSceneCard).getByRole("checkbox", { name: /身体微向前倾/ }));
 
-    expect(urbanGroupCheckbox).toBeChecked();
+    expect(urbanGroupCheckbox).toHaveAttribute("aria-checked", "mixed");
 
     const framingDropdown = within(uncheckedSceneCard).getByRole("button", { name: "画幅 全身" });
     expect(framingDropdown).toHaveClass("h-8", "rounded-control", "border", "text-[12px]");
@@ -2613,47 +4717,118 @@ describe("App shell", () => {
 
     expect(within(uncheckedSceneCard).getByRole("button", { name: "角度 背面" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("checkbox", { name: "都市街头" }));
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    expect(screen.queryByRole("complementary", { name: "选择场景" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "服饰" }));
 
-    expect(urbanGroupCheckbox).not.toBeChecked();
-    expect(within(uncheckedSceneCard).queryByRole("button", { name: "画幅 特写" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成场景图片（3张）" })).toBeEnabled();
+    const restoredSceneCard = screen.getByText(/身体微向前倾/).closest("[data-testid='clothing-scene-card']");
+    expect(restoredSceneCard).not.toBeNull();
+    if (!restoredSceneCard) {
+      throw new Error("missing restored clothing scene card");
+    }
+    const restoredClothingSceneCard = restoredSceneCard as HTMLElement;
+    expect(within(restoredClothingSceneCard).getByRole("button", { name: "画幅 特写" })).toBeInTheDocument();
+    expect(within(restoredClothingSceneCard).getByRole("button", { name: "角度 背面" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("checkbox", { name: "街角咖啡" }));
+    await user.click(within(restoredClothingSceneCard).getByRole("checkbox", { name: /身体微向前倾/ }));
 
+    expect(screen.getByRole("checkbox", { name: "都市街头" })).not.toBeChecked();
     expect(screen.getByRole("button", { name: "请先选择场景" })).toBeDisabled();
 
     await user.click(screen.getByRole("checkbox", { name: "街角咖啡" }));
 
     const generateScenesButton = screen.getByRole("button", { name: "生成场景图片（3张）" });
     expect(generateScenesButton).toBeEnabled();
+    expect(generateScenesButton).toHaveClass("border-slate-950/10", "bg-[#1f1f21]", "text-white", "hover:bg-black");
 
-    vi.useFakeTimers();
     fireEvent.click(generateScenesButton);
 
     expect(screen.getByRole("main", { name: "生成预览画布" })).toBeInTheDocument();
     expect(screen.getByText("生成结果:")).toBeInTheDocument();
     expect(screen.getAllByText("AI 生成中")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "上一步" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "生成场景图片（3张）" })).toBeDisabled();
+    const generatingScenesButton = screen.getByRole("button", { name: "场景图生成中" });
+    expect(generatingScenesButton).toBeDisabled();
+    expect(generatingScenesButton).toHaveClass("border-slate-200", "bg-slate-200", "text-white", "shadow-none");
     expect(screen.getByRole("checkbox", { name: "街角咖啡" })).toBeDisabled();
     expect(screen.getAllByRole("button", { name: "画幅 全身" })[0]).toBeDisabled();
 
-    act(() => {
-      vi.advanceTimersByTime(3100);
-    });
-    vi.useRealTimers();
-
-    expect(screen.getByRole("button", { name: "预览长图" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "预览长图" })).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "街角咖啡" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "生成场景图片（3张）" })).toBeEnabled();
     expect(screen.getByTestId("studio-side-divider")).toHaveClass("left-[var(--studio-side-width)]");
     expect(screen.getByTestId("studio-side-divider")).not.toHaveClass("left-[var(--studio-nav-width)]");
-    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(2);
-    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(3));
+    const clothingResultGrid = screen.getByTestId("generated-result-grid");
+    const clothingResultCards = within(clothingResultGrid).getAllByRole("article");
+    const clothingSourceCard = within(clothingResultGrid).getByTestId("generated-source-image-card");
+    expect(clothingResultCards[0]).toBe(clothingSourceCard);
+    expect(clothingSourceCard).toHaveTextContent("原图");
+    expect(within(clothingSourceCard).getByRole("img", { name: "dress.png" })).toHaveAttribute("src", "asset://dress.png");
+    expect(screen.queryByTestId("failed-result-card")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "预览长图" }));
+
+    const clothingLongPreviewDialog = screen.getByRole("dialog", { name: "长图预览" });
+    const clothingLongPreviewSections = within(clothingLongPreviewDialog).getAllByTestId("long-preview-image-section");
+    expect(clothingLongPreviewSections).toHaveLength(3);
+    expect(within(clothingLongPreviewDialog).queryByText("原图")).not.toBeInTheDocument();
+    expect(within(clothingLongPreviewDialog).queryByRole("img", { name: "长图 dress.png" })).not.toBeInTheDocument();
+    expect(within(clothingLongPreviewSections[0]).getAllByRole("img", { name: "长图 街角咖啡" })[0]).toHaveClass(
+      "block",
+      "h-auto",
+      "w-full",
+      "object-contain",
+    );
+    expect(within(clothingLongPreviewSections[0]).getAllByRole("img", { name: "长图 街角咖啡" })[0]).not.toHaveClass(
+      "absolute",
+      "h-full",
+      "object-cover",
+    );
+    await user.click(screen.getByRole("button", { name: "关闭长图预览" }));
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "generation_create_task",
+      expect.objectContaining({
+        input: expect.objectContaining({
+          input: expect.objectContaining({
+            items: expect.arrayContaining([
+              expect.objectContaining({
+                cameraSetup: expect.objectContaining({
+                  framing: expect.any(String),
+                  perspective: expect.any(String),
+                  shootingPosition: expect.any(String),
+                }),
+                poseAction: expect.stringContaining("冰咖啡"),
+                scene: "街角咖啡",
+                scenePromptSegment: expect.stringContaining("都市通勤服饰摄影"),
+                sceneVisualAnchor: expect.stringContaining("临街咖啡馆"),
+              }),
+            ]),
+            kind: "clothing-tryon-generation",
+            ratio: "3:4",
+          }),
+          inputAssets: [
+            expect.objectContaining({
+              role: "source",
+              sortOrder: 0,
+            }),
+            expect.objectContaining({
+              role: "model",
+              sortOrder: 1,
+            }),
+          ],
+          workspace: "clothing",
+        }),
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_run_task", { taskId: "task_clothing-tryon-generation" });
   });
 
   it("guides clothing generation through image, model, and scene requirements", async () => {
     const user = userEvent.setup();
+    installBuiltinClothingModelMock();
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -2675,7 +4850,7 @@ describe("App shell", () => {
 
     expect(screen.getByRole("button", { name: "请选择模特" })).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
 
     expect(screen.getByRole("button", { name: "开始生成" })).toBeEnabled();
 
@@ -4262,6 +6437,136 @@ describe("App shell", () => {
     );
   });
 
+  it("deletes a clothing task created after its generating history record was removed", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("都市街头")).toBeInTheDocument();
+
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolveClothingTask: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          return new Promise((resolve) => {
+            resolveClothingTask = resolve;
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    await user.click(screen.getByRole("checkbox", { name: "街角咖啡" }));
+    await user.click(screen.getByRole("button", { name: "生成场景图片（3张）" }));
+    await waitFor(() => expect(resolveClothingTask).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(screen.getByRole("button", { name: "删除记录 服饰场景图" }));
+
+    await act(async () => {
+      resolveClothingTask?.({
+        attemptNo: 1,
+        createdAt: "2026-07-02T00:00:00.000Z",
+        id: "task_pending_clothing",
+        kind: "image-generation",
+        stage: "queued",
+        status: "queued",
+        title: "服饰场景图",
+        updatedAt: "2026-07-02T00:00:00.000Z",
+        workspace: "clothing",
+      });
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: "task_pending_clothing",
+      }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", { taskId: "task_pending_clothing" });
+  });
+
+  it("deletes a clothing task created after generating history was cleared", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/dress.png",
+        name: "dress.png",
+        path: "/Users/demo/Pictures/dress.png",
+        src: "asset://dress.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    expect(await screen.findByText("都市街头")).toBeInTheDocument();
+
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolveClothingTask: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          return new Promise((resolve) => {
+            resolveClothingTask = resolve;
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    await user.click(screen.getByRole("checkbox", { name: "街角咖啡" }));
+    await user.click(screen.getByRole("button", { name: "生成场景图片（3张）" }));
+    await waitFor(() => expect(resolveClothingTask).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(screen.getByRole("button", { name: "清空" }));
+
+    await act(async () => {
+      resolveClothingTask?.({
+        attemptNo: 1,
+        createdAt: "2026-07-02T00:00:00.000Z",
+        id: "task_pending_clothing_after_clear",
+        kind: "image-generation",
+        stage: "queued",
+        status: "queued",
+        title: "服饰场景图",
+        updatedAt: "2026-07-02T00:00:00.000Z",
+        workspace: "clothing",
+      });
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: "task_pending_clothing_after_clear",
+      }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", {
+      taskId: "task_pending_clothing_after_clear",
+    });
+  });
+
   it("renders each returned generated image progressively while other cards keep loading", async () => {
     const user = userEvent.setup();
     const baseInvoke = invokeMock.getMockImplementation();
@@ -5131,7 +7436,22 @@ describe("App shell", () => {
 
     await user.click(screen.getByRole("button", { name: "预览长图" }));
 
-    expect(screen.getAllByTestId("long-preview-image-section")).toHaveLength(screen.getAllByTestId("generated-detail-image-card").length);
+    const longPreviewSections = screen.getAllByTestId("long-preview-image-section");
+    expect(longPreviewSections).toHaveLength(screen.getAllByTestId("generated-detail-image-card").length);
+    const productLongPreviewDialog = screen.getByRole("dialog", { name: "长图预览" });
+    expect(within(productLongPreviewDialog).queryByText("原图")).not.toBeInTheDocument();
+    expect(within(productLongPreviewDialog).queryByRole("img", { name: "长图 helmet-front.png" })).not.toBeInTheDocument();
+    expect(within(longPreviewSections[0]).getByRole("img", { name: "长图 首屏主视觉" })).toHaveClass(
+      "block",
+      "h-auto",
+      "w-full",
+      "object-contain",
+    );
+    expect(within(longPreviewSections[0]).getByRole("img", { name: "长图 首屏主视觉" })).not.toHaveClass(
+      "absolute",
+      "h-full",
+      "object-cover",
+    );
   });
 
   it("shows a toast when AI writing is requested before uploading product images", async () => {
@@ -5467,6 +7787,7 @@ describe("App shell", () => {
 
   it("starts a fresh clothing task from the first step", async () => {
     const user = userEvent.setup();
+    installBuiltinClothingModelMock();
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -5482,7 +7803,7 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "服饰" }));
     await user.click(screen.getByRole("button", { name: "服装图片" }));
     expect(await screen.findByAltText("dress.png")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "柔光女模" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
     await user.click(screen.getByRole("button", { name: "开始生成" }));
 
     expect(screen.getByRole("complementary", { name: "选择场景" })).toBeInTheDocument();

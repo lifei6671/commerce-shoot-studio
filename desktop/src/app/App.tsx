@@ -19,11 +19,18 @@ import {
   type ProductListingCopy,
 } from "../features/generation/components/PreviewCanvas";
 import {
+  ClothingBaseModelGenerationCancelledError,
   ClothingConfigPanel,
   ClothingSceneSelectionPanel,
+  createDefaultClothingSceneDrafts,
   defaultClothingConfig,
 } from "../features/clothing/components/ClothingConfigPanel";
-import type { ClothingConfigState, ClothingSceneDraft } from "../features/clothing/components/ClothingConfigPanel";
+import type {
+  BaseModelGenerationInput,
+  ClothingConfigState,
+  ClothingSceneDraft,
+  GeneratedBaseModelImage,
+} from "../features/clothing/components/ClothingConfigPanel";
 import { ClothingPreviewCanvas } from "../features/clothing/components/ClothingPreviewCanvas";
 import {
   GenerationHistoryPopover,
@@ -45,6 +52,7 @@ import type { ProductImageAsset } from "../features/generation/lib/productImageP
 import { localAssetPort } from "../runtime/local/assets";
 import { localGenerationPort } from "../runtime/local/generation";
 import type { GenerationTaskDetail, GenerationTaskInputAssetInput } from "../runtime";
+import { useToast } from "../shared/ui/toast";
 
 const generationCompleteDelayMs = 3000;
 const productGenerationPollIntervalMs = 800;
@@ -52,6 +60,7 @@ const productGenerationMaxQueuedPollCount = 15;
 const productGenerationMaxUnchangedPollCount = 120;
 const restoredRunningTaskStaleMs = 10 * 60 * 1000;
 const scenePlanDraftDelayMs = 2500;
+const historyRestoreDetailConcurrency = 4;
 
 function createDefaultProductGenerationSettings(): ProductGenerationSettings {
   return {
@@ -129,6 +138,7 @@ function createDefaultClothingConfig(): ClothingConfigState {
   return {
     ...defaultClothingConfig,
     clothingImages: [],
+    generatedBaseModelImages: [],
     modelImages: [],
     sceneIds: [...defaultClothingConfig.sceneIds],
   };
@@ -154,8 +164,11 @@ export function App() {
   const [productDetailGenerating, setProductDetailGenerating] = useState(false);
   const [clothingConfig, setClothingConfig] = useState(createDefaultClothingConfig);
   const [clothingSceneDrafting, setClothingSceneDrafting] = useState(false);
+  const [clothingScenePlanning, setClothingScenePlanning] = useState(false);
+  const [clothingSceneDrafts, setClothingSceneDrafts] = useState(createDefaultClothingSceneDrafts);
   const [clothingSceneImages, setClothingSceneImages] = useState<GeneratedDetailImage[]>([]);
   const [clothingSceneGenerating, setClothingSceneGenerating] = useState(false);
+  const [clothingBaseModelGenerationSessionId, setClothingBaseModelGenerationSessionId] = useState(0);
   const [sceneConfig, setSceneConfig] = useState(createDefaultSceneConfig);
   const [scenePromptReviewing, setScenePromptReviewing] = useState(false);
   const [scenePlanGenerating, setScenePlanGenerating] = useState(false);
@@ -171,6 +184,14 @@ export function App() {
   const activeGenerationRecordIdRef = useRef<string | null>(null);
   const historyViewingRecordIdRef = useRef<string | null>(null);
   const deletedGenerationRecordIdsRef = useRef(new Set<string>());
+  const clothingGeneratingRecordIdRef = useRef<string | null>(null);
+  const clothingScenePlanningRequestIdRef = useRef(0);
+  const clothingScenePlanningTaskIdsRef = useRef(new Set<string>());
+  const clothingScenePlanningCancellationsRef = useRef(new Map<string, Promise<boolean>>());
+  const clothingScenePlanningInputAssetsRef = useRef<GenerationTaskInputAssetInput[] | null>(null);
+  const clothingBaseModelGenerationRequestIdRef = useRef(0);
+  const clothingBaseModelGenerationTaskIdRef = useRef<string | null>(null);
+  const clothingBaseModelCancellationRef = useRef<{ promise: Promise<boolean>; taskId: string } | null>(null);
   const isClothingWorkspace = activeWorkspace === "clothing";
   const isModelWorkspace = activeWorkspace === "model";
   const isSceneWorkspace = activeWorkspace === "scene";
@@ -185,6 +206,7 @@ export function App() {
     ((activeWorkspace === "product" && productDetailImages.length > 0) ||
       (activeWorkspace === "clothing" && clothingSceneImages.length > 0));
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
+  const { showToast } = useToast();
 
   useEffect(() => {
     activeGenerationRecordIdRef.current = activeGenerationRecordId;
@@ -226,12 +248,32 @@ export function App() {
     clearActiveGenerationRecordForWorkspace("product");
   }
 
+  function invalidateClothingScenePlanning() {
+    clothingScenePlanningRequestIdRef.current += 1;
+    clothingScenePlanningInputAssetsRef.current = null;
+    void cancelTrackedClothingPlanningTasks();
+  }
+
+  function invalidateClothingBaseModelGeneration() {
+    clothingBaseModelGenerationRequestIdRef.current += 1;
+    const taskId = clothingBaseModelGenerationTaskIdRef.current;
+    if (taskId) {
+      void cancelClothingBaseModelTask(taskId);
+    }
+  }
+
   function resetClothingWorkspace() {
+    invalidateClothingBaseModelGeneration();
+    invalidateClothingScenePlanning();
+    setClothingBaseModelGenerationSessionId((currentSessionId) => currentSessionId + 1);
     setClothingConfig(createDefaultClothingConfig());
     setClothingSceneDrafting(false);
+    setClothingScenePlanning(false);
+    setClothingSceneDrafts(createDefaultClothingSceneDrafts());
     setClothingSceneImages([]);
     setClothingSceneGenerating(false);
     setClothingGeneratingRecordId(null);
+    clothingGeneratingRecordIdRef.current = null;
     setHistoryOpen(false);
     setHistoryViewingRecordId(null);
     clearActiveGenerationRecordForWorkspace("clothing");
@@ -444,6 +486,169 @@ export function App() {
       throw new Error(mismatchMessage);
     }
     return startResult;
+  }
+
+  async function handleGenerateBaseModel(input: BaseModelGenerationInput): Promise<GeneratedBaseModelImage> {
+    const requestId = clothingBaseModelGenerationRequestIdRef.current + 1;
+    clothingBaseModelGenerationRequestIdRef.current = requestId;
+    const previousTaskId = clothingBaseModelGenerationTaskIdRef.current;
+    let taskId: string | null = null;
+    let taskReachedTerminal = false;
+
+    try {
+      if (previousTaskId) {
+        const cancelled = await cancelClothingBaseModelTask(previousTaskId);
+        if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+          throw new ClothingBaseModelGenerationCancelledError();
+        }
+        if (!cancelled) {
+          throw new ClothingBaseModelGenerationCancelledError();
+        }
+      }
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `clothing-base-model:${Date.now()}`,
+        input: {
+          age: input.age,
+          appearance: input.appearance,
+          body: input.body,
+          ethnicity: input.ethnicity,
+          gender: input.gender,
+          kind: "clothing-base-model-generation",
+          mockImageCount: 1,
+          promptTemplateId: "clothing-base-model-generation",
+        },
+        kind: "image-generation",
+        title: "生成基准模特",
+        workspace: "clothing",
+      });
+      taskId = task.id;
+      if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+        void cancelClothingBaseModelTask(task.id);
+        throw new ClothingBaseModelGenerationCancelledError();
+      }
+      clothingBaseModelGenerationTaskIdRef.current = task.id;
+
+      await requestGenerationTaskStart(task.id, "基准模特任务未能按当前记录启动，请稍后重试。");
+      if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+        throw new ClothingBaseModelGenerationCancelledError();
+      }
+      const detail = await pollClothingBaseModelTask(task.id, requestId);
+      taskReachedTerminal = true;
+      if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+        throw new ClothingBaseModelGenerationCancelledError();
+      }
+      if (detail.task.status === "failed" && detail.outputAssets.length === 0) {
+        throw new Error(detail.task.error?.message ?? "基准模特生成失败。");
+      }
+      const outputAsset = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0]?.asset;
+      const imagePath = outputAsset?.localPath ?? outputAsset?.relativePath;
+      const imageSrc = outputAsset?.url ?? outputAsset?.localPath ?? outputAsset?.relativePath;
+      if (!outputAsset || !imagePath || !imageSrc) {
+        throw new Error("基准模特生成结果缺少本地图片。");
+      }
+
+      return {
+        assetId: outputAsset.id,
+        id: outputAsset.id,
+        name: "基准模特图",
+        path: imagePath,
+        src: normalizeAssetSrc(imageSrc),
+        status: "ready",
+      };
+    } finally {
+      if (
+        taskId &&
+        taskReachedTerminal &&
+        clothingBaseModelGenerationRequestIdRef.current === requestId &&
+        clothingBaseModelGenerationTaskIdRef.current === taskId
+      ) {
+        clothingBaseModelGenerationTaskIdRef.current = null;
+      }
+    }
+  }
+
+  function cancelClothingBaseModelTask(taskId: string): Promise<boolean> {
+    const pendingCancellation = clothingBaseModelCancellationRef.current;
+    if (pendingCancellation?.taskId === taskId) {
+      return pendingCancellation.promise;
+    }
+
+    const promise = localGenerationPort
+      .cancelTask(taskId)
+      .then(() => {
+        if (clothingBaseModelGenerationTaskIdRef.current === taskId) {
+          clothingBaseModelGenerationTaskIdRef.current = null;
+        }
+        return true;
+      })
+      .catch(async () => {
+        try {
+          const taskDetail = await localGenerationPort.getTaskDetail(taskId);
+          if (isTaskTerminal(taskDetail.task.status)) {
+            if (clothingBaseModelGenerationTaskIdRef.current === taskId) {
+              clothingBaseModelGenerationTaskIdRef.current = null;
+            }
+            return true;
+          }
+        } catch {
+          // 详情读取失败时仍按取消失败处理，保留任务引用供后续重试。
+        }
+        showToast({
+          message: "基准模特任务取消失败：后台任务可能仍在继续，请稍后在生成记录中检查。",
+          variant: "warning",
+        });
+        return false;
+      })
+      .finally(() => {
+        if (clothingBaseModelCancellationRef.current?.promise === promise) {
+          clothingBaseModelCancellationRef.current = null;
+        }
+      });
+    clothingBaseModelCancellationRef.current = { promise, taskId };
+    return promise;
+  }
+
+  async function pollClothingBaseModelTask(taskId: string, requestId: number): Promise<GenerationTaskDetail> {
+    let lastPollSignature = "";
+    let queuedPollCount = 0;
+    let unchangedPollCount = 0;
+    for (;;) {
+      if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+        throw new ClothingBaseModelGenerationCancelledError();
+      }
+      const taskDetail = await localGenerationPort.getTaskDetail(taskId);
+      if (clothingBaseModelGenerationRequestIdRef.current !== requestId) {
+        throw new ClothingBaseModelGenerationCancelledError();
+      }
+      const pollSignature = createTaskPollSignature(taskDetail);
+      if (pollSignature !== lastPollSignature) {
+        console.info("clothing base model task poll", {
+          outputAssetCount: taskDetail.outputAssets.length,
+          stage: taskDetail.task.stage,
+          status: taskDetail.task.status,
+          taskId,
+        });
+        lastPollSignature = pollSignature;
+        unchangedPollCount = 0;
+      } else {
+        unchangedPollCount += 1;
+      }
+
+      queuedPollCount = taskDetail.task.status === "queued" ? queuedPollCount + 1 : 0;
+      if (taskDetail.task.status === "queued") {
+        await requestGenerationTaskStart(taskId, "基准模特任务未能按当前记录启动，请稍后重试。");
+      }
+      if (isTaskTerminal(taskDetail.task.status)) {
+        return taskDetail;
+      }
+      if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
+        throw new Error("基准模特任务长时间未启动，请检查后台任务执行状态。");
+      }
+      if (unchangedPollCount >= productGenerationMaxUnchangedPollCount) {
+        throw new Error("基准模特生成长时间无进展，请检查模型配置或后台任务日志。");
+      }
+      await delay(productGenerationPollIntervalMs);
+    }
   }
 
   async function runListingCopyTasksWithLimit(
@@ -1176,7 +1381,10 @@ export function App() {
   }
 
   function handleClearGenerationRecords() {
-    generationRecords.forEach(deletePersistedGenerationRecord);
+    generationRecords.forEach((record) => {
+      deletedGenerationRecordIdsRef.current.add(record.id);
+      deletePersistedGenerationRecord(record);
+    });
     setGenerationRecords([]);
     setActiveGenerationRecordId(null);
     setHistoryViewingRecordId(null);
@@ -1192,13 +1400,186 @@ export function App() {
     setHistoryViewingRecordId(null);
   }
 
+  async function handleGenerateClothingScenePlan(config: ClothingConfigState) {
+    const requestId = clothingScenePlanningRequestIdRef.current + 1;
+    clothingScenePlanningRequestIdRef.current = requestId;
+    clothingScenePlanningInputAssetsRef.current = null;
+    setClothingSceneDrafting(true);
+    setClothingScenePlanning(true);
+    setClothingSceneDrafts([]);
+    setClothingSceneImages([]);
+    setHistoryOpen(false);
+
+    try {
+      const previousTasksCancelled = await cancelTrackedClothingPlanningTasks();
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (!previousTasksCancelled) {
+        setClothingSceneDrafting(false);
+        return;
+      }
+      const inputAssets = await createClothingInputAssets(config);
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `clothing-scene-planning:${Date.now()}`,
+        input: {
+          aiRecommended: config.aiRecommended,
+          customScene: config.customScene,
+          kind: "clothing-scene-planning",
+          ratio: config.ratio,
+          selectedScenes: config.aiRecommended ? [] : config.sceneIds,
+        },
+        inputAssets,
+        kind: "image-generation",
+        title: "服饰场景动作规划",
+        workspace: "clothing",
+      });
+      clothingScenePlanningTaskIdsRef.current.add(task.id);
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        void cancelClothingPlanningTask(task.id);
+        return;
+      }
+      await requestGenerationTaskStart(task.id, "服饰场景规划任务未能启动，请稍后重试。");
+      const detail = await pollClothingPlanningTask(task.id, requestId);
+      clothingScenePlanningTaskIdsRef.current.delete(task.id);
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (detail.task.status === "failed") {
+        throw new Error(detail.task.error?.message ?? "服饰场景规划失败。");
+      }
+      const drafts = createClothingSceneDraftsFromTaskDetail(detail);
+      clothingScenePlanningInputAssetsRef.current = inputAssets.map((asset) => ({ ...asset }));
+      setClothingSceneDrafts(drafts);
+    } catch (error) {
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        return;
+      }
+      clothingScenePlanningInputAssetsRef.current = null;
+      setClothingSceneDrafting(false);
+      setClothingSceneDrafts([]);
+      showToast({ message: `服饰场景规划失败：${error instanceof Error ? error.message : String(error)}`, variant: "error" });
+    } finally {
+      if (clothingScenePlanningRequestIdRef.current === requestId) {
+        setClothingScenePlanning(false);
+      }
+    }
+  }
+
+  function handleBackFromClothingScenePlan() {
+    invalidateClothingScenePlanning();
+    setClothingSceneDrafting(false);
+    setClothingScenePlanning(false);
+  }
+
+  async function cancelTrackedClothingPlanningTasks() {
+    const taskIds = [...clothingScenePlanningTaskIdsRef.current];
+    if (taskIds.length === 0) {
+      return true;
+    }
+    const results = await Promise.all(taskIds.map(cancelClothingPlanningTask));
+    return results.every(Boolean);
+  }
+
+  function cancelClothingPlanningTask(taskId: string): Promise<boolean> {
+    const pendingCancellation = clothingScenePlanningCancellationsRef.current.get(taskId);
+    if (pendingCancellation) {
+      return pendingCancellation;
+    }
+
+    const promise = localGenerationPort
+      .cancelTask(taskId)
+      .then(() => {
+        clothingScenePlanningTaskIdsRef.current.delete(taskId);
+        return true;
+      })
+      .catch(async () => {
+        try {
+          const taskDetail = await localGenerationPort.getTaskDetail(taskId);
+          if (isTaskTerminal(taskDetail.task.status)) {
+            clothingScenePlanningTaskIdsRef.current.delete(taskId);
+            return true;
+          }
+        } catch {
+          // 详情读取失败时仍按取消失败处理，保留任务引用供后续重试。
+        }
+        showToast({
+          message: "服饰场景规划取消失败：后台任务可能仍在继续，请稍后在生成记录中检查。",
+          variant: "warning",
+        });
+        return false;
+      })
+      .finally(() => {
+        if (clothingScenePlanningCancellationsRef.current.get(taskId) === promise) {
+          clothingScenePlanningCancellationsRef.current.delete(taskId);
+        }
+      });
+    clothingScenePlanningCancellationsRef.current.set(taskId, promise);
+    return promise;
+  }
+
+  async function pollClothingPlanningTask(taskId: string, requestId: number): Promise<GenerationTaskDetail> {
+    let lastPollSignature = "";
+    let queuedPollCount = 0;
+    let unchangedPollCount = 0;
+    for (;;) {
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        throw new Error("服饰场景规划已取消。");
+      }
+      const taskDetail = await localGenerationPort.getTaskDetail(taskId);
+      if (clothingScenePlanningRequestIdRef.current !== requestId) {
+        throw new Error("服饰场景规划已取消。");
+      }
+      const pollSignature = createTaskPollSignature(taskDetail);
+      if (pollSignature !== lastPollSignature) {
+        lastPollSignature = pollSignature;
+        unchangedPollCount = 0;
+      } else {
+        unchangedPollCount += 1;
+      }
+
+      queuedPollCount = taskDetail.task.status === "queued" ? queuedPollCount + 1 : 0;
+      if (taskDetail.task.status === "queued") {
+        await requestGenerationTaskStart(taskId, "服饰场景规划任务未能启动，请稍后重试。");
+      }
+      if (isTaskTerminal(taskDetail.task.status)) {
+        return taskDetail;
+      }
+      if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
+        throw new Error("服饰场景规划任务长时间未启动，请检查后台任务执行状态。");
+      }
+      if (unchangedPollCount >= productGenerationMaxUnchangedPollCount) {
+        throw new Error("服饰场景规划长时间无进展，请检查模型配置或后台任务日志。");
+      }
+      await delay(productGenerationPollIntervalMs);
+    }
+  }
+
   function handleGenerateClothingScenes(drafts: ClothingSceneDraft[]) {
+    const plannedInputAssets = clothingScenePlanningInputAssetsRef.current;
+    if (!plannedInputAssets) {
+      setClothingSceneDrafting(false);
+      showToast({ message: "服饰场景规划输入已失效，请重新规划。", variant: "error" });
+      return;
+    }
+    const inputAssets = plannedInputAssets.map((asset) => ({ ...asset }));
     const recordId = createGenerationRecordId("clothing");
-    const images = drafts.map((draft) => ({
+    const sourceImage: GeneratedDetailImage = {
+      id: `${recordId}-source`,
+      kind: "source-image" as const,
+      sourceImages: clothingConfig.clothingImages.map((image) => ({ ...image })),
+      status: "complete" as const,
+      title: "原图",
+    };
+    const generatedImages = drafts.map((draft) => ({
       id: `${recordId}-${draft.id}`,
+      prompt: draft.description,
+      ratio: clothingConfig.ratio,
+      sceneDescription: draft.description,
       status: "generating" as const,
       title: draft.scene,
     }));
+    const images: GeneratedDetailImage[] = [sourceImage, ...generatedImages];
     const record: GenerationRecord = {
       createdAt: Date.now(),
       id: recordId,
@@ -1210,13 +1591,137 @@ export function App() {
       workspace: "clothing",
     };
 
+    deletedGenerationRecordIdsRef.current.delete(recordId);
     setGenerationRecords((currentRecords) => [record, ...currentRecords]);
     setActiveGenerationRecordId(recordId);
     setHistoryViewingRecordId(null);
     setClothingGeneratingRecordId(recordId);
+    clothingGeneratingRecordIdRef.current = recordId;
     setClothingSceneImages(images);
     setClothingSceneGenerating(true);
     setHistoryOpen(false);
+    void runClothingSceneGeneration(recordId, drafts, images, inputAssets);
+  }
+
+  async function runClothingSceneGeneration(
+    recordId: string,
+    drafts: ClothingSceneDraft[],
+    resultItems: GeneratedDetailImage[],
+    inputAssets: GenerationTaskInputAssetInput[],
+  ) {
+    let latestImages = resultItems;
+    const publishImages = (nextImages: GeneratedDetailImage[], status: GenerationRecord["status"] = "generating") => {
+      latestImages = nextImages;
+      if (activeGenerationRecordIdRef.current === recordId) {
+        setClothingSceneImages(nextImages);
+      }
+      setGenerationRecords((currentRecords) =>
+        currentRecords.map((record) =>
+          record.id === recordId
+            ? {
+                ...record,
+                images: nextImages,
+                status,
+              }
+            : record,
+        ),
+      );
+    };
+
+    try {
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `${recordId}:clothing-tryon-generation`,
+        input: {
+          kind: "clothing-tryon-generation",
+          ratio: clothingConfig.ratio,
+          items: drafts.map((draft) => ({
+            cameraSetup: {
+              framing: draft.framing,
+              perspective: draft.angle,
+              shootingPosition: draft.shootingPosition,
+            },
+            id: draft.id,
+            poseAction: draft.description,
+            ratio: clothingConfig.ratio,
+            scene: draft.scene,
+            scenePromptSegment: draft.scenePromptSegment,
+            sceneVisualAnchor: draft.sceneVisualAnchor,
+          })),
+        },
+        inputAssets,
+        kind: "image-generation",
+        title: "服饰场景图",
+        workspace: "clothing",
+      });
+      if (deletedGenerationRecordIdsRef.current.has(recordId)) {
+        deletePersistedGenerationTasks([task.id]);
+        return;
+      }
+      setGenerationRecords((currentRecords) =>
+        currentRecords.map((record) =>
+          record.id === recordId
+            ? {
+                ...record,
+                persistedTaskId: task.id,
+                relatedTaskIds: [task.id],
+              }
+            : record,
+        ),
+      );
+      await requestGenerationTaskStart(task.id, "服饰场景图任务未能启动，请稍后重试。");
+      await pollClothingImageTask(task.id, () => latestImages, publishImages);
+      publishImages(latestImages, deriveProductGenerationRecordStatus(latestImages));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "服饰场景图生成失败。";
+      publishImages(failGeneratedImages(latestImages, message), "failed");
+      showToast({ message, variant: "error" });
+    } finally {
+      if (clothingGeneratingRecordIdRef.current === recordId) {
+        setClothingSceneGenerating(false);
+        setClothingGeneratingRecordId(null);
+        clothingGeneratingRecordIdRef.current = null;
+      }
+    }
+  }
+
+  async function pollClothingImageTask(
+    taskId: string,
+    getLatestImages: () => GeneratedDetailImage[],
+    publishImages: (images: GeneratedDetailImage[], status?: GenerationRecord["status"]) => void,
+  ) {
+    let lastPollSignature = "";
+    let queuedPollCount = 0;
+    let unchangedPollCount = 0;
+    for (;;) {
+      const taskDetail = await localGenerationPort.getTaskDetail(taskId);
+      const final = isTaskTerminal(taskDetail.task.status);
+      const nextImages = applyGeneratedAssetOutputs(getLatestImages(), taskDetail, { final });
+      const pollSignature = createTaskPollSignature(taskDetail);
+      if (pollSignature !== lastPollSignature) {
+        lastPollSignature = pollSignature;
+        unchangedPollCount = 0;
+      } else {
+        unchangedPollCount += 1;
+      }
+      queuedPollCount = taskDetail.task.status === "queued" ? queuedPollCount + 1 : 0;
+      publishImages(nextImages);
+      if (taskDetail.task.status === "queued") {
+        await requestGenerationTaskStart(taskId, "服饰场景图任务未能启动，请稍后重试。");
+      }
+      if (taskDetail.task.status === "failed" && taskDetail.outputAssets.length === 0) {
+        throw new Error(taskDetail.task.error?.message ?? "服饰场景图生成失败。");
+      }
+      if (final) {
+        return;
+      }
+      if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
+        throw new Error("服饰场景图任务长时间未启动，请检查后台任务执行状态。");
+      }
+      if (unchangedPollCount >= productGenerationMaxUnchangedPollCount) {
+        throw new Error("服饰场景图生成长时间无进展，请检查模型配置或后台任务日志。");
+      }
+      await delay(productGenerationPollIntervalMs);
+    }
   }
 
   function handleGenerateScenePlan() {
@@ -1260,73 +1765,93 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function restoreProductGenerationHistory() {
-      try {
-        const page = await localGenerationPort.listTasks({ workspace: "product", page: 1, pageSize: 20 });
-        const productTasks = page.items.filter(
-          (task) => task.workspace === "product" && (task.kind === "image-generation" || task.kind === "listing-copy"),
+    async function listGenerationTasksForWorkspace(workspace: "clothing" | "product") {
+      const pageSize = 20;
+      const tasks = [];
+      let page = 1;
+
+      for (;;) {
+        const result = await localGenerationPort.listTasks({ workspace, page, pageSize });
+        tasks.push(...result.items);
+        if (tasks.length >= result.total || result.items.length < pageSize) {
+          return tasks;
+        }
+        page += 1;
+      }
+    }
+
+    async function getTaskDetailsWithConcurrency(tasks: { id: string }[]) {
+      const taskDetails: GenerationTaskDetail[] = [];
+      for (let startIndex = 0; startIndex < tasks.length; startIndex += historyRestoreDetailConcurrency) {
+        const taskGroup = tasks.slice(startIndex, startIndex + historyRestoreDetailConcurrency);
+        const results = await Promise.allSettled(
+          taskGroup.map((task) => localGenerationPort.getTaskDetail(task.id)),
         );
-        const taskDetails = await Promise.all(productTasks.map((task) => localGenerationPort.getTaskDetail(task.id)));
-        const restoredRecords = taskDetails
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            taskDetails.push(result.value);
+            return;
+          }
+          console.warn(`restore generation task detail failed: ${taskGroup[index].id}`, result.reason);
+        });
+      }
+      return taskDetails;
+    }
+
+    async function restoreGenerationHistory() {
+      try {
+        const [productTasks, clothingTasks] = await Promise.all([
+          listGenerationTasksForWorkspace("product").catch((error) => {
+            console.warn("restore product generation task list failed", error);
+            return [];
+          }),
+          listGenerationTasksForWorkspace("clothing").catch((error) => {
+            console.warn("restore clothing generation task list failed", error);
+            return [];
+          }),
+        ]);
+        const taskById = new Map(
+          [...productTasks, ...clothingTasks]
+            .filter((task) => task.kind === "image-generation" || task.kind === "listing-copy")
+            .map((task) => [task.id, task] as const),
+        );
+        const taskDetails = await getTaskDetailsWithConcurrency([...taskById.values()]);
+        const productTaskDetails = taskDetails.filter((detail) => detail.task.workspace === "product");
+        const clothingTaskDetails = taskDetails.filter((detail) => detail.task.workspace === "clothing");
+        const restoredRecords = productTaskDetails
           .filter((detail) => detail.task.kind === "image-generation")
           .map(createProductGenerationRecordFromTaskDetail)
           .filter((record): record is GenerationRecord => record !== null);
-        const retryPatches = taskDetails
+        const retryPatches = productTaskDetails
           .filter((detail) => detail.task.kind === "image-generation")
           .map(createRestoredSingleImageRetryPatchFromTaskDetail)
           .filter((patch): patch is RestoredSingleImageRetryPatch => patch !== null);
-        const listingCopyImages = taskDetails
+        const listingCopyImages = productTaskDetails
           .filter((detail) => detail.task.kind === "listing-copy")
           .map(createRestoredListingCopyImageFromTaskDetail)
           .filter((item): item is RestoredListingCopyImage => item !== null);
         const restoredRecordsWithRetries = mergeRestoredSingleImageRetryPatches(restoredRecords, retryPatches);
         const restoredRecordsWithListingCopy = mergeRestoredListingCopyImages(restoredRecordsWithRetries, listingCopyImages);
+        const restoredClothingRecords = clothingTaskDetails
+          .filter((detail) => detail.task.kind === "image-generation")
+          .map(createClothingGenerationRecordFromTaskDetail)
+          .filter((record): record is GenerationRecord => record !== null);
+        const restoredGenerationRecords = [...restoredRecordsWithListingCopy, ...restoredClothingRecords];
 
-        if (!cancelled && restoredRecordsWithListingCopy.length > 0) {
-          setGenerationRecords((currentRecords) => mergeGenerationRecords(currentRecords, restoredRecordsWithListingCopy));
+        if (!cancelled && restoredGenerationRecords.length > 0) {
+          setGenerationRecords((currentRecords) => mergeGenerationRecords(currentRecords, restoredGenerationRecords));
         }
       } catch (error) {
-        console.warn("restore product generation history failed", error);
+        console.warn("restore generation history failed", error);
       }
     }
 
-    void restoreProductGenerationHistory();
+    void restoreGenerationHistory();
 
     return () => {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!clothingSceneGenerating) {
-      return;
-    }
-
-    const generationTimer = window.setTimeout(() => {
-      setClothingSceneImages((currentImages) => {
-        const failedImageId = pickRandomFailedImageId(currentImages);
-        const completedImages = completeGeneratedImages(currentImages, failedImageId);
-        if (clothingGeneratingRecordId) {
-          setGenerationRecords((currentRecords) =>
-            currentRecords.map((record) =>
-              record.id === clothingGeneratingRecordId
-                ? {
-                    ...record,
-                    images: completeGeneratedImages(record.images, failedImageId),
-                    status: "complete",
-                  }
-                : record,
-            ),
-          );
-        }
-        return completedImages;
-      });
-      setClothingSceneGenerating(false);
-      setClothingGeneratingRecordId(null);
-    }, generationCompleteDelayMs);
-
-    return () => window.clearTimeout(generationTimer);
-  }, [clothingSceneGenerating, clothingGeneratingRecordId]);
 
   useEffect(() => {
     if (!scenePlanGenerating) {
@@ -1429,15 +1954,20 @@ export function App() {
           ) : isClothingWorkspace ? (
             clothingSceneDrafting ? (
               <ClothingSceneSelectionPanel
-                onBack={() => setClothingSceneDrafting(false)}
+                drafts={clothingSceneDrafts}
+                onChange={setClothingSceneDrafts}
+                onBack={handleBackFromClothingScenePlan}
                 onGenerateSceneImages={handleGenerateClothingScenes}
+                planning={clothingScenePlanning}
                 sceneGenerating={clothingSceneGenerating}
               />
             ) : (
               <ClothingConfigPanel
+                baseModelGenerationSessionId={clothingBaseModelGenerationSessionId}
                 config={clothingConfig}
                 onChange={setClothingConfig}
-                onGenerateScenes={() => setClothingSceneDrafting(true)}
+                onGenerateBaseModel={handleGenerateBaseModel}
+                onGenerateScenes={handleGenerateClothingScenePlan}
               />
             )
           ) : null}
@@ -1566,6 +2096,71 @@ function createProductGenerationRecordFromTaskDetail(detail: GenerationTaskDetai
     status: restoredGenerationTaskStatus(detail, images, stale),
     title: detail.task.title || "商品详情图",
     workspace: "product",
+  };
+}
+
+function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDetail): GenerationRecord | null {
+  const input = detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {};
+  if (readOutputString(input.kind) !== "clothing-tryon-generation") {
+    return null;
+  }
+
+  const stale = isRestoredTaskStale(detail.task);
+  const referenceImages = readReferenceImagesFromTaskDetail(detail, input);
+  const outputAssets = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder);
+  const inputItems = readClothingGenerationInputItems(input);
+  const itemCount = Math.max(inputItems.length, outputAssets.length);
+  const shouldFailMissingOutput = stale || isTaskTerminal(detail.task.status);
+  const restoredImages = Array.from({ length: itemCount }, (_, index): GeneratedDetailImage => {
+    const inputItem = inputItems[index];
+    const outputAsset = outputAssets[index];
+    const title = inputItem?.scene || `服饰场景 ${index + 1}`;
+    const imageId = createRestoredDetailImageId(detail.task.id, inputItem?.id, index);
+    if (outputAsset?.asset.url || outputAsset?.asset.localPath) {
+      return {
+        assetId: outputAsset.asset.id,
+        assetLocalPath: outputAsset.asset.localPath,
+        assetRelativePath: outputAsset.asset.relativePath,
+        id: imageId,
+        imageNo: index + 1,
+        prompt: inputItem?.poseAction,
+        ratio: readOutputString(input.ratio) || inputItem?.ratio,
+        referenceImages,
+        sceneDescription: inputItem?.poseAction || inputItem?.sceneVisualAnchor,
+        src: outputAsset.asset.url ?? outputAsset.asset.localPath,
+        status: "complete",
+        title,
+      };
+    }
+
+    return {
+      errorMessage: stale ? "生成中断" : detail.task.error?.message || "生成结果缺少可展示图片。",
+      id: imageId,
+      imageNo: index + 1,
+      prompt: inputItem?.poseAction,
+      ratio: readOutputString(input.ratio) || inputItem?.ratio,
+      referenceImages,
+      sceneDescription: inputItem?.poseAction || inputItem?.sceneVisualAnchor,
+      status: shouldFailMissingOutput ? "failed" : "generating",
+      title,
+    };
+  });
+  if (restoredImages.length === 0) {
+    return null;
+  }
+  const images = prependRestoredSourceImageCards(detail.task.id, restoredImages, referenceImages);
+
+  return {
+    createdAt: dateTimeToTimestamp(detail.task.createdAt),
+    id: detail.task.id,
+    images,
+    inputSummary: detail.task.inputSummary || createRestoredClothingHistorySummary(input, images),
+    kind: "clothing-scene",
+    persistedTaskId: detail.task.id,
+    relatedTaskIds: [detail.task.id],
+    status: restoredGenerationTaskStatus(detail, images, stale),
+    title: detail.task.title || "服饰场景图",
+    workspace: "clothing",
   };
 }
 
@@ -1923,6 +2518,38 @@ function createRestoredProductHistorySummary(input: Record<string, unknown>) {
   return [platform, market, language, productSellingPoints].filter(Boolean).join(" · ");
 }
 
+type RestoredClothingGenerationInputItem = {
+  id: string;
+  poseAction: string;
+  ratio: string;
+  scene: string;
+  sceneVisualAnchor: string;
+};
+
+function readClothingGenerationInputItems(input: Record<string, unknown>): RestoredClothingGenerationInputItem[] {
+  const items = Array.isArray(input.items) ? input.items : [];
+  return items.map((item, index) => {
+    const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    return {
+      id: readOutputString(value.id) || `clothing-scene-${index + 1}`,
+      poseAction: readOutputString(value.poseAction),
+      ratio: readOutputString(value.ratio),
+      scene: readOutputString(value.scene),
+      sceneVisualAnchor: readOutputString(value.sceneVisualAnchor),
+    };
+  });
+}
+
+function createRestoredClothingHistorySummary(input: Record<string, unknown>, images: GeneratedDetailImage[]) {
+  const scenes = Array.from(
+    new Set(readClothingGenerationInputItems(input).map((item) => item.scene).filter(Boolean)),
+  );
+  const sceneSummary = scenes.length > 0 ? scenes.slice(0, 2).join("、") : "服饰场景";
+  const ratio = readOutputString(input.ratio);
+  const imageCount = images.filter((image) => image.kind !== "source-image" && image.kind !== "listing-copy").length;
+  return [sceneSummary, ratio, `${imageCount} 张`].filter(Boolean).join(" · ");
+}
+
 function generationTaskStatusToRecordStatus(status: GenerationTaskDetail["task"]["status"]): GenerationRecord["status"] {
   if (status === "succeeded") {
     return "complete";
@@ -2042,6 +2669,10 @@ function delay(durationMs: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, durationMs);
   });
+}
+
+function normalizeAssetSrc(src: string) {
+  return src.replace("asset://localhost//", "asset://localhost/");
 }
 
 function applyListingCopyOutput(
@@ -2268,7 +2899,7 @@ function referenceImagesToInputAssets(
 
 async function importProductInputAssets(
   productImages: ProductImageAsset[],
-  role: Extract<GenerationTaskInputAssetInput["role"], "source" | "reference">,
+  role: GenerationTaskInputAssetInput["role"],
 ): Promise<GenerationTaskInputAssetInput[]> {
   const importTargets = productImages
     .map((image, index) => ({ image, index }))
@@ -2276,7 +2907,7 @@ async function importProductInputAssets(
   const importedAssets =
     importTargets.length > 0
       ? await localAssetPort.importImages({
-          kind: role === "source" ? "source" : "reference",
+          kind: role === "model" ? "model" : role === "source" ? "source" : "reference",
           paths: importTargets.map((item) => item.image.path),
         })
       : [];
@@ -2297,6 +2928,61 @@ async function importProductInputAssets(
     });
   });
   return inputAssets;
+}
+
+async function createClothingInputAssets(config: ClothingConfigState): Promise<GenerationTaskInputAssetInput[]> {
+  const clothingAssets = await importProductInputAssets(config.clothingImages, "source");
+  const selectedModel = findSelectedClothingModelImage(config);
+  if (!selectedModel) {
+    throw new Error("请选择可用的模特全身图。");
+  }
+  const modelAssets = selectedModel ? await importProductInputAssets([selectedModel], "model") : [];
+  return [...clothingAssets, ...modelAssets.map((asset) => ({ ...asset, sortOrder: clothingAssets.length + asset.sortOrder }))];
+}
+
+function findSelectedClothingModelImage(config: ClothingConfigState): ProductImageAsset | null {
+  if (!config.selectedModelId) {
+    return null;
+  }
+  return (
+    config.modelImages.find((image) => image.id === config.selectedModelId) ??
+    config.generatedBaseModelImages.find((image) => image.id === config.selectedModelId) ??
+    null
+  );
+}
+
+function createClothingSceneDraftsFromTaskDetail(detail: GenerationTaskDetail): ClothingSceneDraft[] {
+  const output = detail.output && typeof detail.output === "object" ? (detail.output as Record<string, unknown>) : {};
+  const scenes = Array.isArray(output.scenes) ? output.scenes : [];
+  const drafts = scenes.flatMap((sceneValue, sceneIndex) => {
+    const sceneObject = sceneValue && typeof sceneValue === "object" ? (sceneValue as Record<string, unknown>) : {};
+    const scene = readOutputString(sceneObject.scene) || `场景 ${sceneIndex + 1}`;
+    const sceneVisualAnchor = readOutputString(sceneObject.sceneVisualAnchor);
+    const scenePromptSegment = readOutputString(sceneObject.scenePromptSegment);
+    const poses = Array.isArray(sceneObject.recommendedPoses) ? sceneObject.recommendedPoses : [];
+    return poses.map((poseValue, poseIndex): ClothingSceneDraft => {
+      const poseObject = poseValue && typeof poseValue === "object" ? (poseValue as Record<string, unknown>) : {};
+      const cameraSetup =
+        poseObject.cameraSetup && typeof poseObject.cameraSetup === "object"
+          ? (poseObject.cameraSetup as Record<string, unknown>)
+          : {};
+      return {
+        angle: readOutputString(cameraSetup.perspective) || "正面",
+        checked: false,
+        description: readOutputString(poseObject.poseAction) || "自然站立，展示服装整体版型",
+        framing: readOutputString(cameraSetup.framing) || "全身",
+        id: `scene-${sceneIndex + 1}-pose-${poseIndex + 1}`,
+        scene,
+        scenePromptSegment,
+        sceneVisualAnchor,
+        shootingPosition: readOutputString(cameraSetup.shootingPosition) || "平视机位",
+      };
+    });
+  });
+  if (drafts.length === 0) {
+    throw new Error("服饰场景规划结果为空。");
+  }
+  return drafts;
 }
 
 function mimeTypeFromImageName(name: string) {

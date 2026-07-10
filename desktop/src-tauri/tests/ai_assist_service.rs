@@ -23,7 +23,7 @@ fn product_selling_points_prompt_keeps_rules_as_system_and_task_as_user() {
     assert_eq!(messages[0].role, "system");
     assert!(messages[0]
         .content
-        .contains("你是一名专业的通用电商商品详情页文案策划"));
+        .contains("你是一名专业的电商商品详情页文案策划"));
     assert!(messages[0].content.contains("优先读取图片中的可见文字"));
     assert!(messages[0].content.contains("商品类目"));
     assert!(messages[0]
@@ -34,7 +34,7 @@ fn product_selling_points_prompt_keeps_rules_as_system_and_task_as_user() {
     assert!(messages[1].content.contains("请根据上传图片识别商品信息"));
     assert!(!messages[1]
         .content
-        .contains("你是一名专业的通用电商商品详情页文案策划"));
+        .contains("你是一名专业的电商商品详情页文案策划"));
 }
 
 #[test]

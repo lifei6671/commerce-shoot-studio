@@ -4,12 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::errors::{
+    normalize_provider_http_error, normalize_provider_transport_error, ProviderTransportErrorKind,
+};
 use crate::infrastructure::database::{DatabaseError, WorkspaceDatabase};
 use crate::services::provider_connection::{
     HttpProviderConnectionTester, ProviderConnectionProbe, ProviderConnectionResult,
     ProviderConnectionTester,
 };
-use crate::services::secrets::{secret_status_for_profile, SecretStatus};
+use crate::services::secrets::{create_secret_id, secret_status_for_profile, SecretStatus};
 
 pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
     ModelCapabilityDefinition::new(
@@ -31,6 +34,12 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
         "mock-product-selling-points-v1",
     ),
     ModelCapabilityDefinition::new(
+        "clothing-scene-planning",
+        "image-to-text",
+        "服饰场景动作规划",
+        "mock-clothing-scene-plan-v1",
+    ),
+    ModelCapabilityDefinition::new(
         "viral-style-analysis",
         "text-to-text",
         "爆款风格分析",
@@ -47,6 +56,12 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
         "text-to-image",
         "商品详情图生成",
         "mock-product-detail-v1",
+    ),
+    ModelCapabilityDefinition::new(
+        "clothing-base-model-generation",
+        "text-to-image",
+        "服饰基准模特生成",
+        "mock-clothing-base-model-v1",
     ),
     ModelCapabilityDefinition::new(
         "clothing-tryon-generation",
@@ -84,6 +99,43 @@ impl ModelCapabilityDefinition {
             mock_model,
         }
     }
+
+    pub(crate) fn max_input_assets(&self) -> i64 {
+        match self.id {
+            "clothing-scene-planning" | "clothing-tryon-generation" => 6,
+            _ => match self.category {
+                "text-to-text" | "text-to-image" => 0,
+                "image-to-text" => 3,
+                "image-to-image" => 4,
+                _ => 0,
+            },
+        }
+    }
+
+    pub(crate) fn supported_aspect_ratios(&self) -> &'static [&'static str] {
+        match self.id {
+            "clothing-base-model-generation" => &["2:3"],
+            "clothing-scene-planning" | "clothing-tryon-generation" => &["3:4", "1:1", "9:16"],
+            _ => &["1:1", "3:4", "9:16", "16:9"],
+        }
+    }
+
+    pub(crate) fn max_image_count(&self) -> i64 {
+        match self.id {
+            "clothing-base-model-generation" => 1,
+            _ => match self.category {
+                "text-to-image" | "image-to-image" => 4,
+                _ => 1,
+            },
+        }
+    }
+}
+
+pub(crate) fn capability_requires_real_provider(capability_id: &str) -> bool {
+    matches!(
+        capability_id,
+        "clothing-scene-planning" | "clothing-base-model-generation" | "clothing-tryon-generation"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -105,9 +157,11 @@ pub const ALL_CAPABILITY_IDS: &[&str] = &[
     "listing-copy",
     "prompt-plan",
     "product-selling-points",
+    "clothing-scene-planning",
     "viral-style-analysis",
     "scene-image-generation",
     "product-detail-generation",
+    "clothing-base-model-generation",
     "clothing-tryon-generation",
     "image-edit",
 ];
@@ -121,6 +175,15 @@ pub const ALL_CATEGORIES: &[&str] = &[
 
 pub const TEXT_CAPABILITY_IDS: &[&str] = &["listing-copy", "prompt-plan", "viral-style-analysis"];
 pub const TEXT_CATEGORIES: &[&str] = &["text-to-text"];
+pub const OPENAI_CAPABILITY_IDS: &[&str] = &[
+    "listing-copy",
+    "prompt-plan",
+    "product-selling-points",
+    "clothing-scene-planning",
+    "viral-style-analysis",
+    "clothing-base-model-generation",
+];
+pub const OPENAI_CATEGORIES: &[&str] = &["text-to-text", "text-to-image", "image-to-text"];
 
 pub const PROVIDER_PROFILES: &[ProviderProfile] = &[
     ProviderProfile {
@@ -144,8 +207,8 @@ pub const PROVIDER_PROFILES: &[ProviderProfile] = &[
         base_url: "https://api.openai.com",
         default_endpoint_path: Some("/v1/responses"),
         model_list_path: Some("/v1/models"),
-        supported_categories: ALL_CATEGORIES,
-        supported_capabilities: ALL_CAPABILITY_IDS,
+        supported_categories: OPENAI_CATEGORIES,
+        supported_capabilities: OPENAI_CAPABILITY_IDS,
         custom_enabled: false,
         requires_secret: true,
     },
@@ -251,6 +314,11 @@ pub enum ModelConfigError {
     Validation(String),
     NotFound(String),
     Database(String),
+    ProviderHttp {
+        status_code: i64,
+        provider_error_code: Option<String>,
+    },
+    ProviderTransport(ProviderTransportErrorKind),
 }
 
 impl std::fmt::Display for ModelConfigError {
@@ -258,6 +326,19 @@ impl std::fmt::Display for ModelConfigError {
         match self {
             Self::Validation(message) | Self::Database(message) => write!(formatter, "{message}"),
             Self::NotFound(id) => write!(formatter, "模型配置不存在：{id}"),
+            Self::ProviderHttp {
+                status_code,
+                provider_error_code,
+            } => write!(
+                formatter,
+                "{}",
+                normalize_provider_http_error(*status_code, provider_error_code.as_deref()).message
+            ),
+            Self::ProviderTransport(kind) => write!(
+                formatter,
+                "{}",
+                normalize_provider_transport_error(*kind).message
+            ),
         }
     }
 }
@@ -350,6 +431,14 @@ impl ModelConfigService {
                 bool_to_i64(should_be_default),
             ],
         )?;
+        if profile.requires_secret {
+            ensure_related_category_secret(
+                &database,
+                &input.provider_profile_id,
+                &input.capability_id,
+                capability.category,
+            )?;
+        }
 
         find_config_by_id(&database, &id)?.ok_or(ModelConfigError::NotFound(id))
     }
@@ -558,7 +647,16 @@ fn related_default_config_id(
               AND COALESCE(config.endpoint_path, '') = COALESCE(?5, '')
               AND config.is_default = 1
               AND config.enabled = 1
-              AND (?6 = 0 OR secret.id IS NOT NULL)
+              AND (
+                  ?6 = 0
+                  OR EXISTS (
+                      SELECT 1
+                      FROM model_secrets tested_secret
+                      WHERE tested_secret.provider_profile_id = config.provider_profile_id
+                        AND tested_secret.capability_id = ?7
+                        AND tested_secret.secret_value = secret.secret_value
+                  )
+              )
             ",
             params![
                 capability_id,
@@ -567,6 +665,7 @@ fn related_default_config_id(
                 tested_config.model.as_str(),
                 tested_config.endpoint_path.as_deref(),
                 bool_to_i64(requires_secret),
+                tested_config.capability_id.as_str(),
             ],
             |row| row.get(0),
         )
@@ -587,7 +686,7 @@ pub fn default_resolved_config_for_capability(
 ) -> Result<ResolvedModelConfig, ModelConfigError> {
     let database = open_database(workspace_directory)?;
     ensure_mock_default_configs(&database)?;
-    database
+    let default_config = database
         .connection()
         .query_row(
             config_select_sql(
@@ -597,8 +696,86 @@ pub fn default_resolved_config_for_capability(
             params![capability_id],
             resolved_config_from_row,
         )
-        .optional()?
-        .ok_or_else(|| ModelConfigError::NotFound(capability_id.to_string()))
+        .optional()?;
+
+    if let Some(config) = default_config {
+        if config.provider_profile_id != "mock-local"
+            || !matches!(
+                capability_id,
+                "clothing-scene-planning" | "clothing-base-model-generation"
+            )
+        {
+            return ensure_resolved_config_supports_capability(config, capability_id);
+        }
+        if let Some(related_config) =
+            available_real_default_config_for_same_category(&database, capability_id)?
+        {
+            return ensure_resolved_config_supports_capability(related_config, capability_id);
+        }
+        return ensure_resolved_config_supports_capability(config, capability_id);
+    }
+
+    if matches!(
+        capability_id,
+        "clothing-scene-planning" | "clothing-base-model-generation"
+    ) {
+        let config = available_real_default_config_for_same_category(&database, capability_id)?
+            .ok_or_else(|| ModelConfigError::NotFound(capability_id.to_string()))?;
+        return ensure_resolved_config_supports_capability(config, capability_id);
+    }
+
+    Err(ModelConfigError::NotFound(capability_id.to_string()))
+}
+
+fn ensure_resolved_config_supports_capability(
+    config: ResolvedModelConfig,
+    capability_id: &str,
+) -> Result<ResolvedModelConfig, ModelConfigError> {
+    let profile = provider_profile(&config.provider_profile_id).ok_or_else(|| {
+        ModelConfigError::Validation("provider_profile_id 不在内置 allowlist 中。".to_string())
+    })?;
+    ensure_profile_supports_capability(profile, capability_id)?;
+    Ok(config)
+}
+
+fn available_real_default_config_for_same_category(
+    database: &WorkspaceDatabase,
+    capability_id: &str,
+) -> Result<Option<ResolvedModelConfig>, ModelConfigError> {
+    let category = capability_definition(capability_id)
+        .ok_or_else(|| ModelConfigError::Validation("不支持的 capabilityId。".to_string()))?
+        .category;
+    let related_capability_ids = CAPABILITIES
+        .iter()
+        .filter(|capability| capability.category == category)
+        .map(|capability| capability.id)
+        .collect::<Vec<_>>();
+    let placeholders = std::iter::repeat_n("?", related_capability_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = config_select_sql(&format!(
+        "WHERE config.capability_id IN ({placeholders})
+           AND config.provider_profile_id != 'mock-local'
+           AND config.is_default = 1
+           AND config.enabled = 1"
+    ));
+    let mut statement = database.connection().prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(related_capability_ids), |row| {
+        resolved_config_from_row(row)
+    })?;
+    for row in rows {
+        let config = row?;
+        let profile = provider_profile(&config.provider_profile_id).ok_or_else(|| {
+            ModelConfigError::Validation("provider_profile_id 不在内置 allowlist 中。".to_string())
+        })?;
+        if !profile.supported_capabilities.contains(&capability_id) {
+            continue;
+        }
+        if config.view.connection_status == "available" && config.view.secret_status.configured {
+            return Ok(Some(config));
+        }
+    }
+    Ok(None)
 }
 
 fn open_database(workspace_directory: &Path) -> Result<WorkspaceDatabase, ModelConfigError> {
@@ -711,6 +888,45 @@ fn load_secret_value(
         )
         .optional()
         .map_err(ModelConfigError::from)
+}
+
+fn ensure_related_category_secret(
+    database: &WorkspaceDatabase,
+    provider_profile_id: &str,
+    capability_id: &str,
+    category: &str,
+) -> Result<(), ModelConfigError> {
+    if load_secret_value(database, provider_profile_id, capability_id)?.is_some() {
+        return Ok(());
+    }
+
+    for related_capability in CAPABILITIES
+        .iter()
+        .filter(|capability| capability.category == category && capability.id != capability_id)
+    {
+        let Some(secret_value) =
+            load_secret_value(database, provider_profile_id, related_capability.id)?
+        else {
+            continue;
+        };
+
+        database.connection().execute(
+            "
+            INSERT INTO model_secrets (id, provider_profile_id, capability_id, secret_value, updated_at)
+            VALUES (?1, ?2, ?3, ?4, datetime('now'))
+            ON CONFLICT(provider_profile_id, capability_id) DO NOTHING
+            ",
+            params![
+                create_secret_id(),
+                provider_profile_id,
+                capability_id,
+                secret_value,
+            ],
+        )?;
+        break;
+    }
+
+    Ok(())
 }
 
 fn config_select_sql(where_clause: &str) -> String {
@@ -891,6 +1107,10 @@ fn resolve_endpoint_path(
     category: &str,
     configured_endpoint_path: Option<&str>,
 ) -> Option<String> {
+    if profile.id == "openai" && category == "text-to-image" {
+        return Some("/v1/images/generations".to_string());
+    }
+
     if profile.id == "volcengine" && matches!(category, "text-to-image" | "image-to-image") {
         return Some("/images/generations".to_string());
     }

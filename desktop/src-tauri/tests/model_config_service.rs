@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use commerce_shoot_studio_lib::infrastructure::filesystem::WorkspaceFileSystem;
 use commerce_shoot_studio_lib::services::capability::CapabilityService;
 use commerce_shoot_studio_lib::services::model_config::{
-    LocalModelConfigView, ModelConfigService, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
+    default_resolved_config_for_capability, LocalModelConfigView, ModelConfigService,
+    SaveLocalModelConfigInput, SetDefaultModelConfigInput,
 };
 use commerce_shoot_studio_lib::services::provider_connection::{
     ProviderConnectionError, ProviderConnectionProbe, ProviderConnectionResult,
@@ -14,6 +15,7 @@ use commerce_shoot_studio_lib::services::provider_connection::{
 };
 use commerce_shoot_studio_lib::services::secrets::{SecretScope, SecretService};
 use commerce_shoot_studio_lib::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
+use rusqlite::{params, Connection};
 
 #[test]
 fn model_config_lists_builtin_mock_profile_and_seeded_mock_configs() {
@@ -46,7 +48,115 @@ fn model_config_lists_builtin_mock_profile_and_seeded_mock_configs() {
 }
 
 #[test]
-fn provider_profiles_include_current_release_allowlist() {
+fn clothing_real_provider_only_capabilities_reject_seeded_mock_defaults() {
+    let workspace_dir = initialized_workspace("model-config-clothing-real-provider-only");
+    let capability_service = CapabilityService::new();
+
+    for capability_id in [
+        "clothing-scene-planning",
+        "clothing-base-model-generation",
+        "clothing-tryon-generation",
+    ] {
+        let capability = capability_service
+            .get_capability(&workspace_dir, capability_id)
+            .expect("clothing capability should load");
+
+        assert!(
+            !capability.available,
+            "{capability_id} must reject mock-only defaults"
+        );
+        assert_eq!(
+            capability.unavailable_reason.as_deref(),
+            Some("未配置可用真实模型。")
+        );
+    }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn clothing_capabilities_report_capability_specific_metadata() {
+    let workspace_dir = initialized_workspace("model-config-clothing-capability-metadata");
+    let capability_service = CapabilityService::new();
+
+    let base_model = capability_service
+        .get_capability(&workspace_dir, "clothing-base-model-generation")
+        .expect("base model capability should load");
+    assert_eq!(base_model.category, "text-to-image");
+    assert_eq!(base_model.max_input_assets, Some(0));
+    assert_eq!(base_model.supported_aspect_ratios, vec!["2:3"]);
+    assert_eq!(base_model.max_image_count, Some(1));
+
+    for capability_id in ["clothing-scene-planning", "clothing-tryon-generation"] {
+        let capability = capability_service
+            .get_capability(&workspace_dir, capability_id)
+            .expect("clothing capability should load");
+        assert_eq!(capability.max_input_assets, Some(6));
+        assert_eq!(
+            capability.supported_aspect_ratios,
+            vec!["3:4", "1:1", "9:16"]
+        );
+    }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn tested_real_default_keeps_real_provider_only_capability_available() {
+    let workspace_dir = initialized_workspace("model-config-clothing-real-provider-available");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let capability_id = "clothing-base-model-generation".to_string();
+    let config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 服饰基准模特".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-image-1".to_string(),
+                endpoint_path: None,
+                enabled: true,
+            },
+        )
+        .expect("real config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(capability_id.clone()),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: capability_id.clone(),
+                config_id: config.id.clone(),
+            },
+        )
+        .expect("real config should become default");
+    model_service
+        .test_config_with_tester(&workspace_dir, &config.id, &SuccessfulConnectionTester)
+        .expect("real config should pass connection test");
+
+    let capability = CapabilityService::new()
+        .get_capability(&workspace_dir, &capability_id)
+        .expect("base model capability should load");
+
+    assert!(capability.available);
+    assert_eq!(capability.unavailable_reason, None);
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn openai_provider_profile_includes_only_current_release_capabilities() {
     let service = ModelConfigService::new();
 
     let profiles = service
@@ -60,11 +170,105 @@ fn provider_profiles_include_current_release_allowlist() {
         .iter()
         .find(|profile| profile.id == "deepseek")
         .expect("deepseek profile should exist");
+    let openai = profiles
+        .iter()
+        .find(|profile| profile.id == "openai")
+        .expect("openai profile should exist");
     assert_eq!(
         deepseek.supported_categories,
         vec!["text-to-text"],
         "DeepSeek 第一版只作为文生文能力接入，避免 UI 误选图片能力",
     );
+    assert!(!openai
+        .supported_categories
+        .contains(&"image-to-image".to_string()));
+    assert!(!openai
+        .supported_capabilities
+        .contains(&"clothing-tryon-generation".to_string()));
+    assert!(!openai
+        .supported_capabilities
+        .contains(&"image-edit".to_string()));
+    assert!(openai
+        .supported_capabilities
+        .contains(&"clothing-base-model-generation".to_string()));
+    assert!(!openai
+        .supported_capabilities
+        .contains(&"scene-image-generation".to_string()));
+    assert!(!openai
+        .supported_capabilities
+        .contains(&"product-detail-generation".to_string()));
+}
+
+#[test]
+fn openai_rejects_unimplemented_image_to_image_capabilities() {
+    let workspace_dir = initialized_workspace("model-config-openai-image-to-image-rejected");
+    let service = ModelConfigService::new();
+
+    for capability_id in ["clothing-tryon-generation", "image-edit"] {
+        let error = service
+            .save_config(
+                &workspace_dir,
+                SaveLocalModelConfigInput {
+                    id: None,
+                    capability_id: capability_id.to_string(),
+                    provider_profile_id: "openai".to_string(),
+                    display_name: "OpenAI 图生图".to_string(),
+                    execution_mode: "sync".to_string(),
+                    model: "gpt-image-1".to_string(),
+                    endpoint_path: None,
+                    enabled: true,
+                },
+            )
+            .expect_err(
+                "OpenAI image-to-image should stay disabled until its request is implemented",
+            );
+
+        assert!(error.to_string().contains("provider profile 不支持该能力"));
+    }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn resolver_rejects_legacy_openai_image_to_image_defaults() {
+    for capability_id in ["clothing-tryon-generation", "image-edit"] {
+        let workspace_dir = initialized_workspace(&format!(
+            "model-config-legacy-openai-{}",
+            capability_id.replace('-', "_")
+        ));
+        let service = ModelConfigService::new();
+        service
+            .list_configs(&workspace_dir)
+            .expect("mock defaults should seed");
+        let database = Connection::open(workspace_dir.join("workspace.db"))
+            .expect("workspace database should open");
+        database
+            .execute(
+                "UPDATE model_configs SET is_default = 0 WHERE capability_id = ?1",
+                [capability_id],
+            )
+            .expect("mock default should clear");
+        database
+            .execute(
+                "
+                INSERT INTO model_configs (
+                    id, capability_id, provider_profile_id, display_name, protocol,
+                    execution_mode, model, endpoint_path, enabled, is_default
+                )
+                VALUES (?1, ?2, 'openai', 'Legacy OpenAI 图生图', 'openai',
+                        'sync', 'gpt-image-1', '/v1/responses', 1, 1)
+                ",
+                params![format!("cfg_legacy_{capability_id}"), capability_id],
+            )
+            .expect("legacy config should insert");
+
+        let error = default_resolved_config_for_capability(&workspace_dir, capability_id)
+            .expect_err("resolver must reject provider capabilities removed from the allowlist");
+
+        assert!(error.to_string().contains("provider profile 不支持该能力"));
+        drop(database);
+        remove_workspace(&workspace_dir);
+    }
 }
 
 #[test]
@@ -141,6 +345,205 @@ fn provider_connection_status_is_persisted_after_test_config() {
     assert!(test_result.ok);
     assert_eq!(reloaded.connection_status, "available");
     assert!(reloaded.connection_tested_at.is_some());
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn clothing_scene_planning_reuses_available_image_to_text_default_config() {
+    let workspace_dir = initialized_workspace("model-config-clothing-plan-fallback");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let source_capability_id = "product-selling-points".to_string();
+    let config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: source_capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 图生文".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-5.1".to_string(),
+                endpoint_path: Some("/responses".to_string()),
+                enabled: true,
+            },
+        )
+        .expect("config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(source_capability_id),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: "product-selling-points".to_string(),
+                config_id: config.id.clone(),
+            },
+        )
+        .expect("default should switch");
+    model_service
+        .test_config_with_tester(&workspace_dir, &config.id, &SuccessfulConnectionTester)
+        .expect("config should pass");
+
+    let resolved =
+        default_resolved_config_for_capability(&workspace_dir, "clothing-scene-planning")
+            .expect("clothing planning should reuse same-category image-to-text config");
+
+    assert_eq!(resolved.provider_profile_id, "openai");
+    assert_eq!(resolved.view.capability_id, "product-selling-points");
+    assert_eq!(resolved.view.connection_status, "available");
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn category_fallback_skips_available_provider_that_does_not_support_target_capability() {
+    let workspace_dir = initialized_workspace("model-config-category-fallback-skips-unsupported");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let supported_config = save_volcengine_text_to_image_config(
+        &model_service,
+        &workspace_dir,
+        "scene-image-generation",
+    );
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "volcengine".to_string(),
+                capability_id: Some("scene-image-generation".to_string()),
+            },
+            "ak-supported-secret".to_string(),
+        )
+        .expect("supported secret should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: "scene-image-generation".to_string(),
+                config_id: supported_config.id.clone(),
+            },
+        )
+        .expect("supported config should become default");
+    model_service
+        .test_config_with_tester(
+            &workspace_dir,
+            &supported_config.id,
+            &SuccessfulConnectionTester,
+        )
+        .expect("supported config should become available");
+
+    let database = Connection::open(workspace_dir.join("workspace.db"))
+        .expect("workspace database should open");
+    database
+        .execute(
+            "UPDATE model_configs SET is_default = 0 WHERE capability_id = 'product-detail-generation'",
+            [],
+        )
+        .expect("product detail mock default should clear");
+    database
+        .execute(
+            "
+            INSERT INTO model_secrets (
+                id, provider_profile_id, capability_id, secret_value
+            )
+            VALUES ('secret_legacy_deepseek_image', 'deepseek',
+                    'product-detail-generation', 'legacy-secret')
+            ",
+            [],
+        )
+        .expect("legacy unsupported secret should insert");
+    let (secret_updated_at, secret_version): (String, i64) = database
+        .query_row(
+            "
+            SELECT updated_at, version
+            FROM model_secrets
+            WHERE id = 'secret_legacy_deepseek_image'
+            ",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy secret revision should load");
+    let fingerprint = format!(
+        "deepseek|sync|legacy-image-model|/chat/completions|{secret_updated_at}:{secret_version}"
+    );
+    database
+        .execute(
+            "
+            INSERT INTO model_configs (
+                id, capability_id, provider_profile_id, display_name, protocol,
+                execution_mode, model, endpoint_path, enabled, is_default,
+                connection_status, connection_fingerprint
+            )
+            VALUES ('cfg_legacy_deepseek_image', 'product-detail-generation',
+                    'deepseek', 'Legacy DeepSeek 文生图', 'openai-compatible',
+                    'sync', 'legacy-image-model', '/chat/completions', 1, 1,
+                    'available', ?1)
+            ",
+            [fingerprint],
+        )
+        .expect("legacy unsupported config should insert");
+
+    let resolved =
+        default_resolved_config_for_capability(&workspace_dir, "clothing-base-model-generation")
+            .expect("fallback should continue to the supported provider");
+
+    assert_eq!(resolved.provider_profile_id, "volcengine");
+    assert_eq!(resolved.view.id, supported_config.id);
+    drop(database);
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn unrelated_mock_default_is_not_replaced_by_same_category_real_config() {
+    let workspace_dir = initialized_workspace("model-config-unrelated-fallback");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let detail_config = save_volcengine_text_to_image_config(
+        &model_service,
+        &workspace_dir,
+        "product-detail-generation",
+    );
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: "product-detail-generation".to_string(),
+                config_id: detail_config.id.clone(),
+            },
+        )
+        .expect("detail default should switch");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "volcengine".to_string(),
+                capability_id: Some("product-detail-generation".to_string()),
+            },
+            "ak-test-secret".to_string(),
+        )
+        .expect("detail secret should save");
+    model_service
+        .test_config_with_tester(
+            &workspace_dir,
+            &detail_config.id,
+            &SuccessfulConnectionTester,
+        )
+        .expect("detail config should pass");
+
+    let resolved = default_resolved_config_for_capability(&workspace_dir, "scene-image-generation")
+        .expect("scene default should resolve");
+
+    assert_eq!(resolved.provider_profile_id, "mock-local");
+    assert_eq!(resolved.view.capability_id, "scene-image-generation");
 
     remove_workspace(&workspace_dir);
 }
@@ -243,6 +646,59 @@ fn volcengine_image_generation_uses_images_generations_endpoint() {
     assert_eq!(probe.endpoint_path, "/images/generations");
     assert_eq!(probe.category, "text-to-image");
     assert_eq!(probe.model, "doubao-seedream-4-0-250828");
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn openai_text_to_image_uses_images_generations_endpoint_for_saved_config_and_probe() {
+    let workspace_dir = initialized_workspace("model-config-openai-image-endpoint");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let capability_id = "clothing-base-model-generation".to_string();
+    let config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 文生图".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-image-1".to_string(),
+                endpoint_path: Some("/v1/responses".to_string()),
+                enabled: true,
+            },
+        )
+        .expect("config should save");
+
+    assert_eq!(
+        config.endpoint_path.as_deref(),
+        Some("/v1/images/generations")
+    );
+
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(capability_id),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    let tester = RecordingConnectionTester::new(true);
+
+    model_service
+        .test_config_with_tester(&workspace_dir, &config.id, &tester)
+        .expect("test config should use tester");
+    let probe = tester
+        .take_probe()
+        .expect("provider probe should be recorded");
+
+    assert_eq!(probe.provider_profile_id, "openai");
+    assert_eq!(probe.endpoint_path, "/v1/images/generations");
+    assert_eq!(probe.category, "text-to-image");
 
     remove_workspace(&workspace_dir);
 }
@@ -356,6 +812,180 @@ fn testing_one_category_config_marks_related_defaults_without_extra_provider_cal
             .expect("detail config should reload")
             .connection_status,
         "available"
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn testing_category_config_does_not_mark_related_default_with_stale_secret_available() {
+    let workspace_dir = initialized_workspace("model-config-related-stale-secret");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let scene_config = save_volcengine_text_to_image_config(
+        &model_service,
+        &workspace_dir,
+        "scene-image-generation",
+    );
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "volcengine".to_string(),
+                capability_id: Some(scene_config.capability_id.clone()),
+            },
+            "ak-key-1".to_string(),
+        )
+        .expect("source secret should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: scene_config.capability_id.clone(),
+                config_id: scene_config.id.clone(),
+            },
+        )
+        .expect("source default should switch");
+
+    let detail_config = save_volcengine_text_to_image_config(
+        &model_service,
+        &workspace_dir,
+        "product-detail-generation",
+    );
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: detail_config.capability_id.clone(),
+                config_id: detail_config.id.clone(),
+            },
+        )
+        .expect("related default should switch");
+
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "volcengine".to_string(),
+                capability_id: Some(scene_config.capability_id.clone()),
+            },
+            "ak-key-2".to_string(),
+        )
+        .expect("source secret should rotate independently");
+    model_service
+        .test_config_with_tester(
+            &workspace_dir,
+            &scene_config.id,
+            &SuccessfulConnectionTester,
+        )
+        .expect("source config should test successfully");
+
+    assert_eq!(
+        model_service
+            .get_config(&workspace_dir, &scene_config.id)
+            .expect("source config should reload")
+            .connection_status,
+        "available"
+    );
+    assert_eq!(
+        model_service
+            .get_config(&workspace_dir, &detail_config.id)
+            .expect("related config should reload")
+            .connection_status,
+        "untested"
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn saving_related_category_config_reuses_existing_provider_secret() {
+    let workspace_dir = initialized_workspace("model-config-related-secret");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let source_config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: "product-selling-points".to_string(),
+                provider_profile_id: "volcengine".to_string(),
+                display_name: "火山图生文".to_string(),
+                execution_mode: "auto".to_string(),
+                model: "doubao-seed-2-0-lite-260428".to_string(),
+                endpoint_path: None,
+                enabled: true,
+            },
+        )
+        .expect("source config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "volcengine".to_string(),
+                capability_id: Some("product-selling-points".to_string()),
+            },
+            "ak-test-secret".to_string(),
+        )
+        .expect("source secret should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: "product-selling-points".to_string(),
+                config_id: source_config.id.clone(),
+            },
+        )
+        .expect("source default should switch");
+
+    let related_config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: "clothing-scene-planning".to_string(),
+                provider_profile_id: "volcengine".to_string(),
+                display_name: "火山图生文".to_string(),
+                execution_mode: "auto".to_string(),
+                model: "doubao-seed-2-0-lite-260428".to_string(),
+                endpoint_path: None,
+                enabled: true,
+            },
+        )
+        .expect("related config should save");
+    model_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: "clothing-scene-planning".to_string(),
+                config_id: related_config.id.clone(),
+            },
+        )
+        .expect("related default should switch");
+
+    let reloaded_related = model_service
+        .get_config(&workspace_dir, &related_config.id)
+        .expect("related config should reload");
+    assert!(reloaded_related.secret_status.configured);
+
+    let tester = CountingConnectionTester::default();
+    model_service
+        .test_config_with_tester(&workspace_dir, &source_config.id, &tester)
+        .expect("source config should test once");
+
+    assert_eq!(tester.call_count(), 1);
+    assert_eq!(
+        model_service
+            .get_config(&workspace_dir, &related_config.id)
+            .expect("related config should reload after test")
+            .connection_status,
+        "available"
+    );
+    assert!(
+        CapabilityService::new()
+            .get_capability(&workspace_dir, "clothing-scene-planning")
+            .expect("clothing planning capability should load")
+            .available
     );
 
     remove_workspace(&workspace_dir);

@@ -35,3 +35,4 @@ desktop/src-tauri/target/
 # Local code intelligence cache
 .codegraph/
 .codex/config.toml
+/superpowers/

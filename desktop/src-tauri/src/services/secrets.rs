@@ -226,7 +226,7 @@ fn normalized_capability_id(value: Option<&str>) -> String {
     value.unwrap_or("").to_string()
 }
 
-fn create_secret_id() -> String {
+pub(crate) fn create_secret_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

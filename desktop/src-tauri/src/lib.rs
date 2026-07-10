@@ -29,6 +29,7 @@ pub fn run() {
             commands::assets::asset_delete,
             commands::assets::asset_get,
             commands::assets::asset_import_images,
+            commands::assets::asset_list_builtin_models,
             commands::assets::asset_list,
             commands::assets::asset_reveal,
             commands::capability::capability_get_capability,

@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Asset, AssetPort, AssetQuery, ImportImagesInput } from "../index";
+import type { Asset, AssetPort, AssetQuery, BuiltinModelAsset, ImportImagesInput } from "../index";
 
 export const localAssetPort: AssetPort = {
   listAssets(query?: AssetQuery) {
     return invoke("asset_list", { query });
+  },
+  listBuiltinModels() {
+    return invoke<BuiltinModelAsset[]>("asset_list_builtin_models");
   },
   getAsset(assetId: string) {
     return invoke<Asset>("asset_get", { assetId });

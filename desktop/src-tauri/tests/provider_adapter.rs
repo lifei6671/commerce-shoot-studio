@@ -1,12 +1,239 @@
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use commerce_shoot_studio_lib::domain::errors::ProviderTransportErrorKind;
 use commerce_shoot_studio_lib::infrastructure::providers::http_model_gateway::{
     build_model_gateway_request_body, build_model_gateway_stream_request_body,
     model_gateway_request_timeout, parse_model_gateway_sse_event,
-    sanitize_model_gateway_request_for_diagnostics, HttpModelGatewayRequestConfig,
-    ModelGatewaySseEvent,
+    sanitize_model_gateway_request_for_diagnostics, HttpModelGatewayAdapter,
+    HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
 };
 use commerce_shoot_studio_lib::infrastructure::providers::openai_compatible::{
     normalize_openai_compatible_response, redact_provider_result_url,
 };
+use commerce_shoot_studio_lib::services::model_gateway::{
+    ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayError,
+};
+
+#[test]
+fn http_adapter_preserves_provider_http_status_without_response_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+        stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .expect("response should write");
+    });
+    let input = serde_json::json!({
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成文案" }]
+        }
+    });
+
+    let error = HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .expect_err("429 should propagate as a typed HTTP error");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderHttp {
+            status_code: 429,
+            provider_error_code: None,
+        }
+    );
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn http_adapter_preserves_network_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+    });
+    let input = serde_json::json!({
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成文案" }]
+        }
+    });
+
+    let error = HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .expect_err("closed connection should propagate as a network error");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderTransport(ProviderTransportErrorKind::Network)
+    );
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn http_adapter_extracts_nested_error_code_without_logging_response_body() {
+    let response_body =
+        r#"{"error":{"code":"ModelNotOpen","message":"diagnostic-response-marker"}}"#;
+    let (base_url, server) = spawn_http_response("404 Not Found", response_body);
+    let diagnostic_log_path = test_diagnostic_log_path("nested-error-code");
+    let input = provider_text_input();
+
+    let error = HttpModelGatewayAdapter::new(Some(diagnostic_log_path.clone()))
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .expect_err("404 should preserve the structured provider error code");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderHttp {
+            status_code: 404,
+            provider_error_code: Some("ModelNotOpen".to_string()),
+        }
+    );
+    server.join().expect("test server should finish");
+    assert_safe_diagnostic_log(
+        &diagnostic_log_path,
+        "ModelNotOpen",
+        "diagnostic-response-marker",
+    );
+}
+
+#[test]
+fn streaming_http_adapter_extracts_top_level_error_code_without_logging_response_body() {
+    let response_body = r#"{"code":"InvalidParameter","message":"stream-response-marker"}"#;
+    let (base_url, server) = spawn_http_response("400 Bad Request", response_body);
+    let diagnostic_log_path = test_diagnostic_log_path("stream-error-code");
+    let input = provider_text_input();
+
+    let error = HttpModelGatewayAdapter::new(Some(diagnostic_log_path.clone()))
+        .expect("adapter should initialize")
+        .invoke_stream(
+            ModelGatewayAdapterRequest {
+                api_key: Some("sk-test"),
+                base_url: &base_url,
+                capability_id: "listing-copy",
+                endpoint_path: "/v1/responses",
+                input: &input,
+                input_summary: "test",
+                model: "gpt-test",
+                provider_profile_id: "openai",
+            },
+            |_| Ok(()),
+        )
+        .expect_err("400 should preserve the structured provider error code");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderHttp {
+            status_code: 400,
+            provider_error_code: Some("InvalidParameter".to_string()),
+        }
+    );
+    server.join().expect("test server should finish");
+    assert_safe_diagnostic_log(
+        &diagnostic_log_path,
+        "InvalidParameter",
+        "stream-response-marker",
+    );
+}
+
+fn provider_text_input() -> serde_json::Value {
+    serde_json::json!({
+        "prompt": {
+            "messages": [{
+                "role": "user",
+                "content": "request-prompt-marker sk-diagnostic-secret-marker"
+            }]
+        }
+    })
+}
+
+fn spawn_http_response(
+    status_line: &'static str,
+    response_body: &'static str,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len(),
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("response should write");
+    });
+    (base_url, server)
+}
+
+fn test_diagnostic_log_path(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should move forward")
+        .as_nanos();
+    std::env::temp_dir().join(format!("commerce-shoot-studio-{label}-{nanos}.jsonl"))
+}
+
+fn assert_safe_diagnostic_log(path: &PathBuf, safe_code: &str, raw_marker: &str) {
+    let diagnostic = fs::read_to_string(path).expect("diagnostic log should exist");
+    assert!(diagnostic.contains(safe_code));
+    assert!(!diagnostic.contains(raw_marker));
+    assert!(!diagnostic.contains("rawResponse"));
+    assert!(!diagnostic.contains("sk-test"));
+    assert!(!diagnostic.contains("request-prompt-marker"));
+    assert!(!diagnostic.contains("sk-diagnostic-secret-marker"));
+    fs::remove_file(path).expect("diagnostic log should be removable");
+}
 
 #[test]
 fn normalizes_chat_completion_text_response() {
@@ -349,12 +576,176 @@ fn builds_image_generation_request_with_reference_images_and_consistency_prompt(
     .expect("image generation request body should build");
 
     assert_eq!(body["model"], "doubao-seedream-4-0-250828");
-    assert_eq!(body["images"][0], "data:image/jpeg;base64,reference");
+    assert_eq!(body["image"], "data:image/jpeg;base64,reference");
+    assert!(body.get("images").is_none());
+    assert!(body.get("sequential_image_generation").is_none());
+    assert!(body.get("max_tokens").is_none());
+    assert!(body.get("temperature").is_none());
+    assert_eq!(body["size"], "2K");
+    assert_eq!(body["response_format"], "url");
+    assert!(body.get("output_format").is_none());
     assert_eq!(body["watermark"], false);
     assert!(body["prompt"]
         .as_str()
         .expect("prompt should be a string")
         .contains("必须与参考图保持一致"));
+}
+
+#[test]
+fn builds_volcengine_image_generation_request_with_multiple_reference_images_as_array() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "doubao-seedream-5-0-260128",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "prompt": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是专业电商服饰虚拟试穿与场景商拍图像生成模型。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "参考图 A 是服装，参考图 B 是模特。生成服饰试穿图。"
+                    }
+                ],
+                "rolelessPrompt": "参考图 A 是服装，参考图 B 是模特。生成服饰试穿图。"
+            },
+            "userImages": [
+                {
+                    "mimeType": "image/png",
+                    "role": "source",
+                    "dataUrl": "data:image/png;base64,garment"
+                },
+                {
+                    "mimeType": "image/png",
+                    "role": "model",
+                    "dataUrl": "data:image/png;base64,model"
+                }
+            ]
+        }),
+    )
+    .expect("image generation request body should build");
+
+    assert_eq!(
+        body["image"],
+        serde_json::json!([
+            "data:image/png;base64,garment",
+            "data:image/png;base64,model"
+        ])
+    );
+    assert!(body.get("images").is_none());
+    assert!(body.get("sequential_image_generation").is_none());
+    assert_eq!(body["size"], "2K");
+    assert_eq!(body["response_format"], "url");
+    assert!(body.get("output_format").is_none());
+    assert_eq!(body["watermark"], false);
+}
+
+#[test]
+fn builds_openai_image_generation_request_without_text_response_fields() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/v1/images/generations",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        },
+        &serde_json::json!({
+            "kind": "clothing-base-model-generation",
+            "prompt": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是专业电商服饰模特图生成器。"
+                    },
+                    {
+                        "role": "user",
+                        "content": "生成一张干净的白底基准模特图。"
+                    }
+                ],
+                "rolelessPrompt": "【应用规则】\\n你是专业电商服饰模特图生成器。\\n\\n【用户任务】\\n生成一张干净的白底基准模特图。"
+            }
+        }),
+    )
+    .expect("OpenAI image generation request body should build");
+
+    assert_eq!(body["model"], "gpt-image-1");
+    assert_eq!(body["size"], "1024x1536");
+    assert!(body["prompt"]
+        .as_str()
+        .expect("prompt should be a string")
+        .contains("生成一张干净的白底基准模特图"));
+    assert!(body.get("input").is_none());
+    assert!(body.get("messages").is_none());
+    assert!(body.get("instructions").is_none());
+    assert!(body.get("max_output_tokens").is_none());
+    assert!(body.get("max_tokens").is_none());
+    assert!(body.get("temperature").is_none());
+}
+
+#[test]
+fn rejects_openai_image_generation_outside_clothing_base_model_capability() {
+    let error = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/v1/images/generations",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        },
+        &serde_json::json!({
+            "kind": "product-detail-generation",
+            "ratio": "3:4",
+            "prompt": {
+                "messages": [
+                    { "role": "system", "content": "系统规则" },
+                    { "role": "user", "content": "生成商品图" }
+                ],
+                "rolelessPrompt": "生成商品图"
+            }
+        }),
+    )
+    .expect_err("OpenAI images endpoint must not silently approximate arbitrary ratios");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(
+            "OpenAI 文生图当前仅支持服饰基准模特生成。".to_string(),
+        )
+    );
+}
+
+#[test]
+fn rejects_openai_image_generation_with_reference_images() {
+    let error = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/v1/images/generations",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        },
+        &serde_json::json!({
+            "kind": "clothing-base-model-generation",
+            "prompt": {
+                "messages": [
+                    { "role": "system", "content": "系统规则" },
+                    { "role": "user", "content": "生成基准模特图" }
+                ],
+                "rolelessPrompt": "生成基准模特图"
+            },
+            "userImages": [{
+                "mimeType": "image/png",
+                "dataUrl": "data:image/png;base64,reference"
+            }]
+        }),
+    )
+    .expect_err("OpenAI images endpoint must not silently discard reference images");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(
+            "OpenAI 服饰基准模特生成不支持参考图。".to_string(),
+        )
+    );
 }
 
 #[test]
@@ -507,7 +898,7 @@ fn parses_responses_stream_completed_event() {
 }
 
 #[test]
-fn model_gateway_request_diagnostics_keep_prompt_and_summarize_image_data() {
+fn model_gateway_request_diagnostics_summarize_prompt_content_and_image_data() {
     let body = build_model_gateway_request_body(
         &HttpModelGatewayRequestConfig {
             endpoint_path: "/v1/responses",
@@ -519,14 +910,14 @@ fn model_gateway_request_diagnostics_keep_prompt_and_summarize_image_data() {
                 "messages": [
                     {
                         "role": "system",
-                        "content": "系统规则需要写入日志"
+                        "content": "system-prompt-raw-marker"
                     },
                     {
                         "role": "user",
-                        "content": "用户任务需要写入日志"
+                        "content": "user-content-raw-marker sk-request-secret-marker"
                     }
                 ],
-                "rolelessPrompt": "完整合并 prompt 也需要写入日志"
+                "rolelessPrompt": "roleless-prompt-raw-marker"
             },
             "userImages": [
                 {
@@ -548,9 +939,21 @@ fn model_gateway_request_diagnostics_keep_prompt_and_summarize_image_data() {
     );
     let serialized = sanitized.to_string();
 
+    assert_eq!(sanitized["providerProfileId"], "openai");
+    assert_eq!(sanitized["endpointPath"], "/v1/responses");
+    assert_eq!(sanitized["model"], "gpt-4.1-mini");
+    assert_eq!(sanitized["body"]["model"], "gpt-4.1-mini");
+    assert_eq!(sanitized["body"]["input"]["itemCount"], 1);
+    assert_eq!(
+        sanitized["body"]["input"]["items"][0]["content"]["itemCount"],
+        2
+    );
     assert!(serialized.contains("\"imageDataUrlLength\""));
-    assert!(serialized.contains("系统规则需要写入日志"));
-    assert!(serialized.contains("用户任务需要写入日志"));
+    assert!(serialized.contains("\"stringCharCount\""));
+    assert!(!serialized.contains("system-prompt-raw-marker"));
+    assert!(!serialized.contains("user-content-raw-marker"));
+    assert!(!serialized.contains("roleless-prompt-raw-marker"));
+    assert!(!serialized.contains("sk-request-secret-marker"));
     assert!(!serialized.contains("data:image/png;base64,abcdefghijklmnopqrstuvwxyz"));
 }
 

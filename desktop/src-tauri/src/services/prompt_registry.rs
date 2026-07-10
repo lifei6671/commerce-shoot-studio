@@ -5,6 +5,9 @@ pub enum PromptTemplateId {
     ProductSellingPoints,
     ProductDetailScenePrompt,
     ViralStyleAnalysis,
+    ClothingBaseModelGeneration,
+    ClothingScenePlanning,
+    ClothingTryonGeneration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +25,7 @@ pub struct PromptTemplate {
     pub module_config_rules: &'static str,
     pub scene_modules: &'static str,
     pub user_task: &'static str,
+    pub negative_prompt: &'static str,
     pub output_format: &'static str,
 }
 
@@ -29,12 +33,23 @@ const PRODUCT_SELLING_POINTS_TOML: &str = include_str!("prompts/product_selling_
 const PRODUCT_DETAIL_SCENE_PROMPT_TOML: &str =
     include_str!("prompts/product_detail_scene_prompt.toml");
 const VIRAL_STYLE_ANALYSIS_TOML: &str = include_str!("prompts/viral_style_analysis.toml");
+const CLOTHING_BASE_MODEL_GENERATION_TOML: &str =
+    include_str!("prompts/clothing_base_model_generation.toml");
+const CLOTHING_SCENE_PLANNING_TOML: &str = include_str!("prompts/clothing_scene_planning.toml");
+const CLOTHING_TRYON_GENERATION_TOML: &str = include_str!("prompts/clothing_tryon_generation.toml");
 
 static PRODUCT_SELLING_POINTS_PROMPT: OnceLock<Result<PromptTemplate, PromptRegistryError>> =
     OnceLock::new();
 static PRODUCT_DETAIL_SCENE_PROMPT: OnceLock<Result<PromptTemplate, PromptRegistryError>> =
     OnceLock::new();
 static VIRAL_STYLE_ANALYSIS_PROMPT: OnceLock<Result<PromptTemplate, PromptRegistryError>> =
+    OnceLock::new();
+static CLOTHING_BASE_MODEL_GENERATION_PROMPT: OnceLock<
+    Result<PromptTemplate, PromptRegistryError>,
+> = OnceLock::new();
+static CLOTHING_SCENE_PLANNING_PROMPT: OnceLock<Result<PromptTemplate, PromptRegistryError>> =
+    OnceLock::new();
+static CLOTHING_TRYON_GENERATION_PROMPT: OnceLock<Result<PromptTemplate, PromptRegistryError>> =
     OnceLock::new();
 
 pub fn get_prompt_template(
@@ -56,6 +71,21 @@ pub fn get_prompt_template(
             "viral_style_analysis.toml",
             VIRAL_STYLE_ANALYSIS_TOML,
         ),
+        PromptTemplateId::ClothingBaseModelGeneration => get_configured_template(
+            &CLOTHING_BASE_MODEL_GENERATION_PROMPT,
+            "clothing_base_model_generation.toml",
+            CLOTHING_BASE_MODEL_GENERATION_TOML,
+        ),
+        PromptTemplateId::ClothingScenePlanning => get_configured_template(
+            &CLOTHING_SCENE_PLANNING_PROMPT,
+            "clothing_scene_planning.toml",
+            CLOTHING_SCENE_PLANNING_TOML,
+        ),
+        PromptTemplateId::ClothingTryonGeneration => get_configured_template(
+            &CLOTHING_TRYON_GENERATION_PROMPT,
+            "clothing_tryon_generation.toml",
+            CLOTHING_TRYON_GENERATION_TOML,
+        ),
     }
 }
 
@@ -63,10 +93,11 @@ pub fn render_prompt_for_roles(
     id: PromptTemplateId,
 ) -> Result<Vec<PromptMessage>, PromptRegistryError> {
     let template = get_prompt_template(id)?;
+    let system_content = render_system_content(template);
     Ok(vec![
         PromptMessage {
             role: "system",
-            content: join_sections(&[template.system_rules, template.output_format]),
+            content: system_content,
         },
         PromptMessage {
             role: "user",
@@ -79,9 +110,22 @@ pub fn render_roleless_prompt(id: PromptTemplateId) -> Result<String, PromptRegi
     let template = get_prompt_template(id)?;
     Ok(format!(
         "【应用规则】\n{}\n\n【用户任务】\n{}",
-        join_sections(&[template.system_rules, template.output_format]),
+        render_system_content(template),
         template.user_task
     ))
+}
+
+fn render_system_content(template: &PromptTemplate) -> String {
+    let negative_prompt = if template.negative_prompt.trim().is_empty() {
+        String::new()
+    } else {
+        format!("【负向约束】\n{}", template.negative_prompt)
+    };
+    join_sections(&[
+        template.system_rules,
+        negative_prompt.as_str(),
+        template.output_format,
+    ])
 }
 
 fn get_configured_template(
@@ -123,6 +167,7 @@ fn parse_prompt_config(
             })
             .unwrap_or(""),
         user_task: parse_toml_string_value(source_name, source, "user_task")?,
+        negative_prompt: parse_optional_toml_string_value(source, "negative_prompt").unwrap_or(""),
         output_format: parse_toml_string_value(source_name, source, "output_format")?,
     })
 }
@@ -260,7 +305,7 @@ impl std::error::Error for PromptRegistryError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        get_prompt_template, render_roleless_prompt, PromptTemplateId,
+        get_prompt_template, render_prompt_for_roles, render_roleless_prompt, PromptTemplateId,
         PRODUCT_DETAIL_SCENE_PROMPT_TOML,
     };
     use std::path::Path;
@@ -273,6 +318,8 @@ mod tests {
             "product_selling_points.toml",
             "product_detail_scene_prompt.toml",
             "viral_style_analysis.toml",
+            "clothing_base_model_generation.toml",
+            "clothing_scene_planning.toml",
         ] {
             assert!(
                 prompt_dir.join(file_name).is_file(),
@@ -304,7 +351,7 @@ mod tests {
 
         assert!(prompt.contains("资深电商视觉策略师"));
         assert!(prompt.contains("画面内容"));
-        assert!(prompt.contains("图内文案"));
+        assert!(prompt.contains("画面文字内容"));
         assert!(prompt.contains("设计说明"));
         assert!(prompt.contains("targetLanguage"));
         assert!(prompt.contains("sceneTitle 是该场景的主标题"));
@@ -350,12 +397,97 @@ mod tests {
         let prompt = render_roleless_prompt(PromptTemplateId::ProductSellingPoints)
             .expect("product selling points prompt should render");
 
-        assert!(prompt.contains("通用电商商品详情页文案策划"));
+        assert!(prompt.contains("专业的电商商品详情页文案策划"));
         assert!(prompt.contains("优先读取图片中的可见文字"));
         assert!(prompt.contains("商品类目"));
         assert!(prompt.contains("美妆个护类"));
         assert!(prompt.contains("杯壶餐具类"));
         assert!(prompt.contains("食品级"));
         assert!(prompt.contains("核心卖点允许基于“图片可见信息 + 商品类目常见消费需求”"));
+    }
+
+    #[test]
+    fn clothing_base_model_generation_prompt_defines_base_model_contract() {
+        let template = get_prompt_template(PromptTemplateId::ClothingBaseModelGeneration)
+            .expect("clothing base model generation prompt should load");
+        let prompt = render_roleless_prompt(PromptTemplateId::ClothingBaseModelGeneration)
+            .expect("clothing base model generation prompt should render");
+
+        assert_eq!(template.id, "clothing-base-model-generation");
+        assert_eq!(template.version, "v1");
+        assert_eq!(template.capability_id, "clothing-base-model-generation");
+        assert!(prompt.contains("{{gender}}"));
+        assert!(prompt.contains("{{age}}"));
+        assert!(prompt.contains("{{ethnicity}}"));
+        assert!(prompt.contains("{{body}}"));
+        assert!(prompt.contains("{{appearance}}"));
+        assert!(prompt.contains("服饰试穿基准模特全身照"));
+        assert!(prompt.contains("虚拟真人"));
+        assert!(prompt.contains("照片级真实"));
+        assert!(prompt.contains("禁止卡通"));
+        assert!(prompt.contains("3D 卡通"));
+        assert!(prompt.contains("不要生成品牌 Logo、文字、水印"));
+        assert!(prompt.contains("婴儿、儿童、青少年"));
+        assert!(prompt.contains("不得成人化、性感化"));
+    }
+
+    #[test]
+    fn clothing_scene_planning_prompt_defines_scene_pose_contract() {
+        let template = get_prompt_template(PromptTemplateId::ClothingScenePlanning)
+            .expect("clothing scene planning prompt should load");
+        let prompt = render_roleless_prompt(PromptTemplateId::ClothingScenePlanning)
+            .expect("clothing scene planning prompt should render");
+
+        assert_eq!(template.id, "clothing-scene-planning");
+        assert_eq!(template.version, "v1");
+        assert_eq!(template.capability_id, "clothing-scene-planning");
+        assert!(prompt.contains("场景与动作规划阶段"));
+        assert!(prompt.contains("服装参考：用户上传的服装原图"));
+        assert!(prompt.contains("模特参考：用户选择的模特全身图"));
+        assert!(!prompt.contains("{{clothingReference}}"));
+        assert!(!prompt.contains("{{modelReference}}"));
+        assert!(prompt.contains("{{selectedScenes}}"));
+        assert!(prompt.contains("{{customScene}}"));
+        assert!(prompt.contains("{{ratio}}"));
+        assert!(prompt.contains("服装款式、颜色、版型、材质、花纹、文字、Logo"));
+        assert!(prompt.contains("不得规划会遮挡、扭曲或覆盖服装文字、Logo、花纹的动作"));
+        assert!(prompt.contains("每个场景必须输出 4 个动作"));
+        assert!(prompt.contains("sceneVisualAnchor"));
+        assert!(prompt.contains("scenePromptSegment"));
+        assert!(prompt.contains("recommendedPoses"));
+    }
+
+    #[test]
+    fn clothing_tryon_generation_prompt_defines_image_generation_contract() {
+        let template = get_prompt_template(PromptTemplateId::ClothingTryonGeneration)
+            .expect("clothing tryon generation prompt should load");
+        let prompt = render_roleless_prompt(PromptTemplateId::ClothingTryonGeneration)
+            .expect("clothing tryon generation prompt should render");
+        let role_messages = render_prompt_for_roles(PromptTemplateId::ClothingTryonGeneration)
+            .expect("clothing tryon role messages should render");
+
+        assert_eq!(template.id, "clothing-tryon-generation");
+        assert_eq!(template.version, "v2");
+        assert_eq!(template.capability_id, "clothing-tryon-generation");
+        assert!(prompt.contains("image-to-image 服饰试穿合成任务"));
+        assert!(prompt.contains("{{referenceImageRoles}}"));
+        assert!(prompt.contains("{{clothingReferenceLabels}}"));
+        assert!(prompt.contains("{{modelReferenceLabel}}"));
+        assert!(prompt.contains("{{scene}}"));
+        assert!(prompt.contains("{{sceneVisualAnchor}}"));
+        assert!(prompt.contains("{{scenePromptSegment}}"));
+        assert!(prompt.contains("{{ratio}}"));
+        assert!(prompt.contains("{{framing}}"));
+        assert!(prompt.contains("{{perspective}}"));
+        assert!(prompt.contains("{{shootingPosition}}"));
+        assert!(prompt.contains("{{poseAction}}"));
+        assert!(prompt.contains("不得新增不存在的图案、文字、Logo"));
+        assert!(prompt.contains("【负向约束】"));
+        assert!(prompt.contains("different person, face changed"));
+        assert!(role_messages[0].content.contains("【负向约束】"));
+        assert!(role_messages[0]
+            .content
+            .contains("different garment, changed clothing category"));
+        assert!(!prompt.contains("{{garmentCategory}}"));
     }
 }

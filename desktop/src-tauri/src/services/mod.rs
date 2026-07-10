@@ -1,5 +1,6 @@
 pub mod ai_assist;
 pub mod assets;
+pub mod builtin_models;
 pub mod capability;
 pub mod desktop_runtime;
 pub mod generation;

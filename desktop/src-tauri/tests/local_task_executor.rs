@@ -2,13 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use commerce_shoot_studio_lib::domain::assets::AssetKind;
 use commerce_shoot_studio_lib::domain::generation::{
     GenerationTaskKind, GenerationTaskStage, GenerationTaskStatus, WorkspaceKind,
 };
 use commerce_shoot_studio_lib::infrastructure::database::WorkspaceDatabase;
 use commerce_shoot_studio_lib::infrastructure::filesystem::WorkspaceFileSystem;
+use commerce_shoot_studio_lib::services::assets::{AssetService, ImportImagesInput};
 use commerce_shoot_studio_lib::services::generation::{
-    CreateGenerationTaskInput, GenerationService,
+    CreateGenerationTaskInput, GenerationService, GenerationTaskInputAssetInput,
 };
 use commerce_shoot_studio_lib::services::local_task_executor::LocalTaskExecutor;
 use commerce_shoot_studio_lib::services::model_config::{
@@ -377,11 +379,11 @@ fn run_next_marks_task_failed_when_model_capability_is_unavailable() {
             SaveLocalModelConfigInput {
                 id: None,
                 capability_id: "scene-image-generation".to_string(),
-                provider_profile_id: "openai".to_string(),
-                display_name: "OpenAI 场景图".to_string(),
+                provider_profile_id: "volcengine".to_string(),
+                display_name: "火山引擎场景图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-test".to_string(),
-                endpoint_path: Some("/v1/images/generations".to_string()),
+                endpoint_path: Some("/images/generations".to_string()),
                 enabled: true,
             },
         )
@@ -425,6 +427,68 @@ fn run_next_marks_task_failed_when_model_capability_is_unavailable() {
     remove_workspace(&workspace_dir);
 }
 
+#[test]
+fn clothing_scene_planning_rejects_mock_local_default_instead_of_fake_scenes() {
+    let workspace_dir = initialized_workspace("local-executor-clothing-plan-no-mock");
+    let generation_service = GenerationService::new();
+    let mut input = create_clothing_scene_planning_task("clothing-plan-no-mock");
+    input.input_assets = create_clothing_reference_input_assets(&workspace_dir);
+    let task = generation_service
+        .create_task(&workspace_dir, input)
+        .expect("task should create");
+
+    let result = LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should handle unavailable provider")
+        .expect("task should be attempted");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("failed task detail should load");
+
+    assert_eq!(result.task_id, task.id);
+    assert!(result.invocation_id.is_none());
+    assert_eq!(detail.task.status, GenerationTaskStatus::Failed);
+    assert_eq!(detail.task.stage, GenerationTaskStage::Failed);
+    assert!(detail.output.is_none());
+    assert_eq!(
+        detail.task.error.as_ref().map(|error| error.code.as_str()),
+        Some("MODEL_CAPABILITY_UNAVAILABLE")
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn clothing_tryon_generation_rejects_mock_local_default_instead_of_fake_images() {
+    let workspace_dir = initialized_workspace("local-executor-clothing-tryon-no-mock");
+    let generation_service = GenerationService::new();
+    let mut input = create_clothing_tryon_task("clothing-tryon-no-mock");
+    input.input_assets = create_clothing_reference_input_assets(&workspace_dir);
+    let task = generation_service
+        .create_task(&workspace_dir, input)
+        .expect("task should create");
+
+    let result = LocalTaskExecutor::new()
+        .run_next(&workspace_dir)
+        .expect("executor should handle unavailable provider")
+        .expect("task should be attempted");
+    let detail = generation_service
+        .get_task_detail(&workspace_dir, &task.id)
+        .expect("failed task detail should load");
+
+    assert_eq!(result.task_id, task.id);
+    assert!(result.invocation_id.is_none());
+    assert_eq!(detail.task.status, GenerationTaskStatus::Failed);
+    assert_eq!(detail.task.stage, GenerationTaskStage::Failed);
+    assert!(detail.output_assets.is_empty());
+    assert_eq!(
+        detail.task.error.as_ref().map(|error| error.code.as_str()),
+        Some("MODEL_CAPABILITY_UNAVAILABLE")
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
 fn create_scene_task(idempotency_key: &str) -> CreateGenerationTaskInput {
     CreateGenerationTaskInput {
         idempotency_key: Some(idempotency_key.to_string()),
@@ -460,6 +524,100 @@ fn create_listing_copy_task(idempotency_key: &str) -> CreateGenerationTaskInput 
         prompt_plan_snapshot: None,
         input_assets: Vec::new(),
     }
+}
+
+fn create_clothing_scene_planning_task(idempotency_key: &str) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Clothing,
+        kind: GenerationTaskKind::ImageGeneration,
+        title: "服饰场景动作规划".to_string(),
+        prompt_plan_id: None,
+        input: Some(serde_json::json!({
+            "kind": "clothing-scene-planning",
+            "selectedScenes": ["都市街头"],
+            "customScene": "午后暖调阳光",
+            "aiRecommended": false,
+            "ratio": "3:4"
+        })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_clothing_tryon_task(idempotency_key: &str) -> CreateGenerationTaskInput {
+    CreateGenerationTaskInput {
+        idempotency_key: Some(idempotency_key.to_string()),
+        workspace: WorkspaceKind::Clothing,
+        kind: GenerationTaskKind::ImageGeneration,
+        title: "服饰出图".to_string(),
+        prompt_plan_id: None,
+        input: Some(serde_json::json!({
+            "kind": "clothing-tryon-generation",
+            "ratio": "3:4",
+            "items": [
+                {
+                    "id": "scene-1-pose-1",
+                    "scene": "都市街头",
+                    "sceneVisualAnchor": "城市核心商圈人行道",
+                    "scenePromptSegment": "街头时尚摄影，自然光充足",
+                    "cameraSetup": {
+                        "framing": "全身",
+                        "perspective": "正面",
+                        "shootingPosition": "平视机位"
+                    },
+                    "poseAction": "自然站立，展示服装正面版型",
+                    "ratio": "3:4"
+                }
+            ]
+        })),
+        prompt_plan_snapshot: None,
+        input_assets: Vec::new(),
+    }
+}
+
+fn create_clothing_reference_input_assets(
+    workspace_dir: &Path,
+) -> Vec<GenerationTaskInputAssetInput> {
+    let source_path = workspace_dir.join("clothing-source.png");
+    let model_path = workspace_dir.join("clothing-model.png");
+    let png = transparent_png_bytes();
+    fs::write(&source_path, &png).expect("source image should write");
+    fs::write(&model_path, &png).expect("model image should write");
+    let asset_service = AssetService::new();
+    let source = asset_service
+        .import_images(
+            workspace_dir,
+            ImportImagesInput {
+                kind: AssetKind::Source,
+                paths: vec![source_path.to_string_lossy().to_string()],
+            },
+        )
+        .expect("source image should import")
+        .remove(0);
+    let model = asset_service
+        .import_images(
+            workspace_dir,
+            ImportImagesInput {
+                kind: AssetKind::Model,
+                paths: vec![model_path.to_string_lossy().to_string()],
+            },
+        )
+        .expect("model image should import")
+        .remove(0);
+
+    vec![
+        GenerationTaskInputAssetInput {
+            asset_id: source.id,
+            role: "source".to_string(),
+            sort_order: 0,
+        },
+        GenerationTaskInputAssetInput {
+            asset_id: model.id,
+            role: "model".to_string(),
+            sort_order: 1,
+        },
+    ]
 }
 
 fn create_product_detail_task(idempotency_key: &str) -> CreateGenerationTaskInput {
@@ -588,4 +746,14 @@ fn remove_workspace(path: &Path) {
 
 fn relative_path_to_platform(relative_path: &str) -> PathBuf {
     relative_path.split('/').collect()
+}
+
+fn transparent_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
 }

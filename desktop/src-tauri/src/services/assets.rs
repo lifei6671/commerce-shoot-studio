@@ -1,9 +1,11 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, OptionalExtension, Row};
 use serde::Deserialize;
@@ -14,6 +16,11 @@ use crate::infrastructure::sha256;
 
 static ASSET_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const STAGED_GC_TTL_HOURS: i64 = 24;
+const MODEL_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const MODEL_IMAGE_MAX_DIMENSION: u32 = 8192;
+const MODEL_IMAGE_MAX_DECODE_ALLOC: u64 = 128 * 1024 * 1024;
+const MODEL_THUMBNAIL_SIZE: u32 = 320;
+const MODEL_THUMBNAIL_CROP_RATIO: f32 = 0.42;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +185,9 @@ fn import_single_image(
     source_path: &Path,
 ) -> Result<Asset, AssetError> {
     validate_source_file(source_path)?;
+    if kind == AssetKind::Model {
+        validate_model_source_size(source_path)?;
+    }
     let original_name = source_path
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
@@ -185,10 +195,32 @@ fn import_single_image(
         .ok_or_else(|| AssetError::InvalidInput("图片文件名不能为空。".to_string()))?;
     let extension = normalized_extension(source_path)?;
     let mime_type = mime_type_for_extension(&extension)?;
-    let bytes = fs::read(source_path).map_err(|source| io_error(source_path, source))?;
+    let bytes = if kind == AssetKind::Model {
+        let source_file =
+            fs::File::open(source_path).map_err(|source| io_error(source_path, source))?;
+        let bytes = read_bytes_with_limit(source_file, MODEL_SOURCE_MAX_BYTES)
+            .map_err(|source| io_error(source_path, source))?;
+        validate_model_source_bytes_len(bytes.len())?;
+        bytes
+    } else {
+        fs::read(source_path).map_err(|source| io_error(source_path, source))?
+    };
     let sha256 = sha256::digest_hex(&bytes);
 
     if let Some(existing) = find_active_asset_by_hash(database, kind, &sha256)? {
+        if kind == AssetKind::Model && existing.lifecycle == AssetLifecycle::Staged {
+            database.connection().execute(
+                "
+                UPDATE assets
+                SET lifecycle = 'active',
+                    updated_at = datetime('now')
+                WHERE id = ?1
+                ",
+                params![&existing.id],
+            )?;
+            return find_asset_by_id(database, &existing.id)?
+                .ok_or_else(|| AssetError::NotFound(existing.id));
+        }
         return Ok(existing);
     }
 
@@ -216,13 +248,25 @@ fn import_single_image(
     }
 
     let (width, height) = image_dimensions(&bytes, &mime_type);
+    let thumbnail_path = if kind == AssetKind::Model {
+        match write_model_thumbnail(workspace_directory, &id, &bytes) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let _ = fs::remove_file(&target_path);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
     if let Err(source) = database.connection().execute(
         "
         INSERT INTO assets (
             id, kind, name, original_name, mime_type, relative_path,
-            sha256, width, height, size_bytes
+            sha256, width, height, size_bytes, lifecycle
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             id,
@@ -234,10 +278,18 @@ fn import_single_image(
             sha256,
             width,
             height,
-            bytes.len() as i64
+            bytes.len() as i64,
+            if kind == AssetKind::Model {
+                AssetLifecycle::Active.as_str()
+            } else {
+                AssetLifecycle::Staged.as_str()
+            }
         ],
     ) {
         let _ = fs::remove_file(&target_path);
+        if let Some(path) = thumbnail_path {
+            let _ = fs::remove_file(path);
+        }
         return Err(AssetError::from(source));
     }
 
@@ -444,9 +496,18 @@ fn run_garbage_collection(
     database: &WorkspaceDatabase,
     workspace_directory: &Path,
 ) -> Result<GarbageCollectionResult, AssetError> {
+    database.connection().execute(
+        "
+        UPDATE assets
+        SET lifecycle = 'active',
+            updated_at = datetime('now')
+        WHERE kind = ?1 AND lifecycle = 'staged'
+        ",
+        params![AssetKind::Model.as_str()],
+    )?;
     let mut statement = database.connection().prepare(
         "
-        SELECT id, relative_path, size_bytes
+        SELECT id, kind, relative_path, size_bytes
         FROM assets
         WHERE (
                 lifecycle = 'deleted'
@@ -470,7 +531,8 @@ fn run_garbage_collection(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
         ))
     })?;
     let mut candidates = Vec::new();
@@ -482,17 +544,25 @@ fn run_garbage_collection(
     let mut deleted_files = 0;
     let mut reclaimed_bytes = 0;
 
-    for (asset_id, relative_path, size_bytes) in candidates {
+    for (asset_id, kind, relative_path, size_bytes) in candidates {
         let path = workspace_directory.join(relative_path_to_platform(&relative_path));
         match fs::remove_file(&path) {
             Ok(()) => {
                 deleted_files += 1;
                 reclaimed_bytes += size_bytes;
+                let (thumbnail_files, thumbnail_bytes) =
+                    remove_model_thumbnail(workspace_directory, &kind, &asset_id)?;
+                deleted_files += thumbnail_files;
+                reclaimed_bytes += thumbnail_bytes;
                 database
                     .connection()
                     .execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                let (thumbnail_files, thumbnail_bytes) =
+                    remove_model_thumbnail(workspace_directory, &kind, &asset_id)?;
+                deleted_files += thumbnail_files;
+                reclaimed_bytes += thumbnail_bytes;
                 database
                     .connection()
                     .execute("DELETE FROM assets WHERE id = ?1", params![asset_id])?;
@@ -505,6 +575,144 @@ fn run_garbage_collection(
         deleted_files,
         reclaimed_bytes,
     })
+}
+
+fn write_model_thumbnail(
+    workspace_directory: &Path,
+    asset_id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, AssetError> {
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| AssetError::InvalidInput(format!("模型图片格式识别失败：{error}")))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MODEL_IMAGE_MAX_DIMENSION);
+    limits.max_image_height = Some(MODEL_IMAGE_MAX_DIMENSION);
+    limits.max_alloc = Some(MODEL_IMAGE_MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    let image = reader.decode().map_err(model_thumbnail_decode_error)?;
+    let source_width = image.width();
+    let source_height = image.height();
+    if source_width == 0 || source_height == 0 {
+        return Err(AssetError::InvalidInput(
+            "模型图片尺寸无效，无法生成头像缩略图。".to_string(),
+        ));
+    }
+
+    let crop_height = ((source_height as f32 * MODEL_THUMBNAIL_CROP_RATIO).round() as u32)
+        .max(1)
+        .min(source_height);
+    let crop_size = source_width.min(crop_height).max(1);
+    let crop_x = (source_width - crop_size) / 2;
+    let thumbnail = image
+        .crop_imm(crop_x, 0, crop_size, crop_size)
+        .resize_exact(
+            MODEL_THUMBNAIL_SIZE,
+            MODEL_THUMBNAIL_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+    let thumbnail_path = workspace_directory
+        .join("assets")
+        .join("thumbnail")
+        .join(format!("{asset_id}.png"));
+    let tmp_path = workspace_directory
+        .join("cache")
+        .join("tmp")
+        .join(format!("{asset_id}.thumbnail"));
+    if let Some(parent) = tmp_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    if let Some(parent) = thumbnail_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+
+    let result = (|| {
+        let mut encoded = Vec::new();
+        DynamicImage::write_to(
+            &thumbnail,
+            &mut std::io::Cursor::new(&mut encoded),
+            ImageFormat::Png,
+        )
+        .map_err(|error| AssetError::InvalidInput(format!("模型头像缩略图编码失败：{error}")))?;
+        fs::write(&tmp_path, encoded).map_err(|source| io_error(&tmp_path, source))?;
+        fs::rename(&tmp_path, &thumbnail_path)
+            .map_err(|source| io_error(&thumbnail_path, source))?;
+        Ok::<(), AssetError>(())
+    })();
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&thumbnail_path);
+        return Err(error);
+    }
+
+    Ok(thumbnail_path)
+}
+
+fn remove_model_thumbnail(
+    workspace_directory: &Path,
+    kind: &str,
+    asset_id: &str,
+) -> Result<(i64, i64), AssetError> {
+    if kind != AssetKind::Model.as_str() {
+        return Ok((0, 0));
+    }
+
+    let thumbnail_path = workspace_directory
+        .join("assets")
+        .join("thumbnail")
+        .join(format!("{asset_id}.png"));
+    let size_bytes = match fs::metadata(&thumbnail_path) {
+        Ok(metadata) => i64::try_from(metadata.len()).map_err(|_| {
+            AssetError::InvalidInput("模型头像缩略图文件大小超出支持范围。".to_string())
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(io_error(&thumbnail_path, error)),
+    };
+    match fs::remove_file(&thumbnail_path) {
+        Ok(()) => Ok((1, size_bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((0, 0)),
+        Err(error) => Err(io_error(&thumbnail_path, error)),
+    }
+}
+
+fn validate_model_source_size(path: &Path) -> Result<(), AssetError> {
+    let size_bytes = fs::metadata(path)
+        .map_err(|source| io_error(path, source))?
+        .len();
+    if size_bytes > MODEL_SOURCE_MAX_BYTES {
+        return Err(AssetError::InvalidInput(
+            "模型图片文件不能超过 64 MiB。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_source_bytes_len(size_bytes: usize) -> Result<(), AssetError> {
+    if u64::try_from(size_bytes).map_or(true, |size_bytes| size_bytes > MODEL_SOURCE_MAX_BYTES) {
+        return Err(AssetError::InvalidInput(
+            "模型图片文件不能超过 64 MiB。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bytes_with_limit<R: Read>(reader: R, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn model_thumbnail_decode_error(error: image::ImageError) -> AssetError {
+    if matches!(error, image::ImageError::Limits(_)) {
+        return AssetError::InvalidInput(
+            "模型图片尺寸不能超过 8192×8192，且解码内存不能超过 128 MiB。".to_string(),
+        );
+    }
+    AssetError::InvalidInput(format!("模型图片无法生成头像缩略图：{error}"))
 }
 
 fn validate_source_file(path: &Path) -> Result<(), AssetError> {
@@ -646,5 +854,20 @@ impl From<DatabaseError> for AssetError {
 impl From<rusqlite::Error> for AssetError {
     fn from(source: rusqlite::Error) -> Self {
         AssetError::Database(DatabaseError::from(source).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn limited_reader_stops_after_limit_plus_one_byte() {
+        let mut source = Cursor::new(vec![0_u8; 16]);
+        let bytes = read_bytes_with_limit(&mut source, 4).expect("read limited bytes");
+
+        assert_eq!(bytes.len(), 5);
+        assert_eq!(source.position(), 5);
     }
 }

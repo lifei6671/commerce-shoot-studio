@@ -39,4 +39,13 @@ describe("localAssetPort", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(2, "asset_reveal", { assetId: "asset_1" });
     expect(invokeMock).toHaveBeenNthCalledWith(3, "asset_delete", { assetId: "asset_1" });
   });
+
+  it("delegates builtin model listing to Tauri command", async () => {
+    invokeMock.mockResolvedValue([{ id: "builtin-a", label: "内置模特 01", fileName: "a.png", path: "/app/a.png" }]);
+
+    const result = await localAssetPort.listBuiltinModels();
+
+    expect(invokeMock).toHaveBeenCalledWith("asset_list_builtin_models");
+    expect(result[0].label).toBe("内置模特 01");
+  });
 });

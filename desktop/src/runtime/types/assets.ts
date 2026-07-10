@@ -17,9 +17,18 @@ export type Asset = {
   lifecycle: AssetLifecycle;
   url?: string;
   localPath?: string;
+  thumbnailPath?: string;
   deletedAt?: DateTimeString;
   createdAt: DateTimeString;
   updatedAt: DateTimeString;
+};
+
+export type BuiltinModelAsset = {
+  id: string;
+  label: string;
+  fileName: string;
+  path: string;
+  thumbnailPath?: string;
 };
 
 export type AssetQuery = PageRequest & {

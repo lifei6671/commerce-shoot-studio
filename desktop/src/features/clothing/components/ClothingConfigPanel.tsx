@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import * as Checkbox from "@radix-ui/react-checkbox";
-import { Check, ChevronDown, HelpCircle, ImageUp, Minus, Sparkles, UserRound } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { Check, ChevronDown, HelpCircle, ImageUp, Minus, Sparkles, Trash2, UserRound } from "lucide-react";
 import { Button } from "../../../shared/ui/button";
 import { ControlGroup } from "../../../shared/ui/control-group";
 import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
@@ -8,31 +11,37 @@ import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
 import { useToast } from "../../../shared/ui/toast";
+import { localAssetPort } from "../../../runtime/local/assets";
+import type { Asset, BuiltinModelAsset } from "../../../runtime";
 import { selectProductImages, type ProductImageAsset } from "../../generation/lib/productImagePicker";
-
-const modelPresets = [
-  { id: "upload", label: "上传新模特", tone: "upload" },
-  { id: "aurora", label: "柔光女模", tone: "warm" },
-  { id: "urban", label: "都市男模", tone: "cool" },
-  { id: "editorial", label: "杂志女模", tone: "dark" },
-  { id: "asian", label: "亚洲女模", tone: "soft" },
-  { id: "young", label: "清新女模", tone: "peach" },
-  { id: "street", label: "短发女模", tone: "rose" },
-  { id: "sports", label: "运动男模", tone: "sand" },
-];
 
 const sceneOptions = ["纯色棚拍", "都市街头", "街角咖啡", "自然草坪", "度假海滩", "温馨居家", "艺术展馆"];
 
 const aiModelGenderOptions = ["男", "女"];
 const aiModelAgeOptions = ["婴儿", "儿童", "青少年", "青年", "中年", "老年"];
 const aiModelEthnicityOptions = ["欧美白人", "中国人", "东亚人", "东南亚人", "非裔", "中东人", "拉丁裔"];
-const aiModelBodyOptions = ["纤细", "标准", "肌肉", "微胖", "大码"];
+const aiModelBodyOptions = [
+  "纤细",
+  "苗条",
+  "精瘦",
+  "匀称",
+  "健美",
+  "运动型",
+  "肌肉型",
+  "壮硕",
+  "结实",
+  "丰满",
+  "微胖",
+  "大码",
+];
 
 const ratios = ["3:4", "1:1", "9:16"];
 const sceneFramingOptions = ["全身", "四分之三", "半身", "特写"];
 const sceneAngleOptions = ["正面", "侧面", "3/4 侧", "背面"];
 const maxClothingImageCount = 5;
 const sceneDraftDelayMs = 2500;
+const modelPreviewDelayMs = 450;
+const baseModelGenerationTransitionMs = 180;
 const clothingSceneDrafts = [
   {
     id: "urban-stand",
@@ -41,6 +50,9 @@ const clothingSceneDrafts = [
     description: "自然站立，双手插裤兜，肩膀微抬，直视镜头，清晰展示背心正面印花",
     framing: "全身",
     angle: "正面",
+    sceneVisualAnchor: "城市街道人行道，背景为商业街区与轻微虚化的店铺门头",
+    scenePromptSegment: "街头时尚摄影，自然光充足照明，色彩还原准确，对焦清晰锐利",
+    shootingPosition: "平视机位",
   },
   {
     id: "urban-step",
@@ -49,6 +61,9 @@ const clothingSceneDrafts = [
     description: "侧身迈步向前走，一只手自然搭在裤边，转头看向前方，展示背心侧部剪裁",
     framing: "四分之三",
     angle: "3/4 侧",
+    sceneVisualAnchor: "城市街道人行道，背景为商业街区与轻微虚化的店铺门头",
+    scenePromptSegment: "街头时尚摄影，自然光充足照明，色彩还原准确，对焦清晰锐利",
+    shootingPosition: "平视机位",
   },
   {
     id: "urban-road",
@@ -57,6 +72,9 @@ const clothingSceneDrafts = [
     description: "侧身靠在路牌上，一只手随意抬至脑后，展示背心肩线与手臂线条",
     framing: "半身",
     angle: "侧面",
+    sceneVisualAnchor: "城市街道人行道，背景为商业街区与轻微虚化的店铺门头",
+    scenePromptSegment: "街头时尚摄影，自然光充足照明，色彩还原准确，对焦清晰锐利",
+    shootingPosition: "平视机位",
   },
   {
     id: "urban-front",
@@ -65,6 +83,9 @@ const clothingSceneDrafts = [
     description: "身体微向前倾，双手自然垂在身侧，下颌微抬，展示背心整体版型",
     framing: "全身",
     angle: "正面",
+    sceneVisualAnchor: "城市街道人行道，背景为商业街区与轻微虚化的店铺门头",
+    scenePromptSegment: "街头时尚摄影，自然光充足照明，色彩还原准确，对焦清晰锐利",
+    shootingPosition: "平视机位",
   },
   {
     id: "cafe-sit",
@@ -73,6 +94,9 @@ const clothingSceneDrafts = [
     description: "坐在户外木椅上，身体放松靠向椅背，双手搭在桌沿，清晰展示背心正面",
     framing: "全身",
     angle: "正面",
+    sceneVisualAnchor: "临街咖啡馆外摆座位，背景为玻璃窗、木质桌椅和暖色自然光",
+    scenePromptSegment: "都市通勤服饰摄影，柔和自然侧光，背景轻微虚化，商业成片质感",
+    shootingPosition: "平视机位",
   },
   {
     id: "cafe-turn",
@@ -81,6 +105,9 @@ const clothingSceneDrafts = [
     description: "站在咖啡店旁，一只手拿着冰咖啡，转头看向侧边，展示背心胸部轮廓",
     framing: "四分之三",
     angle: "3/4 侧",
+    sceneVisualAnchor: "临街咖啡馆外摆座位，背景为玻璃窗、木质桌椅和暖色自然光",
+    scenePromptSegment: "都市通勤服饰摄影，柔和自然侧光，背景轻微虚化，商业成片质感",
+    shootingPosition: "平视机位",
   },
   {
     id: "cafe-lean",
@@ -89,6 +116,9 @@ const clothingSceneDrafts = [
     description: "侧身倚靠在咖啡店门框远方，展示背心肩线，姿态放松自然",
     framing: "半身",
     angle: "侧面",
+    sceneVisualAnchor: "临街咖啡馆外摆座位，背景为玻璃窗、木质桌椅和暖色自然光",
+    scenePromptSegment: "都市通勤服饰摄影，柔和自然侧光，背景轻微虚化，商业成片质感",
+    shootingPosition: "平视机位",
   },
 ];
 
@@ -101,6 +131,7 @@ export type ClothingConfigState = {
   aiModelAppearance: string;
   clothingImages: ProductImageAsset[];
   customScene: string;
+  generatedBaseModelImages: GeneratedBaseModelImage[];
   modelMode: "library" | "ai";
   modelImages: ProductImageAsset[];
   ratio: string;
@@ -108,21 +139,60 @@ export type ClothingConfigState = {
   selectedModelId: string | null;
 };
 
+export type BaseModelGenerationInput = {
+  age: string;
+  appearance: string;
+  body: string;
+  ethnicity: string;
+  gender: string;
+};
+
+export type GeneratedBaseModelImage = ProductImageAsset & {
+  favoritedModelImage?: ProductImageAsset;
+  status: "ready";
+};
+
+export class ClothingBaseModelGenerationCancelledError extends Error {
+  constructor() {
+    super("基准模特生成已取消。");
+    this.name = "ClothingBaseModelGenerationCancelledError";
+  }
+}
+
+export function isClothingBaseModelGenerationCancelledError(error: unknown) {
+  return error instanceof ClothingBaseModelGenerationCancelledError;
+}
+
 type ClothingConfigPanelProps = {
+  baseModelGenerationSessionId: number;
   config: ClothingConfigState;
   onChange: (config: ClothingConfigState) => void;
-  onGenerateScenes: () => void;
+  onGenerateBaseModel: (input: BaseModelGenerationInput) => Promise<GeneratedBaseModelImage>;
+  onGenerateScenes: (config: ClothingConfigState) => void;
+};
+
+type BuiltinModelView = BuiltinModelAsset & {
+  fullBodySrc: string;
+  src: string;
+};
+
+type ModelPreview = {
+  fullBodySrc: string;
+  label: string;
+  left: number;
+  top: number;
 };
 
 export const defaultClothingConfig: ClothingConfigState = {
   aiRecommended: false,
   aiModelAge: "青年",
-  aiModelBody: "标准",
+  aiModelBody: "匀称",
   aiModelEthnicity: "中国人",
   aiModelGender: "男",
   aiModelAppearance: "",
   clothingImages: [],
   customScene: "",
+  generatedBaseModelImages: [],
   modelMode: "library",
   modelImages: [],
   ratio: "3:4",
@@ -130,12 +200,74 @@ export const defaultClothingConfig: ClothingConfigState = {
   selectedModelId: null,
 };
 
-export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: ClothingConfigPanelProps) {
+function modelAssetToProductImage(asset: Asset): ProductImageAsset | null {
+  if (!asset.localPath) {
+    return null;
+  }
+
+  const name = asset.originalName || asset.name;
+  const src = asset.url ?? convertFileSrc(asset.localPath);
+  return {
+    assetId: asset.id,
+    id: asset.id,
+    name,
+    path: asset.localPath,
+    src,
+    thumbnailSrc: asset.thumbnailPath ? convertFileSrc(asset.thumbnailPath) : undefined,
+  };
+}
+
+function isDeletableModelImage(image: ProductImageAsset) {
+  return !image.id.startsWith("builtin:") && !image.id.startsWith("preset:");
+}
+
+function modelImagesMatch(left: ProductImageAsset, right: ProductImageAsset) {
+  if (left.id === right.id) {
+    return true;
+  }
+  if (left.assetId && right.assetId && left.assetId === right.assetId) {
+    return true;
+  }
+  return left.path === right.path;
+}
+
+function modelImageKeys(image: ProductImageAsset) {
+  return [image.assetId, image.path].filter((key): key is string => Boolean(key));
+}
+
+export function ClothingConfigPanel({
+  baseModelGenerationSessionId,
+  config,
+  onChange,
+  onGenerateBaseModel,
+  onGenerateScenes,
+}: ClothingConfigPanelProps) {
   const { showToast } = useToast();
+  const [builtinModels, setBuiltinModels] = useState<BuiltinModelView[]>([]);
+  const [builtinModelsLoading, setBuiltinModelsLoading] = useState(true);
+  const [baseModelGenerating, setBaseModelGenerating] = useState(false);
+  const [generatedModelFavoriteInFlightIds, setGeneratedModelFavoriteInFlightIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [hoveredGeneratedModelId, setHoveredGeneratedModelId] = useState<string | null>(null);
+  const [modelPreview, setModelPreview] = useState<ModelPreview | null>(null);
+  const modelPreviewTimerRef = useRef<number | null>(null);
+  const builtinModelLibraryScrollRef = useRef<HTMLDivElement>(null);
+  const configRef = useRef(config);
+  const baseModelGenerationRequestIdRef = useRef(0);
+  const baseModelGenerationSessionIdRef = useRef(baseModelGenerationSessionId);
+  const deletedModelImageKeysRef = useRef(new Set<string>());
+  const generatedModelFavoriteInFlightIdsRef = useRef(new Set<string>());
   const hasClothingImages = config.clothingImages.length > 0;
-  const hasSelectedModel = Boolean(config.selectedModelId);
+  const hasSelectedModel = Boolean(
+    config.selectedModelId &&
+      [...config.modelImages, ...config.generatedBaseModelImages].some(
+        (image) => image.id === config.selectedModelId,
+      ),
+  );
   const hasSceneChoice = config.aiRecommended || config.sceneIds.length > 0;
   const canGenerate = hasClothingImages && hasSelectedModel && hasSceneChoice;
+  const canStartScenePlanning = canGenerate && !baseModelGenerating;
   const generateLabel = !hasClothingImages
     ? "请上传服饰图片"
     : !hasSelectedModel
@@ -148,12 +280,137 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
     onChange({ ...config, ...patch });
   }
 
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    if (baseModelGenerationSessionIdRef.current === baseModelGenerationSessionId) {
+      return;
+    }
+    baseModelGenerationSessionIdRef.current = baseModelGenerationSessionId;
+    baseModelGenerationRequestIdRef.current += 1;
+    setBaseModelGenerating(false);
+  }, [baseModelGenerationSessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    localAssetPort
+      .listBuiltinModels()
+      .then((models) => {
+        if (cancelled) {
+          return;
+        }
+        setBuiltinModels(
+          models.map((model) => ({
+            ...model,
+            fullBodySrc: convertFileSrc(model.path),
+            src: convertFileSrc(model.thumbnailPath ?? model.path),
+          })),
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          showToast({ message: `内置模特加载失败：${errorMessage(error)}`, variant: "error" });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBuiltinModelsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function listAllModelAssets() {
+      const pageSize = 100;
+      const assets: Asset[] = [];
+      let page = 1;
+
+      for (;;) {
+        if (cancelled) {
+          return assets;
+        }
+        const result = await localAssetPort.listAssets({ kind: "model", page, pageSize });
+        if (cancelled) {
+          return assets;
+        }
+        assets.push(...result.items);
+        if (assets.length >= result.total || result.items.length === 0) {
+          return assets;
+        }
+        page += 1;
+      }
+    }
+
+    listAllModelAssets()
+      .then((assets) => {
+        if (cancelled) {
+          return;
+        }
+        const restoredImages = assets
+          .map(modelAssetToProductImage)
+          .filter((image): image is ProductImageAsset => image !== null);
+        if (restoredImages.length === 0) {
+          return;
+        }
+
+        const currentConfig = configRef.current;
+        const knownKeys = new Set(
+          currentConfig.modelImages.map((image) => image.assetId ?? image.path),
+        );
+        const nextImages = restoredImages.filter(
+          (image) =>
+            !knownKeys.has(image.assetId ?? image.path) &&
+            modelImageKeys(image).every((key) => !deletedModelImageKeysRef.current.has(key)),
+        );
+        if (nextImages.length === 0) {
+          return;
+        }
+
+        onChange({
+          ...currentConfig,
+          modelImages: [...currentConfig.modelImages, ...nextImages],
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          showToast({ message: `上传模特加载失败：${errorMessage(error)}`, variant: "error" });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [onChange, showToast]);
+
   function toggleScene(scene: string) {
     const sceneIds = config.sceneIds.includes(scene)
       ? config.sceneIds.filter((sceneId) => sceneId !== scene)
       : [...config.sceneIds, scene];
 
     updateConfig({ sceneIds });
+  }
+
+  function selectBuiltinModel(model: BuiltinModelView) {
+    const modelImage: ProductImageAsset = {
+      id: `builtin:${model.id}`,
+      name: model.label,
+      path: model.path,
+      src: model.fullBodySrc,
+    };
+    const knownImages = config.modelImages.filter((image) => image.id !== modelImage.id);
+    updateConfig({
+      modelImages: [...knownImages, modelImage],
+      selectedModelId: modelImage.id,
+    });
   }
 
   async function handleSelectClothingImages() {
@@ -174,6 +431,7 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
   }
 
   async function handleSelectModelImage() {
+    const selectedModelIdAtStart = config.selectedModelId;
     let selectedImages: ProductImageAsset[];
     try {
       selectedImages = await selectProductImages(1);
@@ -186,13 +444,184 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
       return;
     }
 
-    const knownImage = config.modelImages.find((image) => image.path === selectedImage.path);
-    const modelImages = knownImage ? config.modelImages : [...config.modelImages, selectedImage];
+    const currentConfig = configRef.current;
+    const knownImage = currentConfig.modelImages.find((image) => image.path === selectedImage.path);
+    if (knownImage) {
+      onChange({
+        ...currentConfig,
+        selectedModelId:
+          currentConfig.selectedModelId === selectedModelIdAtStart
+            ? knownImage.id
+            : currentConfig.selectedModelId,
+      });
+      return;
+    }
 
-    updateConfig({
-      modelImages,
-      selectedModelId: knownImage?.id ?? selectedImage.id,
+    let importedAsset: Asset | undefined;
+    try {
+      [importedAsset] = await localAssetPort.importImages({
+        kind: "model",
+        paths: [selectedImage.path],
+      });
+    } catch (error) {
+      showToast({ message: `模特图片导入失败：${errorMessage(error)}`, variant: "error" });
+      return;
+    }
+
+    const importedImage = importedAsset ? modelAssetToProductImage(importedAsset) : null;
+    if (!importedImage) {
+      showToast({ message: "模特图片导入失败：未返回本地文件路径。", variant: "error" });
+      return;
+    }
+
+    const latestConfig = configRef.current;
+    const existingImage = latestConfig.modelImages.find((image) =>
+      modelImagesMatch(image, importedImage),
+    );
+    onChange({
+      ...latestConfig,
+      modelImages: existingImage ? latestConfig.modelImages : [...latestConfig.modelImages, importedImage],
+      selectedModelId:
+        latestConfig.selectedModelId === selectedModelIdAtStart
+          ? (existingImage?.id ?? importedImage.id)
+          : latestConfig.selectedModelId,
     });
+  }
+
+  async function handleGenerateBaseModel() {
+    const requestId = baseModelGenerationRequestIdRef.current + 1;
+    baseModelGenerationRequestIdRef.current = requestId;
+    const selectedModelIdAtStart = config.selectedModelId;
+    setBaseModelGenerating(true);
+    try {
+      const generationPromise = onGenerateBaseModel({
+        age: config.aiModelAge,
+        appearance: config.aiModelAppearance.trim(),
+        body: config.aiModelBody,
+        ethnicity: config.aiModelEthnicity,
+        gender: config.aiModelGender,
+      });
+      const [generatedModel] = await Promise.all([
+        generationPromise,
+        waitForTransition(baseModelGenerationTransitionMs),
+      ]);
+      if (baseModelGenerationRequestIdRef.current !== requestId) {
+        return;
+      }
+      const currentConfig = configRef.current;
+      const knownKeys = new Set(
+        currentConfig.generatedBaseModelImages.map((image) => image.assetId ?? image.path),
+      );
+      const generatedBaseModelImages = knownKeys.has(generatedModel.assetId ?? generatedModel.path)
+        ? currentConfig.generatedBaseModelImages
+        : [generatedModel, ...currentConfig.generatedBaseModelImages];
+      onChange({
+        ...currentConfig,
+        generatedBaseModelImages,
+        selectedModelId:
+          currentConfig.selectedModelId === selectedModelIdAtStart
+            ? generatedModel.id
+            : currentConfig.selectedModelId,
+      });
+    } catch (error) {
+      if (
+        baseModelGenerationRequestIdRef.current !== requestId ||
+        isClothingBaseModelGenerationCancelledError(error)
+      ) {
+        return;
+      }
+      showToast({ message: `基准模特生成失败：${errorMessage(error)}`, variant: "error" });
+    } finally {
+      if (baseModelGenerationRequestIdRef.current === requestId) {
+        setBaseModelGenerating(false);
+      }
+    }
+  }
+
+  async function handleToggleGeneratedModelFavorite(image: GeneratedBaseModelImage) {
+    if (generatedModelFavoriteInFlightIdsRef.current.has(image.id)) {
+      return;
+    }
+    generatedModelFavoriteInFlightIdsRef.current.add(image.id);
+    setGeneratedModelFavoriteInFlightIds((currentIds) => new Set(currentIds).add(image.id));
+
+    try {
+      if (image.favoritedModelImage) {
+        const favoritedImage = image.favoritedModelImage;
+        const deletedKeys = modelImageKeys(favoritedImage);
+        if (favoritedImage.assetId) {
+          try {
+            await localAssetPort.deleteAsset(favoritedImage.assetId);
+          } catch (error) {
+            showToast({ message: `取消收藏失败：${errorMessage(error)}`, variant: "error" });
+            return;
+          }
+        }
+        deletedKeys.forEach((key) => deletedModelImageKeysRef.current.add(key));
+
+        const currentConfig = configRef.current;
+        onChange({
+          ...currentConfig,
+          generatedBaseModelImages: currentConfig.generatedBaseModelImages.map((currentImage) =>
+            currentImage.id === image.id
+              ? {
+                  ...currentImage,
+                  favoritedModelImage: undefined,
+                }
+              : currentImage,
+          ),
+          modelImages: currentConfig.modelImages.filter(
+            (modelImage) =>
+              modelImage.assetId !== favoritedImage.assetId &&
+              modelImage.path !== favoritedImage.path,
+          ),
+          selectedModelId:
+            currentConfig.selectedModelId === favoritedImage.id ? image.id : currentConfig.selectedModelId,
+        });
+        return;
+      }
+
+      let importedAsset: Asset | undefined;
+      try {
+        [importedAsset] = await localAssetPort.importImages({
+          kind: "model",
+          paths: [image.path],
+        });
+      } catch (error) {
+        showToast({ message: `基准模特收藏失败：${errorMessage(error)}`, variant: "error" });
+        return;
+      }
+
+      const importedImage = importedAsset ? modelAssetToProductImage(importedAsset) : null;
+      if (!importedImage) {
+        showToast({ message: "基准模特收藏失败：未返回本地文件路径。", variant: "error" });
+        return;
+      }
+
+      const currentConfig = configRef.current;
+      const knownKeys = new Set(currentConfig.modelImages.map((modelImage) => modelImage.assetId ?? modelImage.path));
+      onChange({
+        ...currentConfig,
+        generatedBaseModelImages: currentConfig.generatedBaseModelImages.map((currentImage) =>
+          currentImage.id === image.id
+            ? {
+                ...currentImage,
+                favoritedModelImage: importedImage,
+              }
+            : currentImage,
+        ),
+        modelImages: knownKeys.has(importedImage.assetId ?? importedImage.path)
+          ? currentConfig.modelImages
+          : [importedImage, ...currentConfig.modelImages],
+      });
+    } finally {
+      generatedModelFavoriteInFlightIdsRef.current.delete(image.id);
+      setGeneratedModelFavoriteInFlightIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(image.id);
+        return nextIds;
+      });
+    }
   }
 
   function handleRemoveClothingImage(imageId: string) {
@@ -200,6 +629,73 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
       clothingImages: config.clothingImages.filter((image) => image.id !== imageId),
     });
   }
+
+  async function handleDeleteModelImage(image: ProductImageAsset) {
+    const deletedKeys = modelImageKeys(image);
+    if (image.assetId) {
+      try {
+        await localAssetPort.deleteAsset(image.assetId);
+      } catch (error) {
+        showToast({ message: `模特删除失败：${errorMessage(error)}`, variant: "error" });
+        return;
+      }
+    }
+    deletedKeys.forEach((key) => deletedModelImageKeysRef.current.add(key));
+
+    const currentConfig = configRef.current;
+    const selectedModelDeleted = currentConfig.modelImages.some(
+      (modelImage) => modelImage.id === currentConfig.selectedModelId && modelImagesMatch(modelImage, image),
+    );
+    onChange({
+      ...currentConfig,
+      generatedBaseModelImages: currentConfig.generatedBaseModelImages.map((currentImage) =>
+        currentImage.favoritedModelImage && modelImagesMatch(currentImage.favoritedModelImage, image)
+          ? {
+              ...currentImage,
+              favoritedModelImage: undefined,
+            }
+          : currentImage,
+      ),
+      modelImages: currentConfig.modelImages.filter((modelImage) => !modelImagesMatch(modelImage, image)),
+      selectedModelId: selectedModelDeleted ? null : currentConfig.selectedModelId,
+    });
+  }
+
+  function clearModelPreview() {
+    if (modelPreviewTimerRef.current !== null) {
+      window.clearTimeout(modelPreviewTimerRef.current);
+      modelPreviewTimerRef.current = null;
+    }
+    setModelPreview(null);
+  }
+
+  function scheduleModelPreview(
+    preview: Pick<ModelPreview, "fullBodySrc" | "label">,
+    event: ReactMouseEvent<HTMLElement>,
+  ) {
+    clearModelPreview();
+    const tile = event.currentTarget;
+
+    modelPreviewTimerRef.current = window.setTimeout(() => {
+      const tileRect = tile.getBoundingClientRect();
+      setModelPreview({
+        fullBodySrc: preview.fullBodySrc,
+        label: preview.label,
+        left: tileRect.right + 12,
+        top: Math.max(12, tileRect.top),
+      });
+      modelPreviewTimerRef.current = null;
+    }, modelPreviewDelayMs);
+  }
+
+  useEffect(
+    () => () => {
+      if (modelPreviewTimerRef.current !== null) {
+        window.clearTimeout(modelPreviewTimerRef.current);
+      }
+    },
+    [],
+  );
 
   return (
     <aside
@@ -260,29 +756,70 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
             </button>
           </div>
           {config.modelMode === "ai" ? (
-            <AiModelGenerationControls config={config} onChange={updateConfig} />
+            <AiModelGenerationControls
+              config={config}
+              favoriteInFlightIds={generatedModelFavoriteInFlightIds}
+              generating={baseModelGenerating}
+              hoveredGeneratedModelId={hoveredGeneratedModelId}
+              onChange={updateConfig}
+              onFavoriteGeneratedModel={handleToggleGeneratedModelFavorite}
+              onGenerateBaseModel={handleGenerateBaseModel}
+              onGeneratedModelHoverChange={setHoveredGeneratedModelId}
+              onGeneratedModelPreviewEnter={(preview, event) => scheduleModelPreview(preview, event)}
+              onGeneratedModelPreviewLeave={clearModelPreview}
+            />
           ) : (
-            <div className="grid grid-cols-4 gap-2">
-              <ModelUploadTile onClick={handleSelectModelImage} />
-              {config.modelImages.map((image) => (
-                <ModelImageTile
-                  image={image}
-                  key={image.id}
-                  onSelect={() => updateConfig({ selectedModelId: image.id })}
-                  selected={config.selectedModelId === image.id}
-                />
-              ))}
-              {modelPresets.slice(1).map((model) => (
-                <ModelPreset
-                  key={model.id}
-                  label={model.label}
-                  onSelect={() => updateConfig({ selectedModelId: `preset:${model.id}` })}
-                  selected={config.selectedModelId === `preset:${model.id}`}
-                  tone={model.tone}
-                />
-              ))}
+            <div className="relative">
+              <div
+                aria-busy={builtinModelsLoading}
+                ref={builtinModelLibraryScrollRef}
+                className="max-h-[224px] overflow-y-auto overscroll-contain pr-4 [scrollbar-gutter:stable] [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.45)_transparent]"
+                data-testid="builtin-model-library-scroll"
+              >
+                <div className="grid grid-cols-4 gap-2">
+                  <ModelUploadTile onClick={handleSelectModelImage} />
+                  {config.modelImages.filter((image) => !image.id.startsWith("builtin:")).map((image) => (
+                    <ModelImageTile
+                      image={image}
+                      key={image.id}
+                      onDelete={isDeletableModelImage(image) ? () => void handleDeleteModelImage(image) : undefined}
+                      onPreviewEnter={(event) =>
+                        scheduleModelPreview(
+                          {
+                            fullBodySrc: image.src,
+                            label: image.name,
+                          },
+                          event,
+                        )
+                      }
+                      onPreviewLeave={clearModelPreview}
+                      onSelect={() => updateConfig({ selectedModelId: image.id })}
+                      selected={config.selectedModelId === image.id}
+                    />
+                  ))}
+                  {builtinModels.map((model) => (
+                    <BuiltinModelTile
+                      key={model.id}
+                      model={model}
+                      onPreviewEnter={(event) =>
+                        scheduleModelPreview(
+                          {
+                            fullBodySrc: model.fullBodySrc,
+                            label: model.label,
+                          },
+                          event,
+                        )
+                      }
+                      onPreviewLeave={clearModelPreview}
+                      onSelect={() => selectBuiltinModel(model)}
+                      selected={config.selectedModelId === `builtin:${model.id}`}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           )}
+          {modelPreview ? <ModelPreviewTooltip preview={modelPreview} /> : null}
         </ControlGroup>
 
         {config.aiRecommended ? null : (
@@ -362,12 +899,12 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
         <Button
           className={cn(
             "h-10 w-full justify-center rounded-control border font-semibold",
-            canGenerate
+            canStartScenePlanning
               ? "border-slate-950/10 bg-[linear-gradient(180deg,#111827,#071022)] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_10px_24px_rgba(15,23,42,0.22)] hover:bg-[linear-gradient(180deg,#172033,#0b1220)]"
               : "cursor-not-allowed border-slate-300 bg-slate-300 text-slate-700 shadow-none hover:bg-slate-300 hover:shadow-none",
           )}
-          disabled={!canGenerate}
-          onClick={onGenerateScenes}
+          disabled={!canStartScenePlanning}
+          onClick={() => onGenerateScenes(config)}
           type="button"
         >
           {generateLabel}
@@ -378,31 +915,33 @@ export function ClothingConfigPanel({ config, onChange, onGenerateScenes }: Clot
 }
 
 export function ClothingSceneSelectionPanel({
+  drafts,
+  onChange,
   onBack,
   onGenerateSceneImages,
+  planning,
   sceneGenerating,
 }: {
+  drafts: ClothingSceneDraft[];
+  onChange: (drafts: ClothingSceneDraft[]) => void;
   onBack: () => void;
   onGenerateSceneImages: (drafts: ClothingSceneDraft[]) => void;
+  planning: boolean;
   sceneGenerating: boolean;
 }) {
-  const [draftReady, setDraftReady] = useState(false);
-  const [sceneDrafts, setSceneDrafts] = useState<ClothingSceneDraft[]>(() =>
-    clothingSceneDrafts.map((draft) => ({ ...draft })),
-  );
   const [openSelect, setOpenSelect] = useState<string | null>(null);
-  const sceneGroups = Array.from(new Set(sceneDrafts.map((draft) => draft.scene)));
-  const selectedDrafts = sceneDrafts.filter((draft) => draft.checked);
+  const sceneGroups = Array.from(new Set(drafts.map((draft) => draft.scene)));
+  const selectedDrafts = drafts.filter((draft) => draft.checked);
 
   function updateSceneDraft(draftId: string, patch: Partial<ClothingSceneDraft>) {
-    setSceneDrafts((currentDrafts) =>
-      currentDrafts.map((draft) => (draft.id === draftId ? { ...draft, ...patch } : draft)),
+    onChange(
+      drafts.map((draft) => (draft.id === draftId ? { ...draft, ...patch } : draft)),
     );
   }
 
   function toggleSceneDraft(draftId: string) {
-    setSceneDrafts((currentDrafts) =>
-      currentDrafts.map((draft) =>
+    onChange(
+      drafts.map((draft) =>
         draft.id === draftId ? { ...draft, checked: !draft.checked } : draft,
       ),
     );
@@ -410,10 +949,10 @@ export function ClothingSceneSelectionPanel({
   }
 
   function toggleSceneGroup(scene: string) {
-    const groupDrafts = sceneDrafts.filter((draft) => draft.scene === scene);
+    const groupDrafts = drafts.filter((draft) => draft.scene === scene);
     const groupAllSelected = groupDrafts.every((draft) => draft.checked);
-    setSceneDrafts((currentDrafts) =>
-      currentDrafts.map((draft) =>
+    onChange(
+      drafts.map((draft) =>
         draft.scene === scene ? { ...draft, checked: !groupAllSelected } : draft,
       ),
     );
@@ -421,7 +960,7 @@ export function ClothingSceneSelectionPanel({
   }
 
   function getSceneGroupCheckedState(scene: string): boolean | "indeterminate" {
-    const groupDrafts = sceneDrafts.filter((draft) => draft.scene === scene);
+    const groupDrafts = drafts.filter((draft) => draft.scene === scene);
     const selectedDraftCount = groupDrafts.filter((draft) => draft.checked).length;
 
     if (selectedDraftCount === 0) {
@@ -435,13 +974,7 @@ export function ClothingSceneSelectionPanel({
     return "indeterminate";
   }
 
-  useEffect(() => {
-    const readyTimer = window.setTimeout(() => setDraftReady(true), sceneDraftDelayMs);
-
-    return () => window.clearTimeout(readyTimer);
-  }, []);
-
-  if (!draftReady) {
+  if (planning || drafts.length === 0) {
     return (
       <aside
         aria-label="选择场景"
@@ -470,7 +1003,7 @@ export function ClothingSceneSelectionPanel({
             上一步
           </Button>
           <Button
-            className="h-10 justify-center border-slate-200 bg-slate-200 font-semibold text-white shadow-none"
+            className="h-10 justify-center border-slate-300 bg-slate-300 font-semibold text-slate-700 shadow-none hover:bg-slate-300 hover:shadow-none"
             disabled
             type="button"
           >
@@ -501,7 +1034,7 @@ export function ClothingSceneSelectionPanel({
                 />
               </div>
               <div className="space-y-3">
-                {sceneDrafts
+                {drafts
                   .filter((draft) => draft.scene === scene)
                   .map((draft) => (
                     <ClothingSceneCard
@@ -533,22 +1066,40 @@ export function ClothingSceneSelectionPanel({
         <Button
           className={cn(
             "h-10 justify-center font-semibold",
-            selectedDrafts.length > 0
+            selectedDrafts.length > 0 && !sceneGenerating
               ? "border-slate-950/10 bg-[#1f1f21] text-white shadow-none hover:bg-black"
-              : "cursor-not-allowed border-slate-200 bg-slate-200 text-white shadow-none hover:bg-slate-200",
+              : "border-slate-200 bg-slate-200 text-white shadow-none",
           )}
           disabled={selectedDrafts.length === 0 || sceneGenerating}
           onClick={() => onGenerateSceneImages(selectedDrafts)}
           type="button"
         >
-          {selectedDrafts.length > 0 ? `生成场景图片（${selectedDrafts.length}张）` : "请先选择场景"}
+          {sceneGenerating
+            ? "场景图生成中"
+            : selectedDrafts.length > 0
+              ? `生成场景图片（${selectedDrafts.length}张）`
+              : "请先选择场景"}
         </Button>
       </div>
     </aside>
   );
 }
 
-export type ClothingSceneDraft = (typeof clothingSceneDrafts)[number];
+export type ClothingSceneDraft = {
+  angle: string;
+  checked: boolean;
+  description: string;
+  framing: string;
+  id: string;
+  scene: string;
+  scenePromptSegment: string;
+  sceneVisualAnchor: string;
+  shootingPosition: string;
+};
+
+export function createDefaultClothingSceneDrafts(): ClothingSceneDraft[] {
+  return clothingSceneDrafts.map((draft) => ({ ...draft, checked: false }));
+}
 
 function ClothingSceneCard({
   draft,
@@ -658,10 +1209,29 @@ function SelectionCheckbox({
 
 function AiModelGenerationControls({
   config,
+  favoriteInFlightIds,
+  generating,
+  hoveredGeneratedModelId,
   onChange,
+  onFavoriteGeneratedModel,
+  onGenerateBaseModel,
+  onGeneratedModelHoverChange,
+  onGeneratedModelPreviewEnter,
+  onGeneratedModelPreviewLeave,
 }: {
   config: ClothingConfigState;
+  favoriteInFlightIds: ReadonlySet<string>;
+  generating: boolean;
+  hoveredGeneratedModelId: string | null;
   onChange: (patch: Partial<ClothingConfigState>) => void;
+  onFavoriteGeneratedModel: (image: GeneratedBaseModelImage) => void;
+  onGenerateBaseModel: () => void;
+  onGeneratedModelHoverChange: (id: string | null) => void;
+  onGeneratedModelPreviewEnter: (
+    preview: Pick<ModelPreview, "fullBodySrc" | "label">,
+    event: ReactMouseEvent<HTMLElement>,
+  ) => void;
+  onGeneratedModelPreviewLeave: () => void;
 }) {
   const [openSelect, setOpenSelect] = useState<string | null>(null);
 
@@ -716,12 +1286,90 @@ function AiModelGenerationControls({
         />
       </label>
       <button
-        className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-control border border-slate-100 bg-slate-100 text-[14px] font-medium text-slate-900 shadow-none transition-colors hover:bg-slate-200/80"
+        className={cn(
+          "inline-flex h-10 w-full items-center justify-center gap-2 rounded-control border border-slate-100 bg-slate-100 text-[14px] font-medium text-slate-900 shadow-none transition-colors hover:bg-slate-200/80",
+          generating ? "cursor-not-allowed text-app-muted hover:bg-slate-100" : "",
+        )}
+        disabled={generating}
+        onClick={onGenerateBaseModel}
         type="button"
       >
         <Sparkles className="size-4 text-app-blue" />
         生成基准模特
       </button>
+      {generating ? (
+        <div className="rounded-control border border-blue-100 bg-blue-50/70 px-3 py-2 text-center text-[12px] font-medium text-blue-700">
+          正在生成基准模特...
+        </div>
+      ) : null}
+      {config.generatedBaseModelImages.length > 0 ? (
+        <div className="space-y-3">
+          <h3 className="text-[14px] font-semibold text-slate-950">基准模特图</h3>
+          <div className="grid grid-cols-3 gap-2">
+            {config.generatedBaseModelImages.map((image) => {
+              const favoriteAction = image.favoritedModelImage ? "取消收藏" : "收藏";
+              const favoriteInFlight = favoriteInFlightIds.has(image.id);
+              return (
+                <article
+                  className="relative"
+                  key={image.id}
+                  onMouseEnter={(event) => {
+                    onGeneratedModelHoverChange(image.id);
+                    onGeneratedModelPreviewEnter(
+                      {
+                        fullBodySrc: image.src,
+                        label: image.name,
+                      },
+                      event,
+                    );
+                  }}
+                  onMouseLeave={() => {
+                    onGeneratedModelHoverChange(null);
+                    onGeneratedModelPreviewLeave();
+                  }}
+                >
+                  <button
+                    aria-label={`选择生成模特 ${image.name}`}
+                    aria-pressed={config.selectedModelId === image.id}
+                    className={cn(
+                      "group relative aspect-square w-full overflow-hidden rounded-[12px] border border-white/80 bg-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_3px_rgba(15,23,42,0.08)] transition-all hover:scale-[1.015] hover:shadow-[0_10px_22px_rgba(15,23,42,0.12)]",
+                      config.selectedModelId === image.id ? "ring-2 ring-app-blue ring-offset-1 ring-offset-white" : "",
+                    )}
+                    onClick={() => onChange({ selectedModelId: image.id })}
+                    type="button"
+                  >
+                    <img alt={image.name} className="h-full w-full object-cover" src={image.src} />
+                    {config.selectedModelId === image.id ? (
+                      <span
+                        aria-label={`已选中 ${image.name}`}
+                        className="absolute left-1.5 top-1.5 grid size-5 place-items-center rounded-full bg-app-blue text-white shadow-[0_4px_10px_rgba(59,130,246,0.28)]"
+                      >
+                        <Check className="size-3" />
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    aria-busy={favoriteInFlight}
+                    aria-label={`${favoriteInFlight ? `正在${favoriteAction}` : favoriteAction}${image.name}`}
+                    className={cn(
+                      "absolute inset-x-2 bottom-2 z-10 inline-flex h-8 items-center justify-center rounded-[10px] bg-white/92 text-[12px] font-medium text-slate-900 shadow-[0_8px_18px_rgba(15,23,42,0.16)] backdrop-blur transition-opacity disabled:cursor-not-allowed disabled:text-app-muted",
+                      hoveredGeneratedModelId === image.id ? "opacity-100" : "pointer-events-none opacity-0",
+                    )}
+                    disabled={favoriteInFlight}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onFavoriteGeneratedModel(image);
+                    }}
+                    type="button"
+                  >
+                    {favoriteInFlight ? `${favoriteAction}中...` : favoriteAction}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -854,59 +1502,113 @@ function ModelUploadTile({ onClick }: { onClick: () => void }) {
 
 function ModelImageTile({
   image,
+  onDelete,
+  onPreviewEnter,
+  onPreviewLeave,
   onSelect,
   selected,
 }: {
   image: ProductImageAsset;
+  onDelete?: () => void;
+  onPreviewEnter: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onPreviewLeave: () => void;
+  onSelect: () => void;
+  selected: boolean;
+}) {
+  return (
+    <div className="group/model relative aspect-square">
+      <button
+        aria-label={`选择模特 ${image.name}`}
+        aria-pressed={selected}
+        className={cn(
+          "group absolute inset-0 overflow-hidden rounded-control border bg-white shadow-[inset_0_1px_0_rgba(255,255,255,0.78),0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:shadow-control",
+          selected ? "border-app-blue ring-2 ring-blue-100" : "border-white/70",
+        )}
+        onClick={onSelect}
+        onMouseEnter={onPreviewEnter}
+        onMouseLeave={onPreviewLeave}
+        type="button"
+      >
+        <img
+          alt={image.name}
+          className="h-full w-full object-cover"
+          draggable={false}
+          src={image.thumbnailSrc ?? image.src}
+        />
+        <ModelSelectionIndicator label={image.name} selected={selected} />
+      </button>
+      {onDelete ? (
+        <button
+          aria-label={`删除模特 ${image.name}`}
+          className="absolute right-1.5 top-1.5 z-10 grid size-6 place-items-center rounded-full border border-white/80 bg-white/90 text-slate-500 opacity-0 shadow-[0_4px_12px_rgba(15,23,42,0.16)] transition-all duration-200 hover:bg-rose-50 hover:text-rose-500 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 group-hover/model:opacity-100"
+          onClick={onDelete}
+          type="button"
+        >
+          <Trash2 className="size-3.5" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function BuiltinModelTile({
+  model,
+  onPreviewEnter,
+  onPreviewLeave,
+  onSelect,
+  selected,
+}: {
+  model: BuiltinModelView;
+  onPreviewEnter: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onPreviewLeave: () => void;
   onSelect: () => void;
   selected: boolean;
 }) {
   return (
     <button
-      aria-label={`选择模特 ${image.name}`}
+      aria-label={`选择内置模特 ${model.label}`}
       aria-pressed={selected}
       className={cn(
         "group relative aspect-square overflow-hidden rounded-control border bg-white shadow-[inset_0_1px_0_rgba(255,255,255,0.78),0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:shadow-control",
         selected ? "border-app-blue ring-2 ring-blue-100" : "border-white/70",
       )}
       onClick={onSelect}
+      onMouseEnter={onPreviewEnter}
+      onMouseLeave={onPreviewLeave}
       type="button"
     >
-      <img alt={image.name} className="h-full w-full object-cover" draggable={false} src={image.src} />
-      <ModelSelectionIndicator label={image.name} selected={selected} />
+      <img
+        alt={model.label}
+        className="h-full w-full object-cover"
+        draggable={false}
+        src={model.src}
+      />
+      <ModelSelectionIndicator label={model.label} selected={selected} />
     </button>
   );
 }
 
-function ModelPreset({
-  label,
-  onSelect,
-  selected,
-  tone,
-}: {
-  label: string;
-  onSelect: () => void;
-  selected: boolean;
-  tone: string;
-}) {
-  return (
-    <button
-      aria-label={label}
-      aria-pressed={selected}
-      className={cn(
-        "group relative aspect-square overflow-hidden rounded-control border bg-slate-100/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.78),0_1px_2px_rgba(15,23,42,0.05)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-white hover:shadow-control",
-        selected ? "border-app-blue ring-2 ring-blue-100" : "border-white/70",
-      )}
-      onClick={onSelect}
-      type="button"
+function ModelPreviewTooltip({ preview }: { preview: ModelPreview }) {
+  return createPortal(
+    <div
+      aria-label={`${preview.label} 全身照预览`}
+      className="pointer-events-none fixed z-[130] w-[184px] rounded-panel border border-white/80 bg-white/95 p-2 shadow-[0_18px_42px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.9)] backdrop-blur-xl"
+      role="tooltip"
+      style={{ left: preview.left, top: preview.top }}
     >
-      <div className={cn("absolute inset-0", modelToneClass(tone))}>
-        <div className="absolute inset-x-3 top-3 h-8 rounded-full bg-white/55 blur-xl" />
-        <div className="absolute left-1/2 top-[18%] size-6 -translate-x-1/2 rounded-full bg-[linear-gradient(145deg,#fff7ed,#d6b08d)] shadow-[0_4px_10px_rgba(15,23,42,0.12)]" />
-        <div className="absolute bottom-0 left-1/2 h-[58%] w-[72%] -translate-x-1/2 rounded-t-full bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(226,232,240,0.72))] shadow-[0_-8px_18px_rgba(255,255,255,0.5)]" />
+      <div className="overflow-hidden rounded-[12px] bg-slate-100">
+        <img
+          alt={`${preview.label} 全身照`}
+          className="h-[260px] w-full object-cover object-top"
+          draggable={false}
+          src={preview.fullBodySrc}
+        />
       </div>
-      <ModelSelectionIndicator label={label} selected={selected} />
-    </button>
+      <div className="mt-2 truncate px-1 text-center text-[12px] font-semibold text-slate-700">
+        {preview.label}
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -956,30 +1658,19 @@ function SceneOption({
   );
 }
 
-function modelToneClass(tone: string) {
-  switch (tone) {
-    case "warm":
-      return "bg-[linear-gradient(145deg,#fff7ed,#fde68a_44%,#dbeafe)]";
-    case "cool":
-      return "bg-[linear-gradient(145deg,#e0f2fe,#bfdbfe_48%,#e2e8f0)]";
-    case "dark":
-      return "bg-[linear-gradient(145deg,#f8fafc,#cbd5e1_42%,#0f172a)]";
-    case "soft":
-      return "bg-[linear-gradient(145deg,#fdf2f8,#e0f2fe_52%,#f8fafc)]";
-    case "peach":
-      return "bg-[linear-gradient(145deg,#fff1f2,#fed7aa_48%,#f8fafc)]";
-    case "rose":
-      return "bg-[linear-gradient(145deg,#ffe4e6,#fecdd3_48%,#dbeafe)]";
-    case "sand":
-      return "bg-[linear-gradient(145deg,#fef3c7,#d6d3d1_48%,#e2e8f0)]";
-    default:
-      return "bg-slate-100";
-  }
-}
-
 function imageSelectionErrorMessage(error: unknown) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
   return "图片处理失败，请使用 png、jpg、jpeg 或 webp 图片。";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function waitForTransition(durationMs: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
 }

@@ -41,6 +41,17 @@ describe("Runtime public contract", () => {
       supportedAspectRatios: ["1:1", "3:4", "9:16", "16:9"],
     };
 
+    const baseModelCapability: ModelCapability = {
+      available: false,
+      category: "text-to-image",
+      displayName: "服饰基准模特生成",
+      id: "clothing-base-model-generation",
+      maxImageCount: 1,
+      maxInputAssets: 0,
+      supportedAspectRatios: ["2:3"],
+      unavailableReason: "未配置可用真实模型。",
+    };
+
     const secretStatus: SecretStatus = {
       configured: true,
       lastUpdatedAt: "2026-07-01T00:00:00.000Z",
@@ -104,11 +115,12 @@ describe("Runtime public contract", () => {
             total: 0,
           }),
         ),
+        listBuiltinModels: vi.fn(() => Promise.resolve([])),
         revealAsset: vi.fn(),
       },
       capabilities: {
         getCapability: vi.fn(() => Promise.resolve(capability)),
-        listCapabilities: vi.fn(() => Promise.resolve([capability])),
+        listCapabilities: vi.fn(() => Promise.resolve([capability, baseModelCapability])),
       },
       generation: {
         cancelTask: vi.fn(() => Promise.resolve(task)),

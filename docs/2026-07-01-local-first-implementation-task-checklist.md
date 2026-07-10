@@ -285,7 +285,7 @@ M7 真实场景生图闭环
 ### M2-T02 importImages 真实导入
 
 - 依赖：M2-T01。
-- 当前状态：已完成后端基础能力。已支持 PNG/JPEG 尺寸读取、扩展名 MIME 校验、sha256、workspace `cache/tmp` 写入、atomic rename、相对路径入库、导入后 `staged` 生命周期和同 kind/hash 未删除资产复用；未引入第三方图片解码依赖。
+- 当前状态：已完成后端基础能力。通用导入会按扩展名接受 PNG/JPEG/WEBP/GIF，校验扩展名 MIME，并读取 PNG/JPEG 的宽高；同时支持 sha256、workspace `cache/tmp` 写入、atomic rename、相对路径入库、非模特导入后的 `staged` 生命周期、模特导入后的 `active` 生命周期和同 kind/hash 未删除资产复用。模特资产导入会额外真实解码上述四种格式，在本地生成顶部居中裁剪的 320×320 PNG 头像缩略图；模型源文件限制为 64 MiB，最大宽高为 8192px，decoder 最大分配为 128 MiB。Asset DTO 通过 `thumbnailPath` 返回存在的缩略图路径，旧资产缺失时由前端回退原图。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/commands/assets*`
@@ -299,6 +299,7 @@ M7 真实场景生图闭环
 - 验收标准：
   - 导入图片后 assets 表有记录。
   - workspace 内有正式资产文件。
+  - 模特导入后有 320×320 头像缩略图，且不调用 AI；原图仍保留为任务输入。
   - 失败时 temp 被清理。
   - `make cargo-check` 通过。
 - 退出条件：导入图片不再依赖浏览器内存状态。
@@ -341,7 +342,7 @@ M7 真实场景生图闭环
 ### M2-T05 GC 与 Windows 文件系统规则
 
 - 依赖：M2-T04。
-- 当前状态：部分完成。`WorkspacePort.runGarbageCollection` 已接本地 command；GC 会清理未引用且超过 24 小时的 `staged` 资产，以及未引用的 `deleted` 资产；Windows 保留字符、长路径和真机文件锁行为仍待补充。
+- 当前状态：部分完成。`WorkspacePort.runGarbageCollection` 已接本地 command；GC 会清理未引用且超过 24 小时的 `staged` 资产，以及未引用的 `deleted` 资产，并同步清理已删除模特的头像缩略图；`deletedFiles` 和 `reclaimedBytes` 会包含实际删除的缩略图，即使对应原图已不存在。Windows 保留字符、长路径和真机文件锁行为仍待补充。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/infrastructure/filesystem/*`
@@ -501,7 +502,7 @@ M7 真实场景生图闭环
   - plan 可创建、编辑、确认。
   - confirmed 后再改必须新建 draft。
   - `make test`、`make cargo-check` 通过。
-- 退出条件：PromptPlanPort 可被商品/服饰流程调用。
+- 退出条件：PromptPlanPort 可被商品详情流程调用；服饰菜单使用独立的 `clothing-scene-planning` 结构化规划任务。
 
 ### M4-T03 创建任务时冻结 PromptPlanSnapshot
 
@@ -510,7 +511,8 @@ M7 真实场景生图闭环
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/services/prompt_plan*`
 - 执行动作：
-  - 商品详情图和服饰试穿必须要求 confirmed PromptPlan。
+  - 商品详情图必须要求 confirmed PromptPlan。
+  - 服饰菜单先通过 `clothing-scene-planning` 任务生成场景/动作规划，再创建出图任务。
   - 创建 task 时复制 `PromptPlanSnapshot` 到 `generation_tasks.prompt_plan_snapshot_json`。
   - 保存 `prompt_template_version`、`prompt_resolver_version`、`resolved_prompt_hash`。
 - 验收标准：
@@ -520,7 +522,7 @@ M7 真实场景生图闭环
   - `make cargo-check` 通过。
 - 退出条件：PromptPlan 当前态和 task 快照分离。
 
-### M4-T04 商品/服饰 UI 接 PromptPlanPort
+### M4-T04 商品 UI 接 PromptPlanPort / 服饰 UI 接结构化规划任务
 
 - 依赖：M4-T02、M4-T03。
 - 主要文件：
@@ -528,13 +530,15 @@ M7 真实场景生图闭环
   - `desktop/src/features/clothing/*`
   - `desktop/src/features/generation/*`
 - 执行动作：
-  - 商品详情图、服饰试穿生成前走 plan create/edit/confirm。
+  - 商品详情图生成前走 plan create/edit/confirm。
+  - 服饰试穿生成前走 `clothing-scene-planning`，让模型基于服装图、模特图和场景输入输出可展示的场景/动作方案。
   - 场景图 MVP 继续单阶段 intent，不要求 `promptPlanId`。
 - 验收标准：
-  - 商品/服饰未确认 plan 时不能创建对应生成任务。
+  - 商品详情图未确认 plan 时不能创建对应生成任务。
+  - 服饰菜单未完成场景/动作规划时不能创建对应出图任务。
   - 场景任务不传 `promptPlanId` 也可创建。
   - `make test`、`make frontend-build` 通过。
-- 退出条件：PromptPlan 语义在 UI 层明确。
+- 退出条件：商品详情 PromptPlan 语义和服饰规划任务语义在 UI 层明确。
 
 ## 10. M5：Capability + Model Config + Secret
 
@@ -543,7 +547,7 @@ M7 真实场景生图闭环
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
-- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。
+- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 当前只允许已实现的文生文、图生文和 `clothing-base-model-generation` 纯文生图 capability；后者固定生成 2:3 纵向图且不接收参考图。需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation`，以及 `image-to-image` / `clothing-tryon-generation` / `image-edit`，在对应请求链路实现前不对 OpenAI 暴露。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
@@ -630,7 +634,7 @@ M7 真实场景生图闭环
 ### M5-T04 CapabilityPort
 
 - 依赖：M5-T02、M5-T03。
-- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置让 7 个能力在无外网时可用于调试。
+- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但 `clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation` 三项 real-provider-only 能力在仅有 `mock-local` 时必须返回不可用。基准模特生成不能复用 `clothing-tryon-generation` 的图生图配置；服饰场景规划可复用同属 `image-to-text` 类别且已测试可用的真实默认模型配置，避免旧 workspace 只配置商品卖点图生文模型时被误判为无可用模型。基准模特公开元数据固定为 0 张输入、2:3、1 张输出；服饰规划和试穿最多接收 5 张服装图加 1 张模特图，并只声明当前 UI 支持的 3:4、1:1、9:16 比例。
 - 主要文件：
   - `desktop/src-tauri/src/services/capability*`
   - `desktop/src/runtime/local/capability*`
@@ -647,7 +651,7 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
-- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 7 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
@@ -689,7 +693,7 @@ M7 真实场景生图闭环
 ### M6-T02 DeterministicModelGatewayAdapter
 
 - 依赖：M6-T01。
-- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，支持 7 个 capability 的 deterministic mock 输出，不触发真实 Provider 调用；每次调用会写入脱敏 invocation 记录。
+- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，支持 10 个 capability 的 deterministic mock 输出，不触发真实 Provider 调用；其中 `clothing-scene-planning` 会返回结构化场景方案 JSON，每个场景包含 4 个动作，`clothing-base-model-generation` 返回文生图结果；每次调用会写入脱敏 invocation 记录。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/deterministic*`
   - `desktop/src-tauri/src/services/model_gateway*test*`
@@ -705,7 +709,7 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
-- 当前状态：已完成基础骨架。已新增 OpenAI-compatible 响应归一化模块，支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；已实现 Provider 结果 URL 脱敏。真实 HTTP 生成请求和流式/异步轮询接入仍待后续切片。
+- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例；已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Images Edits / Responses `image_generation` 工具仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
   - `desktop/src-tauri/tests/provider_adapter.rs`
@@ -717,14 +721,14 @@ M7 真实场景生图闭环
 - 验收标准：
   - 编译通过。
   - 单测覆盖 URL 脱敏。
-  - 不打印 Authorization/header/raw response。
+  - 本地调试诊断日志只记录状态、耗时、响应长度、脱敏后的响应结构摘要和经清理的 `providerErrorCode`；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，且 raw response 不得进入 SQLite、`task_events`、导出包或前端 DTO。
   - `make cargo-check` 通过。
 - 退出条件：真实 Provider 接入点稳定。
 
 ### M6-T04 Provider 错误归一化
 
 - 依赖：M6-T02、M6-T03。
-- 当前状态：已完成基础错误映射。已新增 Rust `domain::errors`，覆盖 429、timeout、network、401/403、常规未知错误等归一化规则；`providerErrorCode` 会做字符级清理和疑似 secret 替换，不使用 Provider raw error 作为 message。
+- 当前状态：已完成基础错误映射。已新增 Rust `domain::errors`，覆盖 429、timeout、network、401/403、常规未知错误等归一化规则；`providerErrorCode` 会做字符级清理和疑似 secret 替换，不使用 Provider raw error 作为 message。HTTP status 和 timeout/network typed error 会从 HTTP adapter 经 `ModelGatewayError` / `ModelConfigError` 保留到 `LocalTaskExecutor`，最终按 `retryable`、`providerStatusCode` 和安全 message 归一化，不再把 429 或网络失败误报为能力缺失。Adapter 本地输入/能力校验使用独立 `ProviderRequestInvalid` 分支并回到 `Validation`，不伪造 HTTP 500 或 `providerStatusCode`；仅真实非 2xx 响应使用 `ProviderHttp`。
 - 主要文件：
   - `desktop/src-tauri/src/domain/errors*`
   - `desktop/src-tauri/tests/provider_error.rs`
@@ -745,7 +749,13 @@ M7 真实场景生图闭环
 ### M7-T01 LocalTaskExecutor
 
 - 依赖：M3-T03、M6-T02。
-- 当前状态：部分完成。已新增 Rust `LocalTaskExecutor` 内部服务，支持 `maxConcurrentTasks = 1`，能领取最早 queued task，更新 running / completed / failed 状态，写入 `task.started`、`task.provider-called`、`task.succeeded`、`task.failed` 事件，并在模型能力不可用时写入 `MODEL_CAPABILITY_UNAVAILABLE` 标准错误；workspace 初始化已能恢复异常 `running` 任务为 `interrupted`。尚未接 cancellation token、Tauri event emit、应用关闭主动取消。
+- 当前状态：部分完成。已新增 Rust `LocalTaskExecutor` 内部服务，支持 `maxConcurrentTasks = 1`，能领取最早 queued task，更新 running / completed / failed 状态，写入 `task.started`、`task.provider-called`、`task.succeeded`、`task.failed` 事件，并在模型能力不可用时写入 `MODEL_CAPABILITY_UNAVAILABLE` 标准错误；workspace 初始化已能恢复异常 `running` 任务为 `interrupted`。已支持服饰基准模特任务以独立的 `clothing-base-model-generation` 文生图 capability 渲染 Prompt，年龄可为婴儿、儿童、青少年、青年、中年或老年，未成年人必须按年龄呈现且不得成人化或性感化；该任务与服饰规划、试穿一样要求真实 Provider。已支持服饰场景规划任务保存结构化 `output_json`，规划 prompt 由 `clothing_scene_planning.toml` 配置；规划结果进入第二步场景选择时默认全部未选中，用户手动勾选、画幅和角度修改会保存在 App 层，生成完成或切换到其它菜单再返回后仍保留；已支持服饰试穿任务按 `items[]` 展开逐动作调用，并会把服装原图、参考图和模特图一并作为模型参考输入；第三步正式出图 prompt 由 `clothing_tryon_generation.toml` 配置，每个动作会拼接用户选择的图片比例、场景标题、场景描述、拍摄画幅、拍摄角度、拍摄位置和动作要求，并明确要求严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。服饰规划和试穿默认配置仍是 `mock-local` 时会失败提示配置真实模型，不再把 deterministic mock 结果展示成真实生成结果。尚未接 cancellation token、Tauri event emit、应用关闭主动取消。
+- 体型映射：UI 使用纤细、苗条、精瘦、匀称、健美、运动型、肌肉型、壮硕、结实、丰满、微胖、大码，默认匀称，不提供肥胖。任务输入仅保存短标签，Prompt 渲染时注入对应完整描述；大码映射丰满，历史 `标准`、`肌肉` 映射匀称、肌肉型，未知值原样保留。
+- 性别发型映射：UI 使用男、女短标签，Prompt 渲染时分别注入自然短发/中短发和自然中长发/长发的完整默认描述；用户外貌细节与内置发型冲突时，以用户输入为主，未知性别值原样保留。
+- 基准模特画幅约束：Prompt 的 system、user 和 `rolelessPrompt` 均严格要求输出为 2:3 纵向比例（宽:高=2:3），禁止输出其它比例。
+- 年龄映射：UI 使用婴儿、儿童、青少年、青年、中年、老年短标签。任务输入仅保存短标签，Prompt 渲染时注入对应完整年龄描述，并同步写入 user message 与 `rolelessPrompt`；未知历史年龄值原样保留。
+- 人群映射：UI 使用欧美白人、中国人、东亚人、东南亚人、非裔、中东人、拉丁裔短标签。任务输入仅保存短标签，Prompt 渲染时注入对应完整族裔描述，并同步写入 user message 与 `rolelessPrompt`；未知历史人群值原样保留。
+- 服饰规划与试穿参考图映射：1–5 张服装图 + 恰好 1 张模特图按真实 `userImages` 顺序映射为 A-F，两阶段 Prompt 都不再固定假设 B 是模特；缺失服装图、缺失模特或多张模特图时快速失败。试穿 `negative_prompt` 作为负向约束进入 system 和 `rolelessPrompt`。
 - 主要文件：
   - `desktop/src-tauri/src/services/local_task_executor*`
   - `desktop/src-tauri/tests/local_task_executor.rs`
@@ -765,7 +775,7 @@ M7 真实场景生图闭环
 ### M7-T02 场景任务调用 ModelGateway
 
 - 依赖：M7-T01、M6-T03。
-- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；真实 prompt 渲染、sync / stream / async-task Provider 调用仍待后续切片。
+- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；服饰菜单已补充 `clothing-base-model-generation` 文生图、`clothing-scene-planning` 图生文规划映射和 `clothing-tryon-generation` 逐动作出图映射。基准模特 Prompt 支持婴儿、儿童、青少年、青年、中年、老年；规划阶段会渲染 `clothing_scene_planning.toml` 并要求模型输出可展示的场景/动作结构，第三步出图阶段会渲染 `clothing_tryon_generation.toml` 并拼接用户上传服装图、用户选择模特和第二步选中的场景动作。服饰基准模特、规划和试穿执行路径要求真实 provider，`mock-local` 只保留为底层 adapter/测试替身。真实同步 HTTP 和文本流式调用入口已接入；`async-task` Provider 提交与轮询仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/services/model_gateway*`
@@ -783,7 +793,7 @@ M7 真实场景生图闭环
 ### M7-T03 下载结果到 assets
 
 - 依赖：M7-T02、M2-T02。
-- 当前状态：已完成第一版。`LocalTaskExecutor` 会把图片类任务的 ModelGateway 输出保存为 `generated` 资产，支持 deterministic adapter 返回的 PNG data URL，也支持 HTTP(S) 结果 URL 下载；结果先经过 `cache/tmp` 再 atomic rename 到 `assets/generated`，并写入 `generation_assets` 输出关系和 `task.result-saved` 事件。真实 Provider 生成请求仍依赖后续 M6/M7 切片继续接入。
+- 当前状态：已完成第一版。`LocalTaskExecutor` 会把图片类任务的 ModelGateway 输出保存为 `generated` 资产，支持 deterministic adapter 返回的 PNG data URL，也支持 HTTP(S) 结果 URL 下载；结果先经过 `cache/tmp` 再 atomic rename 到 `assets/generated`，并写入 `generation_assets` 输出关系和 `task.result-saved` 事件。真实同步 HTTP 生成请求已接入；`async-task` Provider 结果轮询仍依赖后续 M6/M7 切片。
 - 主要文件：
   - `desktop/src-tauri/src/services/assets*`
   - `desktop/src-tauri/src/services/generation*`
@@ -873,7 +883,8 @@ M7 真实场景生图闭环
 
 ### PromptPlan
 
-- [ ] 商品详情图和服饰试穿要求 confirmed PromptPlan。
+- [ ] 商品详情图要求 confirmed PromptPlan。
+- [ ] 服饰试穿要求先完成 `clothing-scene-planning` 结构化规划。
 - [ ] 场景图 MVP 可无 `promptPlanId`。
 - [ ] task 创建时保存 `PromptPlanSnapshot`。
 - [ ] 编辑原 plan 不影响历史 task。
@@ -887,6 +898,7 @@ M7 真实场景生图闭环
 - [x] `provider_profile_id` 不能绕过 allowlist。
 - [x] 保存配置或 secret 后 `CapabilityPort` 立即反映。
 - [x] provider 可用性持久化，修改 API Key、模型或 endpointPath 后自动失效。
+- [x] 切换离开并返回已配置 Provider 后恢复 API Key 遮罩状态，不自动 reveal 明文，且过期状态/明文响应不会覆盖当前 Provider。
 
 ### Windows 兼容
 

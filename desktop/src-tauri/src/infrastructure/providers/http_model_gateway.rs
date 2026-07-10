@@ -5,9 +5,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
-use reqwest::{StatusCode, Url};
+use reqwest::Url;
 use serde_json::{json, Value};
 
+use crate::domain::errors::{normalize_provider_http_error, ProviderTransportErrorKind};
 use crate::infrastructure::providers::openai_compatible::normalize_openai_compatible_response;
 use crate::services::model_gateway::{
     ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
@@ -95,35 +96,43 @@ impl HttpModelGatewayAdapter {
         {
             Ok(response) => response,
             Err(source) => {
-                let message = if source.is_timeout() {
-                    "Provider 调用超时。"
+                let kind = if source.is_timeout() {
+                    ProviderTransportErrorKind::Timeout
                 } else {
-                    "Provider 网络调用失败。"
+                    ProviderTransportErrorKind::Network
                 };
                 self.write_diagnostic(json!({
                     "timestampMs": current_timestamp_ms(),
                     "event": "request_error",
                     "elapsedMs": request_started_at.elapsed().as_millis(),
                     "isTimeout": source.is_timeout(),
-                    "error": message,
                     "source": source.to_string(),
                 }));
-                return Err(ModelGatewayError::ProviderUnavailable(message.to_string()));
+                return Err(ModelGatewayError::ProviderTransport(kind));
             }
         };
         let status = response.status();
+        let status_code = i64::from(status.as_u16());
+        if !status.is_success() {
+            let response_text = response.text().unwrap_or_default();
+            let error = provider_http_error(status_code, &response_text);
+            self.write_diagnostic(response_diagnostic_payload(
+                "stream_response_error",
+                request_started_at.elapsed().as_millis(),
+                status_code,
+                false,
+                &response_text,
+                provider_http_error_code(&error),
+            ));
+            return Err(error);
+        }
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "stream_response_status",
             "elapsedMs": request_started_at.elapsed().as_millis(),
-            "status": status.as_u16(),
-            "success": status.is_success(),
+            "status": status_code,
+            "success": true,
         }));
-        if !status.is_success() {
-            return Err(ModelGatewayError::ProviderUnavailable(
-                provider_status_error(status),
-            ));
-        }
 
         let mut pending = Vec::new();
         let mut output_text = String::new();
@@ -221,7 +230,7 @@ impl HttpModelGatewayAdapter {
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "stream_output_text",
-            "outputText": output_text,
+            "outputTextCharCount": output_text.chars().count(),
         }));
 
         Ok(ModelGatewayAdapterResult {
@@ -280,46 +289,53 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
         {
             Ok(response) => response,
             Err(source) => {
-                let message = if source.is_timeout() {
-                    "Provider 调用超时。"
+                let kind = if source.is_timeout() {
+                    ProviderTransportErrorKind::Timeout
                 } else {
-                    "Provider 网络调用失败。"
+                    ProviderTransportErrorKind::Network
                 };
                 self.write_diagnostic(json!({
                     "timestampMs": current_timestamp_ms(),
                     "event": "request_error",
                     "elapsedMs": request_started_at.elapsed().as_millis(),
                     "isTimeout": source.is_timeout(),
-                    "error": message,
                     "source": source.to_string(),
                 }));
-                return Err(ModelGatewayError::ProviderUnavailable(message.to_string()));
+                return Err(ModelGatewayError::ProviderTransport(kind));
             }
         };
         let status = response.status();
-        let response_text = response.text().map_err(|_| {
+        let status_code = i64::from(status.as_u16());
+        let response_text_result = response.text();
+        if !status.is_success() {
+            let response_text = response_text_result.unwrap_or_default();
+            let error = provider_http_error(status_code, &response_text);
+            self.write_diagnostic(response_diagnostic_payload(
+                "response",
+                request_started_at.elapsed().as_millis(),
+                status_code,
+                false,
+                &response_text,
+                provider_http_error_code(&error),
+            ));
+            return Err(error);
+        }
+        let response_text = response_text_result.map_err(|_| {
             ModelGatewayError::ProviderUnavailable("读取 Provider 响应失败。".to_string())
         })?;
-        self.write_diagnostic(json!({
-            "timestampMs": current_timestamp_ms(),
-            "event": "response",
-            "elapsedMs": request_started_at.elapsed().as_millis(),
-            "status": status.as_u16(),
-            "success": status.is_success(),
-            "responseByteLength": response_text.len(),
-            "rawResponse": response_text,
-        }));
-        if !status.is_success() {
-            return Err(ModelGatewayError::ProviderUnavailable(
-                provider_status_error(status),
-            ));
-        }
+        self.write_diagnostic(response_diagnostic_payload(
+            "response",
+            request_started_at.elapsed().as_millis(),
+            status_code,
+            true,
+            &response_text,
+            None,
+        ));
         let response_json: Value = serde_json::from_str(&response_text).map_err(|_| {
             self.write_diagnostic(json!({
                 "timestampMs": current_timestamp_ms(),
                 "event": "response_parse_failed",
                 "responseByteLength": response_text.len(),
-                "rawResponse": response_text,
             }));
             ModelGatewayError::ProviderUnavailable("Provider 返回的 JSON 无法解析。".to_string())
         })?;
@@ -390,18 +406,55 @@ pub fn build_model_gateway_request_body(
         }));
     }
 
-    let mut body = json!({
+    if config.provider_profile_id == "openai"
+        && config.endpoint_path.contains("/images/generations")
+    {
+        if input.get("kind").and_then(Value::as_str) != Some("clothing-base-model-generation") {
+            return Err(ModelGatewayError::ProviderRequestInvalid(
+                "OpenAI 文生图当前仅支持服饰基准模特生成。".to_string(),
+            ));
+        }
+        if !images.is_empty() {
+            return Err(ModelGatewayError::ProviderRequestInvalid(
+                "OpenAI 服饰基准模特生成不支持参考图。".to_string(),
+            ));
+        }
+        return Ok(json!({
+            "model": config.model,
+            "prompt": prompt.roleless,
+            "size": "1024x1536",
+        }));
+    }
+
+    if config.provider_profile_id == "volcengine"
+        && config.endpoint_path.contains("/images/generations")
+    {
+        let mut body = json!({
+            "model": config.model,
+            "prompt": prompt.roleless,
+            "size": "2K",
+            "response_format": "url",
+            "watermark": false,
+        });
+        match images.as_slice() {
+            [] => {}
+            [image] => {
+                body["image"] = Value::String(image.clone());
+            }
+            _ => {
+                body["image"] = Value::Array(images.into_iter().map(Value::String).collect());
+            }
+        }
+        return Ok(body);
+    }
+
+    let body = json!({
         "model": config.model,
         "prompt": prompt.roleless,
         "images": images,
         "max_tokens": max_output_tokens,
         "temperature": 0.2,
     });
-    if config.provider_profile_id == "volcengine"
-        && config.endpoint_path.contains("/images/generations")
-    {
-        body["watermark"] = Value::Bool(false);
-    }
 
     Ok(body)
 }
@@ -605,14 +658,52 @@ fn provider_endpoint(base_url: &str, path: &str) -> Result<Url, ModelGatewayErro
     Ok(url)
 }
 
-fn provider_status_error(status: StatusCode) -> String {
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return "Provider 鉴权失败，请检查 API Key 和模型权限。".to_string();
+fn provider_http_error(status_code: i64, response_body: &str) -> ModelGatewayError {
+    let raw_error_code = serde_json::from_str::<Value>(response_body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/code")
+                .or_else(|| value.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let provider_error_code =
+        normalize_provider_http_error(status_code, raw_error_code.as_deref()).provider_error_code;
+
+    ModelGatewayError::ProviderHttp {
+        status_code,
+        provider_error_code,
     }
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        return "Provider 请求过于频繁，请稍后重试。".to_string();
+}
+
+fn provider_http_error_code(error: &ModelGatewayError) -> Option<&str> {
+    match error {
+        ModelGatewayError::ProviderHttp {
+            provider_error_code,
+            ..
+        } => provider_error_code.as_deref(),
+        _ => None,
     }
-    format!("Provider 调用失败（HTTP {}）。", status.as_u16())
+}
+
+fn response_diagnostic_payload(
+    event: &str,
+    elapsed_ms: u128,
+    status_code: i64,
+    success: bool,
+    response_body: &str,
+    provider_error_code: Option<&str>,
+) -> Value {
+    json!({
+        "timestampMs": current_timestamp_ms(),
+        "event": event,
+        "elapsedMs": elapsed_ms,
+        "status": status_code,
+        "success": success,
+        "responseByteLength": response_body.len(),
+        "providerErrorCode": provider_error_code,
+    })
 }
 
 fn append_diagnostic_json_line(path: &Path, payload: Value) -> std::io::Result<()> {
@@ -679,12 +770,14 @@ fn sanitize_diagnostic_value(key: Option<&str>, value: &Value) -> Value {
                 .collect();
             Value::Object(sanitized)
         }
-        Value::Array(items) => Value::Array(
-            items
+        Value::Array(items) => json!({
+            "kind": "array",
+            "itemCount": items.len(),
+            "items": items
                 .iter()
                 .map(|item| sanitize_diagnostic_value(key, item))
-                .collect(),
-        ),
+                .collect::<Vec<_>>(),
+        }),
         Value::String(text) => sanitize_diagnostic_string(key, text),
         Value::Number(_) | Value::Bool(_) | Value::Null => value.clone(),
     }
@@ -696,8 +789,7 @@ fn sanitize_diagnostic_string(key: Option<&str>, text: &str) -> Value {
     }
 
     match key {
-        Some("model") | Some("role") | Some("type") | Some("text") | Some("content")
-        | Some("prompt") | Some("instructions") => Value::String(text.to_string()),
+        Some("model") | Some("role") | Some("type") => Value::String(text.to_string()),
         Some("image_url") | Some("url") => json!({
             "urlCharCount": text.chars().count(),
         }),
@@ -810,10 +902,11 @@ fn value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_complete_sse_blocks, parse_model_gateway_sse_event,
-        sanitize_model_gateway_request_for_diagnostics, HttpModelGatewayRequestConfig,
-        ModelGatewaySseEvent,
+        drain_complete_sse_blocks, parse_model_gateway_sse_event, provider_http_error,
+        response_diagnostic_payload, sanitize_model_gateway_request_for_diagnostics,
+        HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
     };
+    use crate::services::model_gateway::ModelGatewayError;
     use serde_json::json;
 
     #[test]
@@ -845,22 +938,102 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_request_keeps_full_prompt_text_for_debugging() {
+    fn diagnostic_request_summarizes_sensitive_text_and_array_shape() {
         let diagnostic = sanitize_model_gateway_request_for_diagnostics(
             &HttpModelGatewayRequestConfig {
-                endpoint_path: "/images/generations",
-                model: "doubao-seedream-4-0-250828",
-                provider_profile_id: "volcengine",
+                endpoint_path: "/v1/responses",
+                model: "gpt-4.1-mini",
+                provider_profile_id: "openai",
             },
             &json!({
-                "model": "doubao-seedream-4-0-250828",
-                "prompt": "完整商品生图 prompt",
-                "images": ["data:image/png;base64,abc123"],
+                "model": "gpt-4.1-mini",
+                "prompt": "prompt-raw-marker",
+                "instructions": "instructions-raw-marker",
+                "input": [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,image-raw-marker"
+                        },
+                        {
+                            "type": "input_text",
+                            "text": "content-raw-marker sk-diagnostic-secret-marker"
+                        }
+                    ]
+                }],
             }),
         );
+        let serialized = diagnostic.to_string();
 
-        assert_eq!(diagnostic["body"]["prompt"], "完整商品生图 prompt");
-        assert_eq!(diagnostic["body"]["images"][0]["mimeType"], "image/png");
-        assert_eq!(diagnostic["body"]["images"][0]["kind"], "imageDataUrl");
+        assert_eq!(diagnostic["providerProfileId"], "openai");
+        assert_eq!(diagnostic["endpointPath"], "/v1/responses");
+        assert_eq!(diagnostic["model"], "gpt-4.1-mini");
+        assert_eq!(diagnostic["body"]["model"], "gpt-4.1-mini");
+        assert_eq!(diagnostic["body"]["prompt"]["stringCharCount"], 17);
+        assert_eq!(diagnostic["body"]["instructions"]["stringCharCount"], 23);
+        assert_eq!(diagnostic["body"]["input"]["itemCount"], 1);
+        assert_eq!(
+            diagnostic["body"]["input"]["items"][0]["content"]["itemCount"],
+            2
+        );
+        assert!(!serialized.contains("prompt-raw-marker"));
+        assert!(!serialized.contains("instructions-raw-marker"));
+        assert!(!serialized.contains("content-raw-marker"));
+        assert!(!serialized.contains("data:image/png;base64,image-raw-marker"));
+        assert!(!serialized.contains("sk-diagnostic-secret-marker"));
+    }
+
+    #[test]
+    fn provider_http_error_extracts_nested_and_top_level_codes() {
+        assert_eq!(
+            provider_http_error(
+                404,
+                r#"{"error":{"code":"ModelNotOpen","message":"raw marker"}}"#,
+            ),
+            ModelGatewayError::ProviderHttp {
+                status_code: 404,
+                provider_error_code: Some("ModelNotOpen".to_string()),
+            }
+        );
+        assert_eq!(
+            provider_http_error(400, r#"{"code":"InvalidParameter"}"#),
+            ModelGatewayError::ProviderHttp {
+                status_code: 400,
+                provider_error_code: Some("InvalidParameter".to_string()),
+            }
+        );
+        assert_eq!(
+            provider_http_error(500, "not json"),
+            ModelGatewayError::ProviderHttp {
+                status_code: 500,
+                provider_error_code: None,
+            }
+        );
+        assert_eq!(
+            provider_http_error(500, r#"{"code":"server_error sk-test-secret"}"#),
+            ModelGatewayError::ProviderHttp {
+                status_code: 500,
+                provider_error_code: Some("server_error_redacted".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn response_diagnostic_omits_raw_response_body() {
+        let diagnostic = response_diagnostic_payload(
+            "response",
+            12,
+            404,
+            false,
+            r#"{"error":{"code":"ModelNotOpen","message":"diagnostic-response-marker"}}"#,
+            Some("ModelNotOpen"),
+        );
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["providerErrorCode"], "ModelNotOpen");
+        assert!(diagnostic["responseByteLength"].as_u64().unwrap() > 0);
+        assert!(!serialized.contains("diagnostic-response-marker"));
+        assert!(!serialized.contains("rawResponse"));
     }
 }

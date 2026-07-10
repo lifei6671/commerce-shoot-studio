@@ -136,6 +136,15 @@ fn provider_probe_body(probe: &ProviderConnectionProbe) -> Value {
         return body;
     }
 
+    if probe.provider_profile_id == "openai" && probe.endpoint_path.contains("/images/generations")
+    {
+        return json!({
+            "model": probe.model,
+            "prompt": "hello",
+            "size": "1024x1024",
+        });
+    }
+
     if probe.provider_profile_id == "openai" && probe.endpoint_path.contains("/responses") {
         return json!({
             "model": probe.model,
@@ -361,6 +370,19 @@ mod tests {
             .starts_with("data:image/png;base64,"));
         assert_eq!(content[1]["type"], "input_text");
         assert_eq!(content[1]["text"], "hello");
+    }
+
+    #[test]
+    fn builds_openai_text_to_image_probe_for_images_generations() {
+        let body = provider_probe_body(&probe("text-to-image", "/v1/images/generations", "openai"));
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["prompt"], "hello");
+        assert_eq!(body["size"], "1024x1024");
+        assert!(body.get("input").is_none());
+        assert!(body.get("messages").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]

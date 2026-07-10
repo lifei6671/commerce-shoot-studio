@@ -5,9 +5,11 @@ export type ModelCapability = {
     | "listing-copy"
     | "prompt-plan"
     | "product-selling-points"
+    | "clothing-scene-planning"
     | "viral-style-analysis"
     | "scene-image-generation"
     | "product-detail-generation"
+    | "clothing-base-model-generation"
     | "clothing-tryon-generation"
     | "image-edit";
   category: "text-to-text" | "text-to-image" | "image-to-image" | "image-to-text";
@@ -15,7 +17,7 @@ export type ModelCapability = {
   unavailableReason?: string;
   displayName?: string;
   maxInputAssets?: number;
-  supportedAspectRatios?: Array<"1:1" | "3:4" | "9:16" | "16:9">;
+  supportedAspectRatios?: Array<"1:1" | "2:3" | "3:4" | "9:16" | "16:9">;
   maxImageCount?: number;
   estimatedCreditCost?: number;
 };

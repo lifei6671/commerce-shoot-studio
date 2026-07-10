@@ -449,11 +449,12 @@ remote mode 行为：
 
 ```ts
 export interface AssetPort {
-  importImages(input: ImportImagesInput): Promise<Asset[]>;
-  listAssets(query: AssetQuery): Promise<AssetPage>;
+  listAssets(query?: AssetQuery): Promise<AssetPage>;
+  listBuiltinModels(): Promise<BuiltinModelAsset[]>;
   getAsset(assetId: string): Promise<Asset>;
-  deleteAsset(assetId: string): Promise<void>;
+  importImages(input: ImportImagesInput): Promise<Asset[]>;
   revealAsset(assetId: string): Promise<void>;
+  deleteAsset(assetId: string): Promise<void>;
 }
 ```
 
@@ -469,11 +470,15 @@ export interface AssetPort {
 - 复制到 app workspace assets。
 - SQLite 只保存相对路径和元数据。
 - Tauri asset protocol 渲染。
+- `listBuiltinModels()` 读取安装包内 `builtin-models/` 和 `builtin-model-thumbnails/`；这些内置模特是 local mode 的 bundled resource，不导入 workspace，不进入用户资产删除和 GC 链路。
+- 模特资产导入后由 Rust 在本地生成 `assets/thumbnail/{assetId}.png` 的 320×320 顶部居中头像缩略图；`AssetDto.thumbnailPath` 只在文件存在时返回，模特库展示缩略图，任务输入和全身预览仍使用原图。
+- 旧模特资产没有缩略图时回退原图；删除资产并运行 GC 时同步清理对应缩略图。
 
 远端实现：
 
 - 上传到对象存储。
 - 返回 signed URL 或 CDN URL。
+- 当前尚未实现 remote Asset adapter。未来 remote adapter 在没有云端内置模特 URL 合同前，`listBuiltinModels()` 必须返回空数组，不返回 local bundled path，也不把内置模特伪装成 workspace 资产。
 
 ### 5.9 GenerationPort
 
@@ -532,15 +537,22 @@ export interface PromptPlanPort {
 职责：
 
 - 商品详情页模块计划。
-- 服饰场景计划。
-- 业务方案编辑和确认。
+- 商品详情业务方案编辑和确认。
 - 根据业务输入生成可展示的计划摘要，但不向客户端暴露系统 Prompt 模板。
+- 当前服饰场景规划不属于 `PromptPlanPort`：服饰菜单通过 `GenerationPort` 创建 `clothing-scene-planning` 任务。
 
 商品菜单详情页模块清单以 `docs/2026-07-08-product-menu-detail-modules.md` 为准。当前商品菜单支持 14 个详情页模块：首屏主视觉、核心卖点图、使用场景图、多角度图、场景氛围图、商品细节图、品牌故事图、尺寸/容量/尺码图、效果对比图、详细规格/参数表、工艺制作图、配件/赠品图、系列展示图、商品成分图。
 
 MVP 适用范围：
 
-- 商品详情图和服饰试穿采用两阶段流程：先通过 `PromptPlanPort` 创建、编辑并确认方案，再通过 `GenerationPort.createTask` 创建资产型任务。
+- 商品详情图采用两阶段流程：先通过 `PromptPlanPort` 创建、编辑并确认方案，再通过 `GenerationPort.createTask` 创建资产型任务。
+- 服饰菜单采用 `GenerationPort` 三阶段链路：用户选择 AI 生成模特时，先创建 `clothing-base-model-generation` 文生图任务，基于性别、年龄、国家/族群、身材与外貌补充生成单人全身的基准模特图；年龄支持婴儿、儿童、青少年、青年、中年、老年，且 Prompt 必须按照所选年龄阶段生成，不得将未成年人错误改写为成年人。随后创建 `clothing-scene-planning` 图生文规划任务，输入服装原图、基准模特全身图、用户选择/自定义场景，输出可展示的场景与动作结构；该规划 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_scene_planning.toml` 配置。规划结果展示到第二步场景选择后默认全部未选中，用户手动选择的场景动作、画幅和角度修改保存在 App 层，生成完成或切换菜单后仍保留。用户确认动作后再创建 `clothing-tryon-generation` 资产型任务，第三步正式出图 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_tryon_generation.toml` 配置，并拼接第一步用户上传的服装图、用户选择的模特图、第二步用户选择的场景、图片比例、拍摄画幅、拍摄角度、拍摄位置和动作要求，明确约束模型严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。基准模特、服饰规划和服饰试穿执行路径要求真实 provider，默认 `mock-local` 只作为测试替身，不能向 UI 展示为真实生成结果。模型配置页的 `图生文` 类别同时覆盖商品卖点提取和服饰场景规划；旧 workspace 只有商品卖点图生文真实配置时，runtime 可按同类别复用该可用配置执行服饰规划。`clothing-base-model-generation` 则必须解析其独立的 `text-to-image` capability，不能复用 `clothing-tryon-generation` 的图生图配置。
+- 基准模特体型 UI 固定为纤细、苗条、精瘦、匀称、健美、运动型、肌肉型、壮硕、结实、丰满、微胖、大码，默认匀称且不提供肥胖；`generation_tasks.input_json` 只冻结短标签，runtime 在渲染 Prompt 时查表注入完整描述。大码复用丰满描述；历史 `标准`、`肌肉` 分别兼容为匀称、肌肉型，未知值原样保留。
+- 基准模特性别 UI 使用男、女短标签；runtime 在渲染 Prompt 时注入对应的自然发型默认描述。用户填写的外貌细节与内置发型描述冲突时，以用户输入为主，不能强行保留冲突的默认发型。
+- 基准模特输出必须严格为 2:3 纵向比例（宽:高=2:3），Prompt 的 system、user 和 `rolelessPrompt` 均明确禁止其它比例。
+- 服饰试穿支持最多 5 张服装参考图和 1 张模特图；runtime 必须按 `userImages` 实际顺序生成 A-F 角色映射，再渲染 system、user、output 和 `rolelessPrompt`，不能固定假设 B 永远是模特。`clothing_tryon_generation.toml` 的 `negative_prompt` 以“负向约束”并入真实发送的 Prompt。
+- 基准模特年龄 UI 使用婴儿、儿童、青少年、青年、中年、老年短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整年龄阶段描述，user message 与 `rolelessPrompt` 保持一致；未知历史年龄值原样保留。
+- 基准模特人群 UI 使用欧美白人、中国人、东亚人、东南亚人、非裔、中东人、拉丁裔短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整族裔描述，user message 与 `rolelessPrompt` 保持一致；未知历史人群值原样保留。
 - 场景图第一版采用单阶段流程：直接用 `SceneImageGenerationInput.intent` 创建任务，不强制要求 `promptPlanId`。
 - 场景图片包计划可以作为后续增强能力加入，但不能阻塞 M7 的真实场景生图闭环。
 
@@ -663,9 +675,13 @@ export type RuntimeInfo = {
 export type ModelCapability = {
   id:
     | "listing-copy"
+    | "prompt-plan"
+    | "product-selling-points"
     | "viral-style-analysis"
     | "scene-image-generation"
     | "product-detail-generation"
+    | "clothing-base-model-generation"
+    | "clothing-scene-planning"
     | "clothing-tryon-generation"
     | "image-edit";
   category: "text-to-text" | "text-to-image" | "image-to-image" | "image-to-text";
@@ -673,7 +689,7 @@ export type ModelCapability = {
   unavailableReason?: string;
   displayName?: string;
   maxInputAssets?: number;
-  supportedAspectRatios?: Array<"1:1" | "3:4" | "9:16" | "16:9">;
+  supportedAspectRatios?: Array<"1:1" | "2:3" | "3:4" | "9:16" | "16:9">;
   maxImageCount?: number;
   estimatedCreditCost?: number;
 };
@@ -683,7 +699,9 @@ export type ModelCapability = {
 
 local mode 下限制来自本地 ProviderProfile；remote mode 下限制来自 SaaS 后端。UI 不要硬编码图片数量、比例和输入数量限制。
 
-`PromptPlan` 是生成方案能力，不作为 `ModelCapability` 暴露。MVP 中 PromptPlan 由 runtime 规则和内置模板生成；未来如果需要 LLM 辅助，也应由 `PromptPlanPort` 内部调用文本能力，不让 UI 感知模型配置。
+`clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation` 是 real-provider-only 能力：`mock-local` 默认配置只用于模型配置和自动化测试，不得让 `CapabilityPort.available` 返回 `true`。基准模特能力固定 `maxInputAssets = 0`、`supportedAspectRatios = ["2:3"]`、`maxImageCount = 1`；服饰规划和试穿最多接收 5 张服装图加 1 张模特图，并只声明服饰 UI 当前支持的 `3:4`、`1:1`、`9:16` 比例。
+
+`PromptPlanPort` 是面向业务流程的生成方案端口，不等同于模型路由能力；当前 local runtime 同时公开 `prompt-plan` 作为 `ModelCapability`，用于模型配置、可用性计算和内部模型调用。页面仍只通过 `PromptPlanPort` 创建、编辑和确认方案，不直接读取 provider、model、baseUrl 或 Prompt 模板。
 
 ### 6.3 LocalModelConfigView
 
@@ -712,6 +730,7 @@ export type LocalModelConfigView = {
 - `executionMode` 表示出参模式。`auto` 由 adapter 根据响应自动识别。
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
 - `baseUrl` 只能作为内置 provider profile 的只读展示字段，MVP 不作为用户自由输入字段。
+- OpenAI 当前只暴露已实现的文生文、图生文和纯文生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation`，以及 `image-to-image` / `clothing-tryon-generation` / `image-edit`，在 Images Edits 或 Responses `image_generation` 工具链路和比例语义落地前不对 OpenAI 开放。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
 - API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。
@@ -776,6 +795,8 @@ export type ResolvedSecretScope = SecretScope & {
 
 `SecretScope` 是前端可传入范围，不包含 `workspaceId`。runtime 必须使用当前 active workspace 注入 `ResolvedSecretScope.workspaceId`，再读写 SQLite 本地密钥表。API Key 可以在 SQLite 专用表中明文落盘，这是 MVP 明确接受的本地风险；但不能进入日志、task events、settings、asset、导出默认包或前端 DTO。
 
+模型配置页切换 Provider 时必须按新 Provider 与当前模型类别的 capability 调用 `SecretPort.getSecretStatus`，恢复该 Provider 已持久化的脱敏配置状态。切换本身不得调用 `revealSecret` 或把明文缓存到普通配置 DTO；只有用户主动点击眼睛按钮后才允许按当前 scope 读取明文。Provider 快速切换和 reveal 请求必须丢弃过期响应，避免旧 Provider 的状态或明文覆盖当前卡片。
+
 ### 6.5 Asset
 
 ```ts
@@ -785,19 +806,30 @@ export type Asset = {
   name: string;
   originalName: string;
   mimeType: string;
+  relativePath: string;
   sha256: string;
   width?: number;
   height?: number;
   sizeBytes: number;
-  url: string;
+  lifecycle: "staged" | "active" | "deleted";
+  url?: string;
   localPath?: string;
+  thumbnailPath?: string;
   deletedAt?: string;
   createdAt: string;
   updatedAt: string;
 };
+
+export type BuiltinModelAsset = {
+  id: string;
+  label: string;
+  fileName: string;
+  path: string;
+  thumbnailPath?: string;
+};
 ```
 
-`localPath` 只允许在本地 adapter 返回；SaaS adapter 不保证存在。
+`localPath` 只允许在本地 adapter 返回；SaaS adapter 不保证存在。`BuiltinModelAsset.path` 和 `BuiltinModelAsset.thumbnailPath` 当前都是 local bundled resource 的绝对路径，仅供 Tauri asset protocol 转换，不能持久化到 SQLite、任务或导出元数据；当前 remote adapter 返回空的内置模特列表。
 
 ### 6.6 GenerationTask
 
@@ -965,6 +997,8 @@ export type PromptPlanSnapshot = {
 export type ModelInvocationInput =
   | SceneImageGenerationInput
   | ProductDetailGenerationInput
+  | ClothingBaseModelGenerationInput
+  | ClothingScenePlanningInput
   | ClothingTryOnGenerationInput
   | ListingCopyInput
   | ImageUnderstandingInput;
@@ -988,7 +1022,7 @@ export type SceneImageGenerationInput = {
   };
 };
 
-`SceneImageGenerationInput` 不包含 `promptPlanId` 是明确设计：MVP 场景图走单阶段结构化 intent。商品详情图和服饰试穿才要求先确认 PromptPlan。
+`SceneImageGenerationInput` 不包含 `promptPlanId` 是明确设计：MVP 场景图走单阶段结构化 intent。商品详情图要求先确认 PromptPlan；服饰菜单可先通过 `clothing-base-model-generation` 生成基准模特，再通过 `clothing-scene-planning` 任务生成场景/动作规划，最后创建 `clothing-tryon-generation` 资产任务。
 
 export type ProductDetailGenerationInput = {
   idempotencyKey?: string;
@@ -1005,17 +1039,48 @@ export type ProductDetailGenerationInput = {
   };
 };
 
+export type ClothingBaseModelGenerationInput = {
+  idempotencyKey?: string;
+  capability: "clothing-base-model-generation";
+  category: "text-to-image";
+  inputAssetIds?: string[];
+  intent: {
+    workspace: "clothing";
+    gender: string;
+    age: "婴儿" | "儿童" | "青少年" | "青年" | "中年" | "老年";
+    ethnicity: string;
+    body: string;
+    appearance?: string;
+  };
+};
+
 export type ClothingTryOnGenerationInput = {
   idempotencyKey?: string;
   capability: "clothing-tryon-generation";
   category: "image-to-image";
   inputAssetIds: string[];
-  promptPlanId: string;
+  promptPlanId?: string;
   intent: {
     workspace: "clothing";
     modelAssetId?: string;
     clothingAssetIds: string[];
     sceneIds: string[];
+    aspectRatio: "1:1" | "3:4" | "9:16";
+  };
+};
+
+export type ClothingScenePlanningInput = {
+  idempotencyKey?: string;
+  capability: "clothing-scene-planning";
+  category: "image-to-text";
+  inputAssetIds: string[];
+  intent: {
+    workspace: "clothing";
+    modelAssetId?: string;
+    clothingAssetIds: string[];
+    selectedScenes: string[];
+    customScene?: string;
+    aiRecommended: boolean;
     aspectRatio: "1:1" | "3:4" | "9:16";
   };
 };
@@ -1642,8 +1707,8 @@ ModelGatewayAdapter
 第一版必须覆盖当前界面上的模型类别：
 
 - `text-to-text`：AI 帮写、Prompt 优化、商品文案、场景方案。
-- `image-to-text`：图片理解、卖点提取、风格分析。
-- `text-to-image`：商品图、场景图、模特图生成。
+- `image-to-text`：图片理解、卖点提取、风格分析、服饰场景动作规划。
+- `text-to-image`：商品图、场景图、`clothing-base-model-generation` 基准模特生成。
 - `image-to-image`：参考图生图、局部重绘、服饰试穿。
 
 未来如果新增 embedding、视频或音频，不直接改业务 UI，而是扩展 `ModelInvocationInput.category` 和 adapter。
@@ -1696,7 +1761,7 @@ custom-disabled
 - 限制下载文件大小和 MIME。
 - 所有 URL 入库前脱敏。
 - 导入 workspace 中的 provider 配置必须二次确认。
-- debug log 永远不保存 Authorization、header、raw response。
+- 本地调试诊断日志只记录请求/响应状态、耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
 
 ### 10.5 Adapter 接口
 
@@ -2147,7 +2212,9 @@ PromptPlan：
 - 编辑原 plan 不影响历史任务。
 - 任务详情读取冻结的 `PromptPlanSnapshot`，不重新拼当前 plan。
 - SQLite 不保存 raw prompt。
-- 商品详情图和服饰试穿要求 confirmed PromptPlan。
+- 商品详情图要求 confirmed PromptPlan。
+- 服饰 AI 生成模特使用独立的 `clothing-base-model-generation` 文生图 capability，并支持婴儿、儿童、青少年、青年、中年、老年年龄阶段。
+- 服饰试穿要求先完成 `clothing-scene-planning` 结构化规划。
 - 场景图 MVP 可不传 `promptPlanId`，直接用结构化 intent 创建任务。
 
 Task：

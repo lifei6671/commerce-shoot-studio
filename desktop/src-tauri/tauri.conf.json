@@ -33,16 +33,28 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$HOME/**", "$TEMP/**", "/private/var/folders/**", "/var/folders/**"]
+          "allow": [
+            "$HOME/**",
+            "$TEMP/**",
+            "$RESOURCE/**/*",
+            "/private/var/folders/**",
+            "/var/folders/**"
+          ]
         }
       },
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'",
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "resources/builtin-models/[!.]*": "builtin-models/",
+      "resources/builtin-model-thumbnails/*.png": "builtin-model-thumbnails/"
+    },
     "icon": [
       "icons/icon.icns",
       "icons/icon.ico",

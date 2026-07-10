@@ -16,6 +16,7 @@ impl ModelGatewayAdapter for DeterministicModelGatewayAdapter {
             request.capability_id,
             "scene-image-generation"
                 | "product-detail-generation"
+                | "clothing-base-model-generation"
                 | "clothing-tryon-generation"
                 | "image-edit"
         ) {
@@ -155,11 +156,88 @@ fn deterministic_output_text(capability_id: &str, input: &serde_json::Value) -> 
         .to_string();
     }
 
+    if capability_id == "clothing-scene-planning" {
+        return deterministic_clothing_scene_plan_output().to_string();
+    }
+
     if capability_id == "prompt-plan" {
         return deterministic_prompt_plan_output(input).to_string();
     }
 
     format!("mock output for {capability_id}")
+}
+
+fn deterministic_clothing_scene_plan_output() -> serde_json::Value {
+    let scenes = [
+        (
+            "都市街头",
+            "城市核心商圈人行道，午后暖调阳光洒落，背景是轻奢门店招牌，地面为浅灰色水磨石材质",
+            "街头时尚摄影，自然光充足照明，色彩还原准确，对焦清晰锐利，8K高清商业电商质感",
+        ),
+        (
+            "通勤咖啡馆",
+            "临街咖啡馆外摆座位，早晨柔和侧光，背景有玻璃窗反光与木质桌椅",
+            "都市通勤服饰摄影，柔和自然侧光，背景轻微虚化，商业成片质感",
+        ),
+        (
+            "公园步道",
+            "城市公园浅色石板步道，初秋绿植和低饱和背景，空气通透明亮",
+            "户外生活方式摄影，自然光均匀，服装色彩准确，画面清爽真实",
+        ),
+        (
+            "极简影棚",
+            "浅灰无缝背景纸，柔和棚拍布光，地面干净无反光，突出服装轮廓",
+            "极简电商棚拍，柔和均匀布光，轮廓清晰，对焦锐利，真实商业质感",
+        ),
+    ];
+
+    serde_json::json!({
+        "scenes": scenes
+            .iter()
+            .enumerate()
+            .map(|(scene_index, (scene, anchor, segment))| {
+                serde_json::json!({
+                    "scene": scene,
+                    "sceneVisualAnchor": anchor,
+                    "scenePromptSegment": segment,
+                    "recommendedPoses": [
+                        {
+                            "cameraSetup": {
+                                "framing": "全身",
+                                "perspective": "正面",
+                                "shootingPosition": "平视机位"
+                            },
+                            "poseAction": format!("站立于{}，双手自然垂在身侧，抬头直视镜头，展示服装正面版型", scene)
+                        },
+                        {
+                            "cameraSetup": {
+                                "framing": "四分之三",
+                                "perspective": "3/4侧",
+                                "shootingPosition": "平视机位"
+                            },
+                            "poseAction": format!("身体微侧对镜头，一只手插裤袋，另一只手自然放松，展示服装侧面轮廓和垂坠感，动作编号 {}", scene_index + 1)
+                        },
+                        {
+                            "cameraSetup": {
+                                "framing": "全身",
+                                "perspective": "3/4侧",
+                                "shootingPosition": "低机位轻仰拍"
+                            },
+                            "poseAction": format!("呈自然行走步姿，双臂随步伐轻微摆动，目光看向斜前方，展示服装动态穿着效果")
+                        },
+                        {
+                            "cameraSetup": {
+                                "framing": "四分之三",
+                                "perspective": "正面",
+                                "shootingPosition": "平视近中景"
+                            },
+                            "poseAction": format!("抬手轻整理衣领或袖口，身体放松站立，表情自然，突出服装领口、肩线和面料细节")
+                        }
+                    ]
+                })
+            })
+            .collect::<Vec<_>>()
+    })
 }
 
 fn deterministic_prompt_plan_output(input: &serde_json::Value) -> serde_json::Value {

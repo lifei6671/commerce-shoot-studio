@@ -104,8 +104,8 @@ const categoryCatalogKeys = {
 
 const categoryCapabilityIds = {
   "image-to-image": ["clothing-tryon-generation", "image-edit"],
-  "image-to-text": ["product-selling-points"],
-  "text-to-image": ["scene-image-generation", "product-detail-generation"],
+  "image-to-text": ["product-selling-points", "clothing-scene-planning"],
+  "text-to-image": ["scene-image-generation", "product-detail-generation", "clothing-base-model-generation"],
   "text-to-text": ["listing-copy", "prompt-plan", "viral-style-analysis"],
 } satisfies Record<ModelCategoryId, ModelCapability["id"][]>;
 
@@ -173,6 +173,8 @@ export function ModelConfigPage({
   const [testingConfigIds, setTestingConfigIds] = useState<Set<ModelCategoryId>>(() => new Set());
   const testingConfigIdsRef = useRef<Set<ModelCategoryId>>(new Set());
   const [visibleApiKeyIds, setVisibleApiKeyIds] = useState<Set<ModelCategoryId>>(() => new Set());
+  const providerStatusRequestIdsRef = useRef<Partial<Record<ModelCategoryId, number>>>({});
+  const revealRequestIdsRef = useRef<Partial<Record<ModelCategoryId, number>>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -192,54 +194,139 @@ export function ModelConfigPage({
   }, [modelConfigPort]);
 
   function updateConfig(id: ModelCategoryId, patch: Partial<ModelConfig>) {
-    if (patch.provider) {
-      setVisibleApiKeyIds((currentIds) => {
-        const nextIds = new Set(currentIds);
-        if (patch.provider === "mock-local") {
-          nextIds.delete(id);
-        } else if (patch.apiKeyConfigured === false && !patch.apiKey) {
-          nextIds.add(id);
-        }
-        return nextIds;
-      });
-    }
-
     setConfigs((currentConfigs) =>
       currentConfigs.map((config) => (config.id === id ? { ...config, ...patch } : config)),
     );
   }
 
-  async function toggleApiKeyVisibility(id: ModelCategoryId) {
-    const nextVisible = !visibleApiKeyIds.has(id);
-    const config = configs.find((item) => item.id === id);
-
-    if (nextVisible && config?.apiKeyConfigured && !config.apiKey && config.provider !== "mock-local") {
-      try {
-        const value = await secretPort.revealSecret({
-          providerProfileId: config.provider,
-          capabilityId: categoryCapabilityIds[id][0],
-        });
-        updateConfig(id, { apiKey: value, apiKeyRevealed: true });
-      } catch {
-        // 明文读取失败时仍展开输入框，用户可以直接重新输入。
-      }
-    }
-
+  function setApiKeyVisible(id: ModelCategoryId, visible: boolean) {
     setVisibleApiKeyIds((currentIds) => {
       const nextIds = new Set(currentIds);
-      if (!nextVisible) {
-        nextIds.delete(id);
-      } else {
+      if (visible) {
         nextIds.add(id);
+      } else {
+        nextIds.delete(id);
       }
       return nextIds;
     });
   }
 
+  function nextProviderStatusRequestId(id: ModelCategoryId) {
+    const nextRequestId = (providerStatusRequestIdsRef.current[id] ?? 0) + 1;
+    providerStatusRequestIdsRef.current[id] = nextRequestId;
+    return nextRequestId;
+  }
+
+  function nextRevealRequestId(id: ModelCategoryId) {
+    const nextRequestId = (revealRequestIdsRef.current[id] ?? 0) + 1;
+    revealRequestIdsRef.current[id] = nextRequestId;
+    return nextRequestId;
+  }
+
+  function invalidateAllSecretRequests() {
+    for (const descriptor of modelCategoryDescriptors) {
+      nextProviderStatusRequestId(descriptor.id);
+      nextRevealRequestId(descriptor.id);
+    }
+  }
+
+  async function changeProvider(id: ModelCategoryId, nextProvider: ModelProviderId) {
+    const requestId = nextProviderStatusRequestId(id);
+    nextRevealRequestId(id);
+    const nextModelOptions = modelCatalog[nextProvider][categoryCatalogKeys[id]];
+    const capabilityId = supportedCategoryCapabilityIds(id, nextProvider, providerProfiles)[0];
+
+    if (!capabilityId) {
+      showToast({ message: "当前 Provider 不支持该模型类别", variant: "error" });
+      return;
+    }
+
+    updateConfig(id, {
+      apiKey: "",
+      apiKeyConfigured: nextProvider === "mock-local",
+      apiKeyDirty: false,
+      apiKeyRevealed: false,
+      baseUrl: getProviderBaseUrl(nextProvider, providerProfiles, id),
+      connectionStatus: "unavailable",
+      endpointPath: undefined,
+      model: nextModelOptions[0],
+      provider: nextProvider,
+    });
+
+    if (nextProvider === "mock-local") {
+      setApiKeyVisible(id, false);
+      return;
+    }
+
+    setApiKeyVisible(id, true);
+    try {
+      const status = await secretPort.getSecretStatus({
+        providerProfileId: nextProvider,
+        capabilityId,
+      });
+      if (providerStatusRequestIdsRef.current[id] !== requestId) {
+        return;
+      }
+
+      updateConfig(id, { apiKeyConfigured: status.configured });
+      setApiKeyVisible(id, !status.configured);
+    } catch {
+      if (providerStatusRequestIdsRef.current[id] === requestId) {
+        showToast({ message: "API Key 状态加载失败", variant: "error" });
+      }
+    }
+  }
+
+  async function toggleApiKeyVisibility(id: ModelCategoryId) {
+    const nextVisible = !visibleApiKeyIds.has(id);
+    const config = configs.find((item) => item.id === id);
+    const requestId = nextRevealRequestId(id);
+    const capabilityId = config
+      ? supportedCategoryCapabilityIds(id, config.provider, providerProfiles)[0]
+      : undefined;
+
+    if (!nextVisible) {
+      setApiKeyVisible(id, false);
+      return;
+    }
+
+    if (
+      config?.apiKeyConfigured
+      && !config.apiKey
+      && config.provider !== "mock-local"
+      && capabilityId
+    ) {
+      try {
+        const value = await secretPort.revealSecret({
+          providerProfileId: config.provider,
+          capabilityId,
+        });
+        if (revealRequestIdsRef.current[id] !== requestId) {
+          return;
+        }
+        updateConfig(id, { apiKey: value, apiKeyRevealed: true });
+      } catch {
+        if (revealRequestIdsRef.current[id] !== requestId) {
+          return;
+        }
+        // 明文读取失败时仍展开输入框，用户可以直接重新输入。
+      }
+    }
+
+    if (revealRequestIdsRef.current[id] === requestId) {
+      setApiKeyVisible(id, true);
+    }
+  }
+
   async function persistConfig(config: ModelConfig) {
     const savedConfigs: LocalModelConfigView[] = [];
+    const supportedCapabilityIds = supportedCategoryCapabilityIds(
+      config.id,
+      config.provider,
+      providerProfiles,
+    );
 
-    for (const capabilityId of categoryCapabilityIds[config.id]) {
+    for (const capabilityId of supportedCapabilityIds) {
       const savedConfig = await modelConfigPort.saveConfig({
         id: config.configIds?.[capabilityId],
         capabilityId,
@@ -271,6 +358,7 @@ export function ModelConfigPage({
   }
 
   async function reloadRuntimeConfigs(options?: { onLoaded?: () => void; shouldApply?: () => boolean }) {
+    invalidateAllSecretRequests();
     try {
       const [profiles, runtimeConfigs] = await Promise.all([
         modelConfigPort.listProviderProfiles(),
@@ -329,6 +417,7 @@ export function ModelConfigPage({
   }
 
   function restoreMockDefaults() {
+    invalidateAllSecretRequests();
     setConfigs(createMockDefaultConfigs(providerProfiles));
     setVisibleApiKeyIds(new Set());
     showToast({ message: "已恢复为 Mock 默认配置，保存后生效", variant: "warning" });
@@ -351,18 +440,18 @@ export function ModelConfigPage({
     try {
       await waitForNextPaint();
       const savedConfigs = await persistConfig(config);
-      const savedConfig = savedConfigs[0];
-      if (!savedConfig) {
+      if (savedConfigs.length === 0) {
         throw new Error("模型配置保存失败，无法测试连接。");
       }
-      const result = await modelConfigPort.testConfig(savedConfig.id);
+      const result = await modelConfigPort.testConfig(savedConfigs[0].id);
+      const message = result.message ?? (result.ok ? "Provider 连接可用。" : "Provider 连接不可用。");
       setTestMessages((currentMessages) => ({
         ...currentMessages,
-        [id]: result.message ?? (result.ok ? "Provider 连接可用。" : "Provider 连接不可用。"),
+        [id]: message,
       }));
       if (!result.ok) {
         showToast({
-          message: result.message ?? "Provider 连接不可用。",
+          message,
           variant: "error",
         });
       }
@@ -408,7 +497,14 @@ export function ModelConfigPage({
                     key={config.id}
                     apiKeyVisible={visibleApiKeyIds.has(config.id)}
                     isTesting={testingConfigIds.has(config.id)}
-                    onUpdate={(patch) => updateConfig(config.id, patch)}
+                    onProviderChange={(provider) => void changeProvider(config.id, provider)}
+                    onUpdate={(patch) => {
+                      if (patch.apiKeyDirty) {
+                        nextProviderStatusRequestId(config.id);
+                        nextRevealRequestId(config.id);
+                      }
+                      updateConfig(config.id, patch);
+                    }}
                     onTestConnection={() => void testConfigConnection(config.id)}
                     onToggleApiKeyVisibility={() => void toggleApiKeyVisibility(config.id)}
                     providerProfiles={providerProfiles}
@@ -474,6 +570,7 @@ function ModelConfigCard({
   isTesting,
   onTestConnection,
   onToggleApiKeyVisibility,
+  onProviderChange,
   onUpdate,
   providerProfiles,
   testMessage,
@@ -483,6 +580,7 @@ function ModelConfigCard({
   isTesting: boolean;
   onTestConnection: () => void;
   onToggleApiKeyVisibility: () => void;
+  onProviderChange: (provider: ModelProviderId) => void;
   onUpdate: (patch: Partial<ModelConfig>) => void;
   providerProfiles: Record<string, ProviderProfileView>;
   testMessage?: string;
@@ -518,22 +616,7 @@ function ModelConfigCard({
           <SelectPill
             ariaLabel={`${config.title} Provider`}
             disabled={isTesting}
-            onChange={(provider) => {
-              const nextProvider = provider as ModelProviderId;
-              const nextModelOptions = modelCatalog[nextProvider][categoryCatalogKeys[config.id]];
-
-              onUpdate({
-                apiKeyConfigured: false,
-                apiKeyDirty: false,
-                apiKeyRevealed: false,
-                apiKey: "",
-                baseUrl: getProviderBaseUrl(nextProvider, providerProfiles, config.id),
-                connectionStatus: "unavailable",
-                endpointPath: undefined,
-                model: nextModelOptions[0],
-                provider: nextProvider,
-              });
-            }}
+            onChange={(provider) => onProviderChange(provider as ModelProviderId)}
             options={getProviderOptionsForCategory(config.id, providerProfiles)}
             value={config.provider}
           />
@@ -851,6 +934,17 @@ function indexProfiles(profiles: ProviderProfileView[]) {
   return Object.fromEntries(profiles.map((profile) => [profile.id, profile]));
 }
 
+function supportedCategoryCapabilityIds(
+  categoryId: ModelCategoryId,
+  providerId: ModelProviderId,
+  profiles: Record<string, ProviderProfileView>,
+) {
+  const supportedCapabilityIds = profiles[providerId]?.supportedCapabilities ?? [];
+  return categoryCapabilityIds[categoryId].filter((capabilityId) =>
+    supportedCapabilityIds.includes(capabilityId),
+  );
+}
+
 function mergeRuntimeConfigs(
   descriptors: ModelCategoryDescriptor[],
   runtimeConfigs: LocalModelConfigView[],
@@ -865,9 +959,21 @@ function mergeRuntimeConfigs(
 
   return descriptors.map((descriptor) => {
     const capabilityIds = categoryCapabilityIds[descriptor.id];
-    const defaultRuntimeConfig = capabilityIds
+    const supportedDefaultRuntimeConfigs = capabilityIds
       .map((capabilityId) => runtimeConfigsByCapability.get(capabilityId))
-      .find(Boolean);
+      .filter((config): config is LocalModelConfigView => {
+        if (!config || !isKnownProvider(config.providerProfileId)) {
+          return false;
+        }
+        return supportedCategoryCapabilityIds(
+          descriptor.id,
+          config.providerProfileId,
+          profilesById,
+        ).includes(config.capabilityId);
+      });
+    const defaultRuntimeConfig = supportedDefaultRuntimeConfigs.find(
+      (config) => config.providerProfileId !== "mock-local",
+    ) ?? supportedDefaultRuntimeConfigs[0];
     const configIds = Object.fromEntries(
       capabilityIds
         .map((capabilityId) => runtimeConfigsByCapability.get(capabilityId))
@@ -888,7 +994,16 @@ function mergeRuntimeConfigs(
       };
     }
 
-    const connectionStatus = resolveCategoryConnectionStatus(capabilityIds, runtimeConfigsByCapability);
+    const selectedCapabilityIds = supportedCategoryCapabilityIds(
+      descriptor.id,
+      defaultRuntimeConfig.providerProfileId,
+      profilesById,
+    );
+    const connectionStatus = resolveCategoryConnectionStatus(
+      selectedCapabilityIds,
+      defaultRuntimeConfig.providerProfileId,
+      runtimeConfigsByCapability,
+    );
 
     return {
       ...descriptor,
@@ -931,10 +1046,14 @@ function isKnownProvider(value: string): value is ModelProviderId {
 
 function resolveCategoryConnectionStatus(
   capabilityIds: ModelCapability["id"][],
+  providerProfileId: string,
   runtimeConfigsByCapability: Map<ModelCapability["id"], LocalModelConfigView>,
 ): LocalModelConfigView["connectionStatus"] {
   const statuses = capabilityIds
-    .map((capabilityId) => runtimeConfigsByCapability.get(capabilityId)?.connectionStatus)
+    .map((capabilityId) => {
+      const config = runtimeConfigsByCapability.get(capabilityId);
+      return config?.providerProfileId === providerProfileId ? config.connectionStatus : undefined;
+    })
     .filter((status): status is LocalModelConfigView["connectionStatus"] => Boolean(status));
 
   if (statuses.length === 0) {

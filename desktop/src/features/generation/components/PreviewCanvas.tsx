@@ -82,6 +82,14 @@ export type ProductListingCopy = {
   title: string;
 };
 
+type LongPreviewImageItem = {
+  badge?: string;
+  fallbackIndex: number;
+  id: string;
+  src?: string;
+  title: string;
+};
+
 export function PreviewCanvas({
   boards,
   detailImages = [],
@@ -171,6 +179,7 @@ function GeneratedDetailCanvas({
     .filter((image) => !removedImageIds.has(image.id))
     .map((image) => (regeneratingImageIds.has(image.id) ? { ...image, status: "generating" as const } : image));
   const visibleImageItems = visibleImages.filter((image) => image.kind !== "listing-copy" && image.kind !== "source-image");
+  const longPreviewItems = createLongPreviewImageItems(visibleImages);
   const groupedResultSections = createGeneratedResultGroups(visibleImages);
   const hasGroupedResults = groupedResultSections.length > 0;
   const completedImages = visibleImageItems.filter((image) => image.status === "complete");
@@ -476,7 +485,7 @@ function GeneratedDetailCanvas({
   }
 
   async function downloadLongImage() {
-    const bytes = await blobToBytes(await createLongImageBlob(completedImages));
+    const bytes = await blobToBytes(await createLongImageBlob(longPreviewItems));
     await saveBytes(`${generatedResultFilePrefix}-长图.png`, bytes, "png");
   }
 
@@ -908,24 +917,30 @@ function GeneratedDetailCanvas({
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto bg-white px-10 py-4">
                   <div className="mx-auto w-full max-w-[620px]">
-                    {completedImages.map((image, index) => (
+                    {longPreviewItems.map((item, index) => (
                       <div
                         className={cn(
-                          "relative aspect-[970/600] w-full overflow-hidden",
-                          image.src ? "bg-slate-100" : generatedImageBackgrounds[index % generatedImageBackgrounds.length],
+                          "relative w-full overflow-hidden",
+                          item.src ? "bg-white" : generatedImageBackgrounds[index % generatedImageBackgrounds.length],
                         )}
                         data-testid="long-preview-image-section"
-                        key={image.id}
+                        key={item.id}
                       >
-                        {image.src ? (
+                        {item.src ? (
                           <img
-                            alt={`长图 ${image.title}`}
-                            className="absolute inset-0 h-full w-full object-cover"
+                            alt={`长图 ${item.title}`}
+                            className="block h-auto w-full object-contain"
                             draggable={false}
-                            src={image.src}
+                            src={item.src}
                           />
+                        ) : (
+                          <div className="h-[384px] w-full" />
+                        )}
+                        {item.badge ? (
+                          <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/85 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+                            {item.badge}
+                          </div>
                         ) : null}
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
                       </div>
                     ))}
                   </div>
@@ -1539,6 +1554,27 @@ function sanitizeFilename(name: string) {
   return name.replace(/[\\/:*?"<>|]/g, "-");
 }
 
+function createLongPreviewImageItems(images: GeneratedDetailImage[]): LongPreviewImageItem[] {
+  const items: LongPreviewImageItem[] = [];
+  let fallbackIndex = 0;
+
+  images.forEach((image) => {
+    if (image.status !== "complete" || image.kind === "listing-copy" || image.kind === "source-image") {
+      return;
+    }
+
+    items.push({
+      fallbackIndex,
+      id: image.id,
+      src: image.src,
+      title: image.title,
+    });
+    fallbackIndex += 1;
+  });
+
+  return items;
+}
+
 async function blobToBytes(blob: Blob) {
   if (typeof blob.arrayBuffer !== "function") {
     return new TextEncoder().encode("generated-image-fallback");
@@ -1561,29 +1597,74 @@ async function createGeneratedImageBlob(image: GeneratedDetailImage, index: numb
   return canvasToPngBlob(canvas, () => createGeneratedImageSvgBlob([image]));
 }
 
-async function createLongImageBlob(images: GeneratedDetailImage[]) {
+async function createLongImageBlob(items: LongPreviewImageItem[]) {
   const canvas = document.createElement("canvas");
-  canvas.width = generatedImageSize.width;
-  canvas.height = Math.max(generatedImageSize.height, generatedImageSize.height * images.length);
   const context = getCanvasContext(canvas);
   if (!context) {
-    return createGeneratedImageSvgBlob(images, false);
+    return createLongImageSvgBlob(items);
   }
 
-  images.forEach((image, index) => {
-    drawGeneratedImage(
-      context,
-      image,
-      index,
-      0,
-      index * generatedImageSize.height,
-      generatedImageSize.width,
-      generatedImageSize.height,
-      false,
-    );
+  const loadedItems = await Promise.all(
+    items.map(async (item) => {
+      if (!item.src) {
+        return { image: null, item };
+      }
+      try {
+        return {
+          image: await loadImageForCanvas(item.src),
+          item,
+        };
+      } catch {
+        return { image: null, item };
+      }
+    }),
+  );
+  const sections = loadedItems.map((loadedItem) => {
+    if (!loadedItem.image) {
+      return {
+        ...loadedItem,
+        height: generatedImageSize.height,
+      };
+    }
+    const naturalWidth = loadedItem.image.naturalWidth || loadedItem.image.width || generatedImageSize.width;
+    const naturalHeight = loadedItem.image.naturalHeight || loadedItem.image.height || generatedImageSize.height;
+    return {
+      ...loadedItem,
+      height: Math.max(1, Math.round((generatedImageSize.width / naturalWidth) * naturalHeight)),
+    };
+  });
+  canvas.width = generatedImageSize.width;
+  canvas.height = Math.max(generatedImageSize.height, sections.reduce((sum, section) => sum + section.height, 0));
+
+  let y = 0;
+  sections.forEach((section) => {
+    if (section.image) {
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, y, generatedImageSize.width, section.height);
+      context.drawImage(section.image, 0, y, generatedImageSize.width, section.height);
+    } else {
+      drawGeneratedImage(
+        context,
+        {
+          id: section.item.id,
+          status: "complete",
+          title: section.item.title,
+        },
+        section.item.fallbackIndex,
+        0,
+        y,
+        generatedImageSize.width,
+        section.height,
+        false,
+      );
+    }
+    if (section.item.badge) {
+      drawLongPreviewBadge(context, section.item.badge, 24, y + 24);
+    }
+    y += section.height;
   });
 
-  return canvasToPngBlob(canvas, () => createGeneratedImageSvgBlob(images, false));
+  return canvasToPngBlob(canvas, () => createLongImageSvgBlob(items));
 }
 
 function getCanvasContext(canvas: HTMLCanvasElement) {
@@ -1596,6 +1677,48 @@ function getCanvasContext(canvas: HTMLCanvasElement) {
   } catch {
     return null;
   }
+}
+
+function loadImageForCanvas(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    if (/^https?:\/\//i.test(src)) {
+      image.crossOrigin = "anonymous";
+    }
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片加载失败。"));
+    image.src = src;
+  });
+}
+
+function drawLongPreviewBadge(context: CanvasRenderingContext2D, label: string, x: number, y: number) {
+  context.save();
+  context.font = "700 22px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+  const width = Math.ceil(context.measureText(label).width + 32);
+  const height = 34;
+  context.fillStyle = "rgba(15,23,42,0.85)";
+  fillRoundedRect(context, x, y, width, height, 10);
+  context.fillStyle = "#ffffff";
+  context.textBaseline = "middle";
+  context.fillText(label, x + 16, y + height / 2 + 1);
+  context.restore();
+}
+
+function fillRoundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const right = x + width;
+  const bottom = y + height;
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(right - radius, y);
+  context.quadraticCurveTo(right, y, right, y + radius);
+  context.lineTo(right, bottom - radius);
+  context.quadraticCurveTo(right, bottom, right - radius, bottom);
+  context.lineTo(x + radius, bottom);
+  context.quadraticCurveTo(x, bottom, x, bottom - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+  context.fill();
 }
 
 function drawGeneratedImage(
@@ -1667,6 +1790,40 @@ function createGeneratedImageSvgBlob(images: GeneratedDetailImage[], includeCapt
             <text x="56" y="${y + generatedImageSize.height - 118}" fill="white" font-size="54" font-weight="700">${escapeXml(image.title)}</text>
             <text x="56" y="${y + generatedImageSize.height - 70}" fill="white" font-size="28" font-weight="500">${escapeXml(generatedImageSubtitles[index % generatedImageSubtitles.length])}</text>
           `
+          : ""
+      }
+    `;
+  });
+
+  return new Blob(
+    [`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${sections.join("")}</svg>`],
+    { type: "image/svg+xml" },
+  );
+}
+
+function createLongImageSvgBlob(items: LongPreviewImageItem[]) {
+  const width = generatedImageSize.width;
+  const sectionHeight = generatedImageSize.height;
+  const height = sectionHeight * Math.max(1, items.length);
+  const sections = items.map((item, index) => {
+    const y = index * sectionHeight;
+    const colors = generatedCanvasGradients[item.fallbackIndex % generatedCanvasGradients.length];
+    return `
+      <defs>
+        <linearGradient id="lg${index}" x1="0" y1="${y}" x2="${width}" y2="${y + sectionHeight}">
+          ${colors.map((color, colorIndex) => `<stop offset="${(colorIndex / (colors.length - 1)) * 100}%" stop-color="${color}" />`).join("")}
+        </linearGradient>
+      </defs>
+      <rect x="0" y="${y}" width="${width}" height="${sectionHeight}" fill="${item.src ? "#ffffff" : `url(#lg${index})`}" />
+      ${
+        item.src
+          ? `<image href="${escapeXml(item.src)}" x="0" y="${y}" width="${width}" height="${sectionHeight}" preserveAspectRatio="xMidYMid meet" />`
+          : ""
+      }
+      ${
+        item.badge
+          ? `<rect x="24" y="${y + 24}" width="82" height="34" rx="10" fill="rgba(15,23,42,0.85)" />
+            <text x="40" y="${y + 47}" fill="white" font-size="22" font-weight="700">${escapeXml(item.badge)}</text>`
           : ""
       }
     `;

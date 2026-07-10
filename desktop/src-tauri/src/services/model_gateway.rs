@@ -4,6 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::errors::{
+    normalize_provider_http_error, normalize_provider_transport_error, ProviderTransportErrorKind,
+};
 use crate::infrastructure::database::WorkspaceDatabase;
 use crate::infrastructure::providers::deterministic::DeterministicModelGatewayAdapter;
 use crate::infrastructure::providers::http_model_gateway::HttpModelGatewayAdapter;
@@ -53,12 +56,33 @@ pub struct ModelGatewayAdapterResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelGatewayError {
     ProviderUnavailable(String),
+    ProviderRequestInvalid(String),
+    ProviderHttp {
+        status_code: i64,
+        provider_error_code: Option<String>,
+    },
+    ProviderTransport(ProviderTransportErrorKind),
 }
 
 impl std::fmt::Display for ModelGatewayError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ProviderUnavailable(message) => write!(formatter, "{message}"),
+            Self::ProviderUnavailable(message) | Self::ProviderRequestInvalid(message) => {
+                write!(formatter, "{message}")
+            }
+            Self::ProviderHttp {
+                status_code,
+                provider_error_code,
+            } => write!(
+                formatter,
+                "{}",
+                normalize_provider_http_error(*status_code, provider_error_code.as_deref()).message
+            ),
+            Self::ProviderTransport(kind) => write!(
+                formatter,
+                "{}",
+                normalize_provider_transport_error(*kind).message
+            ),
         }
     }
 }
@@ -108,7 +132,7 @@ impl ModelGatewayService {
                 .join("model-gateway-diagnostics.jsonl"),
         );
         let adapter = HttpModelGatewayAdapter::new(diagnostic_log_path)
-            .map_err(|source| ModelConfigError::Validation(source.to_string()))?;
+            .map_err(model_config_error_from_gateway_error)?;
 
         self.invoke_with_resolved_context(workspace_directory, request, &adapter, resolved_context)
     }
@@ -133,7 +157,7 @@ impl ModelGatewayService {
                 .join("model-gateway-diagnostics.jsonl"),
         );
         let adapter = HttpModelGatewayAdapter::new(diagnostic_log_path)
-            .map_err(|source| ModelConfigError::Validation(source.to_string()))?;
+            .map_err(model_config_error_from_gateway_error)?;
         let database =
             WorkspaceDatabase::open(workspace_directory).map_err(ModelConfigError::from)?;
         let invocation_id = create_invocation_id();
@@ -157,7 +181,7 @@ impl ModelGatewayService {
                     })
                 },
             )
-            .map_err(|source| ModelConfigError::Validation(source.to_string()))?;
+            .map_err(model_config_error_from_gateway_error)?;
 
         let request_summary_json = serde_json::json!({
             "inputSummary": input_summary,
@@ -220,7 +244,7 @@ impl ModelGatewayService {
                 model: &resolved_context.config.view.model,
                 provider_profile_id: &resolved_context.config.provider_profile_id,
             })
-            .map_err(|source| ModelConfigError::Validation(source.to_string()))?;
+            .map_err(model_config_error_from_gateway_error)?;
         let request_summary_json = serde_json::json!({
             "inputSummary": input_summary,
         });
@@ -245,6 +269,21 @@ impl ModelGatewayService {
             output_text: adapter_result.output_text,
             output_json: adapter_result.output_json,
         })
+    }
+}
+
+fn model_config_error_from_gateway_error(source: ModelGatewayError) -> ModelConfigError {
+    match source {
+        ModelGatewayError::ProviderHttp {
+            status_code,
+            provider_error_code,
+        } => ModelConfigError::ProviderHttp {
+            status_code,
+            provider_error_code,
+        },
+        ModelGatewayError::ProviderTransport(kind) => ModelConfigError::ProviderTransport(kind),
+        ModelGatewayError::ProviderRequestInvalid(message)
+        | ModelGatewayError::ProviderUnavailable(message) => ModelConfigError::Validation(message),
     }
 }
 
@@ -284,7 +323,7 @@ fn resolve_gateway_context(
                     workspace_directory,
                     SecretScope {
                         provider_profile_id: config.provider_profile_id.clone(),
-                        capability_id: Some(capability_id.to_string()),
+                        capability_id: Some(config.view.capability_id.clone()),
                     },
                 )
                 .map_err(ModelConfigError::from)?,
@@ -315,6 +354,10 @@ fn resolve_endpoint_path(
     category: &str,
     configured_endpoint_path: Option<&str>,
 ) -> Option<String> {
+    if provider_profile_id == "openai" && category == "text-to-image" {
+        return Some("/v1/images/generations".to_string());
+    }
+
     if provider_profile_id == "volcengine" && matches!(category, "text-to-image" | "image-to-image")
     {
         return Some("/images/generations".to_string());
