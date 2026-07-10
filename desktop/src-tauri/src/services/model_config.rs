@@ -182,8 +182,15 @@ pub const OPENAI_CAPABILITY_IDS: &[&str] = &[
     "clothing-scene-planning",
     "viral-style-analysis",
     "clothing-base-model-generation",
+    "clothing-tryon-generation",
+    "image-edit",
 ];
-pub const OPENAI_CATEGORIES: &[&str] = &["text-to-text", "text-to-image", "image-to-text"];
+pub const OPENAI_CATEGORIES: &[&str] = &[
+    "text-to-text",
+    "text-to-image",
+    "image-to-image",
+    "image-to-text",
+];
 
 pub const PROVIDER_PROFILES: &[ProviderProfile] = &[
     ProviderProfile {
@@ -841,8 +848,8 @@ fn current_connection_fingerprint_for_config(
         .connection()
         .query_row(
             "
-            SELECT config.provider_profile_id, config.execution_mode, config.model,
-                   config.endpoint_path, secret.updated_at, secret.version
+            SELECT config.capability_id, config.provider_profile_id, config.execution_mode,
+                   config.model, config.endpoint_path, secret.updated_at, secret.version
             FROM model_configs config
             LEFT JOIN model_secrets secret
               ON secret.provider_profile_id = config.provider_profile_id
@@ -851,18 +858,28 @@ fn current_connection_fingerprint_for_config(
             ",
             params![config_id],
             |row| {
-                let provider_profile_id: String = row.get(0)?;
-                let execution_mode: String = row.get(1)?;
-                let model: String = row.get(2)?;
-                let endpoint_path: Option<String> = row.get(3)?;
-                let secret_updated_at: Option<String> = row.get(4)?;
-                let secret_version: Option<i64> = row.get(5)?;
+                let capability_id: String = row.get(0)?;
+                let provider_profile_id: String = row.get(1)?;
+                let execution_mode: String = row.get(2)?;
+                let model: String = row.get(3)?;
+                let endpoint_path: Option<String> = row.get(4)?;
+                let secret_updated_at: Option<String> = row.get(5)?;
+                let secret_version: Option<i64> = row.get(6)?;
+                let fingerprint_endpoint_path = provider_profile(&provider_profile_id)
+                    .and_then(|profile| {
+                        resolve_endpoint_path_for_config(
+                            profile,
+                            &capability_id,
+                            endpoint_path.as_deref(),
+                        )
+                    })
+                    .or(endpoint_path);
 
                 Ok(connection_fingerprint(
                     &provider_profile_id,
                     &execution_mode,
                     &model,
-                    endpoint_path.as_deref(),
+                    fingerprint_endpoint_path.as_deref(),
                     secret_revision(secret_updated_at.as_deref(), secret_version).as_deref(),
                 ))
             },
@@ -969,11 +986,14 @@ fn config_from_row(row: &Row<'_>) -> Result<LocalModelConfigView, rusqlite::Erro
     let execution_mode: String = row.get(5)?;
     let model: String = row.get(6)?;
     let endpoint_path: Option<String> = row.get(7)?;
+    let fingerprint_endpoint_path =
+        resolve_endpoint_path_for_config(profile, &capability_id, endpoint_path.as_deref())
+            .or(endpoint_path.clone());
     let current_connection_fingerprint = connection_fingerprint(
         &provider_profile_id,
         &execution_mode,
         &model,
-        endpoint_path.as_deref(),
+        fingerprint_endpoint_path.as_deref(),
         secret_revision(secret_updated_at.as_deref(), secret_version).as_deref(),
     );
     let connection_is_current =
@@ -1111,6 +1131,10 @@ fn resolve_endpoint_path(
         return Some("/v1/images/generations".to_string());
     }
 
+    if profile.id == "openai" && category == "image-to-image" {
+        return Some("/v1/images/edits".to_string());
+    }
+
     if profile.id == "volcengine" && matches!(category, "text-to-image" | "image-to-image") {
         return Some("/images/generations".to_string());
     }
@@ -1122,6 +1146,16 @@ fn resolve_endpoint_path(
     configured_endpoint_path
         .map(str::to_string)
         .or_else(|| profile.default_endpoint_path.map(str::to_string))
+}
+
+fn resolve_endpoint_path_for_config(
+    profile: &ProviderProfile,
+    capability_id: &str,
+    configured_endpoint_path: Option<&str>,
+) -> Option<String> {
+    capability_definition(capability_id).and_then(|capability| {
+        resolve_endpoint_path(profile, capability.category, configured_endpoint_path)
+    })
 }
 
 fn profile_to_view(profile: &ProviderProfile) -> ProviderProfileView {

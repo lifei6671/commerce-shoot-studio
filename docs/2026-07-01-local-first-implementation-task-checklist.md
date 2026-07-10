@@ -547,7 +547,7 @@ M7 真实场景生图闭环
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
-- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 当前只允许已实现的文生文、图生文和 `clothing-base-model-generation` 纯文生图 capability；后者固定生成 2:3 纵向图且不接收参考图。需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation`，以及 `image-to-image` / `clothing-tryon-generation` / `image-edit`，在对应请求链路实现前不对 OpenAI 暴露。
+- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 已开放已实现的文生文、图生文、`clothing-base-model-generation` 纯文生图，以及图生图 `clothing-tryon-generation` / `image-edit` capability；后两项统一固定到 `/v1/images/edits`。`clothing-base-model-generation` 固定生成 2:3 纵向图且不接收参考图；需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
@@ -651,7 +651,7 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
-- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。OpenAI 图生图 profile 会在“图生图 Provider”菜单中出现；选择并保存时，页面会分别提交 `clothing-tryon-generation` 与 `image-edit` 两项配置，实际 endpoint 仍由 Rust runtime 固定解析。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
@@ -709,9 +709,11 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
-- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例；已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Images Edits / Responses `image_generation` 工具仍待后续切片。
+- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸但不裁剪或转码输入图；保存配置、Provider 连接探测和历史配置执行都会强制解析该 endpoint，避免旧 `/v1/responses` 路径回写。上述证据来自本地 HTTP/单元测试，未验证真实 OpenAI 外网调用。已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
+  - `desktop/src-tauri/src/infrastructure/providers/openai_images.rs`
+  - `desktop/src-tauri/src/infrastructure/providers/http_model_gateway.rs`
   - `desktop/src-tauri/tests/provider_adapter.rs`
 - 执行动作：
   - 建立 adapter 接口骨架。

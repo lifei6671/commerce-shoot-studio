@@ -358,6 +358,10 @@ fn resolve_endpoint_path(
         return Some("/v1/images/generations".to_string());
     }
 
+    if provider_profile_id == "openai" && category == "image-to-image" {
+        return Some("/v1/images/edits".to_string());
+    }
+
     if provider_profile_id == "volcengine" && matches!(category, "text-to-image" | "image-to-image")
     {
         return Some("/images/generations".to_string());

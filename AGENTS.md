@@ -227,6 +227,7 @@ M7 真实场景生图闭环
 - MVP 不开放任意 custom gateway；SQLite 中的 provider/profile 不能绕过 Rust 内置 allowlist。
 - DeepSeek 当前只开放文生文能力。
 - OpenAI-compatible 文生文默认走 `/chat/completions`。
+- OpenAI 图生图的 `clothing-tryon-generation` 与 `image-edit` 固定走 `/v1/images/edits` 的 `multipart/form-data`；只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，输入图不裁剪、不转码。保存配置、Provider 连接探测和历史配置执行都必须强制解析该 endpoint，不能回写旧 `/v1/responses`；当前仅有本地 HTTP/单元测试证据，未验证真实 OpenAI 外网调用。
 - 火山引擎文生图和图生图使用 Ark `/api/v3/images/generations`；图生图测试图片可用很小的 base64 图片。
 - 火山引擎图生文使用 Ark `/api/v3/responses`，图片理解输入按官方 `input_image` + `input_text` 结构组织。
 - endpoint path 由 Rust runtime 根据 provider profile 和 capability 内置映射，页面不要让用户自由编辑真实执行 endpoint。

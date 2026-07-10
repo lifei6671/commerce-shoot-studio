@@ -527,6 +527,93 @@ fn model_gateway_uses_openai_images_endpoint_for_legacy_text_to_image_config() {
     remove_workspace(&workspace_dir);
 }
 
+#[test]
+fn model_gateway_uses_openai_image_edits_endpoint_for_legacy_image_to_image_config() {
+    let workspace_dir = initialized_workspace("model-gateway-openai-image-edit-endpoint");
+    let model_config_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let gateway_service = ModelGatewayService::new();
+    let adapter = CapturingAdapter::default();
+    let connection_tester = RecordingConnectionTester::default();
+    let capability_id = "clothing-tryon-generation".to_string();
+
+    let config = model_config_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 图生图".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-image-1".to_string(),
+                endpoint_path: None,
+                enabled: true,
+            },
+        )
+        .expect("config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(capability_id.clone()),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    model_config_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: capability_id.clone(),
+                config_id: config.id.clone(),
+            },
+        )
+        .expect("default config should switch");
+
+    let database = Connection::open(workspace_dir.join("workspace.db"))
+        .expect("workspace database should open");
+    database
+        .execute(
+            "UPDATE model_configs SET endpoint_path = '/v1/responses' WHERE id = ?1",
+            [config.id.as_str()],
+        )
+        .expect("legacy endpoint should be written");
+    model_config_service
+        .test_config_with_tester(&workspace_dir, &config.id, &connection_tester)
+        .expect("legacy config should be marked available for the resolved image endpoint");
+    let probe = connection_tester
+        .take_probe()
+        .expect("legacy config should create a connection probe");
+
+    assert_eq!(probe.provider_profile_id, "openai");
+    assert_eq!(probe.category, "image-to-image");
+    assert_eq!(probe.endpoint_path, "/v1/images/edits");
+
+    gateway_service
+        .invoke_with_adapter(
+            &workspace_dir,
+            ModelGatewayRequest {
+                capability_id,
+                input: serde_json::json!({ "debug": true }),
+            },
+            &adapter,
+        )
+        .expect("gateway invocation should resolve the image edit endpoint");
+
+    assert_eq!(
+        adapter
+            .captured_endpoint_path
+            .lock()
+            .expect("endpoint capture lock")
+            .as_deref(),
+        Some("/v1/images/edits")
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
 fn initialized_workspace(label: &str) -> PathBuf {
     let workspace_dir = unique_temp_workspace(label);
     WorkspaceService::new(WorkspaceFileSystem::new())
@@ -557,6 +644,31 @@ impl ProviderConnectionTester for SuccessfulConnectionTester {
         &self,
         _probe: ProviderConnectionProbe,
     ) -> Result<ProviderConnectionResult, ProviderConnectionError> {
+        Ok(ProviderConnectionResult {
+            elapsed_ms: 0,
+            message: "Provider 连接可用。".to_string(),
+            ok: true,
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingConnectionTester {
+    probe: Mutex<Option<ProviderConnectionProbe>>,
+}
+
+impl RecordingConnectionTester {
+    fn take_probe(&self) -> Option<ProviderConnectionProbe> {
+        self.probe.lock().expect("connection probe lock").take()
+    }
+}
+
+impl ProviderConnectionTester for RecordingConnectionTester {
+    fn test_connection(
+        &self,
+        probe: ProviderConnectionProbe,
+    ) -> Result<ProviderConnectionResult, ProviderConnectionError> {
+        *self.probe.lock().expect("connection probe lock") = Some(probe);
         Ok(ProviderConnectionResult {
             elapsed_ms: 0,
             message: "Provider 连接可用。".to_string(),

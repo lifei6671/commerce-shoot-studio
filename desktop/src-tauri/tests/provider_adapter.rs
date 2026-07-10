@@ -749,6 +749,583 @@ fn rejects_openai_image_generation_with_reference_images() {
 }
 
 #[test]
+fn openai_image_edit_sends_single_png_multipart_with_square_size() {
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+    let diagnostic_log_path = test_diagnostic_log_path("openai-image-edit-single");
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品详情图" }],
+            "rolelessPrompt": "openai-image-edit-prompt-marker"
+        },
+        "userImages": [{
+            "mimeType": "image/png",
+            "dataUrl": valid_png_data_url()
+        }]
+    });
+
+    HttpModelGatewayAdapter::new(Some(diagnostic_log_path.clone()))
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-openai-image-edit-test-secret"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        })
+        .expect("OpenAI image edit request should succeed");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_multipart_request_contains(
+        &request,
+        &[
+            "name=\"image[]\"; filename=\"image-1.png\"",
+            "name=\"model\"",
+            "gpt-image-1",
+            "name=\"prompt\"",
+            "openai-image-edit-prompt-marker",
+            "name=\"output_format\"",
+            "png",
+            "name=\"size\"",
+            "1024x1024",
+        ],
+    );
+    assert_eq!(request.matches("name=\"image[]\""), 1);
+    assert_multipart_image_part(&request, "image-1.png", valid_png_bytes());
+    assert_multipart_closing_boundary(&request);
+    let diagnostic = fs::read_to_string(&diagnostic_log_path)
+        .expect("diagnostic log should remain available before cleanup");
+    assert!(diagnostic.contains("normalized_response"));
+    assert!(!diagnostic.contains("openai-image-edit-prompt-marker"));
+    assert!(!diagnostic.contains("sk-openai-image-edit-test-secret"));
+    assert!(!diagnostic.contains(valid_png_data_url()));
+    assert!(!diagnostic.contains("Content-Disposition: form-data"));
+    fs::remove_file(diagnostic_log_path).expect("diagnostic log should be removable");
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_sends_two_pngs_multipart_with_portrait_size() {
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+    let input = serde_json::json!({
+        "ratio": "3:4",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成服饰试穿图" }],
+            "rolelessPrompt": "two-image-edit-prompt"
+        },
+        "userImages": [
+            { "mimeType": "image/png", "dataUrl": valid_png_data_url() },
+            { "mimeType": "image/png", "dataUrl": valid_png_data_url() }
+        ]
+    });
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "clothing-tryon-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        })
+        .expect("OpenAI image edit request should succeed");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_multipart_request_contains(
+        &request,
+        &[
+            "name=\"image[]\"; filename=\"image-1.png\"",
+            "name=\"image[]\"; filename=\"image-2.png\"",
+            "name=\"model\"",
+            "gpt-image-1",
+            "name=\"prompt\"",
+            "two-image-edit-prompt",
+            "name=\"output_format\"",
+            "png",
+            "name=\"size\"",
+            "1024x1536",
+        ],
+    );
+    assert_eq!(request.matches("name=\"image[]\""), 2);
+    assert_multipart_image_part(&request, "image-1.png", valid_png_bytes());
+    assert_multipart_image_part(&request, "image-2.png", valid_png_bytes());
+    assert_multipart_closing_boundary(&request);
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_uses_landscape_size() {
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+    let input = serde_json::json!({
+        "ratio": "4:3",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成横向商品详情图" }],
+            "rolelessPrompt": "landscape-image-edit-prompt"
+        },
+        "userImages": [{ "mimeType": "image/png", "dataUrl": valid_png_data_url() }]
+    });
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        })
+        .expect("OpenAI image edit request should succeed");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_multipart_request_contains(&request, &["name=\"size\"", "1536x1024"]);
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_rejects_gif_data_url() {
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品图" }],
+            "rolelessPrompt": "gif-edit-prompt"
+        },
+        "userImages": [{ "mimeType": "image/gif", "dataUrl": "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" }]
+    });
+
+    let error = invoke_openai_image_edit(&input).expect_err("GIF must be rejected before HTTP");
+
+    assert!(matches!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(_)
+    ));
+}
+
+#[test]
+fn openai_image_edit_rejects_malformed_data_url() {
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品图" }],
+            "rolelessPrompt": "invalid-data-url-edit-prompt"
+        },
+        "userImages": [{ "mimeType": "image/png", "dataUrl": "not-a-data-url" }]
+    });
+
+    let error = invoke_openai_image_edit(&input)
+        .expect_err("malformed data URL must be rejected before HTTP");
+
+    assert!(matches!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(_)
+    ));
+}
+
+#[test]
+fn openai_image_edit_chooses_boundary_outside_model_prompt_and_image_bytes() {
+    let colliding_delimiter = b"\r\n--commerce-shoot-studio-openai-images-edit";
+    let mut image_bytes = b"\x89PNG\r\n\x1a\nimage-prefix".to_vec();
+    image_bytes.extend_from_slice(colliding_delimiter);
+    image_bytes.extend_from_slice(b"image-suffix");
+    let model = "gpt-image-1\r\n--commerce-shoot-studio-openai-images-edit";
+    let prompt = "安全提示\r\n--commerce-shoot-studio-openai-images-edit";
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品图" }],
+            "rolelessPrompt": prompt
+        },
+        "userImages": [{
+            "mimeType": "image/png",
+            "dataUrl": data_url_from_bytes("image/png", &image_bytes)
+        }]
+    });
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model,
+            provider_profile_id: "openai",
+        })
+        .expect("multipart encoder should choose a non-colliding boundary");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    let boundary = multipart_boundary(&request);
+    let delimiter = format!("\r\n--{boundary}");
+    assert_ne!(boundary, "commerce-shoot-studio-openai-images-edit");
+    assert!(!model
+        .as_bytes()
+        .windows(delimiter.len())
+        .any(|bytes| bytes == delimiter.as_bytes()));
+    assert!(!prompt
+        .as_bytes()
+        .windows(delimiter.len())
+        .any(|bytes| bytes == delimiter.as_bytes()));
+    assert!(!image_bytes
+        .windows(delimiter.len())
+        .any(|bytes| bytes == delimiter.as_bytes()));
+    assert_multipart_image_part(&request, "image-1.png", &image_bytes);
+    assert_multipart_closing_boundary(&request);
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_chooses_boundary_when_model_starts_with_base_boundary() {
+    let model = "--commerce-shoot-studio-openai-images-edit";
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品图" }],
+            "rolelessPrompt": "model-boundary-prefix-prompt"
+        },
+        "userImages": [{
+            "mimeType": "image/png",
+            "dataUrl": valid_png_data_url()
+        }]
+    });
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model,
+            provider_profile_id: "openai",
+        })
+        .expect("multipart encoder should choose a non-colliding boundary");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_ne!(
+        multipart_boundary(&request),
+        "commerce-shoot-studio-openai-images-edit"
+    );
+    assert_multipart_text_part(&request, "model", model);
+    assert_multipart_image_part(&request, "image-1.png", valid_png_bytes());
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_chooses_boundary_when_prompt_starts_with_base_boundary() {
+    let prompt = "--commerce-shoot-studio-openai-images-edit";
+    let input = serde_json::json!({
+        "ratio": "1:1",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "生成商品图" }],
+            "rolelessPrompt": prompt
+        },
+        "userImages": [{
+            "mimeType": "image/png",
+            "dataUrl": valid_png_data_url()
+        }]
+    });
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        })
+        .expect("multipart encoder should choose a non-colliding boundary");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_ne!(
+        multipart_boundary(&request),
+        "commerce-shoot-studio-openai-images-edit"
+    );
+    assert_multipart_text_part(&request, "prompt", prompt);
+    assert_multipart_image_part(&request, "image-1.png", valid_png_bytes());
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_rejects_data_url_mime_mismatches_before_http() {
+    for actual_bytes in [
+        b"GIF89a\x01\x00\x01\x00".as_slice(),
+        b"unknown-image-bytes".as_slice(),
+    ] {
+        let input = serde_json::json!({
+            "ratio": "1:1",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成商品图" }],
+                "rolelessPrompt": "mismatched-image-format"
+            },
+            "userImages": [{
+                "mimeType": "image/png",
+                "dataUrl": data_url_from_bytes("image/png", actual_bytes)
+            }]
+        });
+
+        let error = invoke_openai_image_edit(&input)
+            .expect_err("mismatched image data URL must be rejected before HTTP");
+
+        assert!(matches!(
+            error,
+            ModelGatewayError::ProviderRequestInvalid(_)
+        ));
+    }
+}
+
+fn invoke_openai_image_edit(
+    input: &serde_json::Value,
+) -> Result<
+    commerce_shoot_studio_lib::services::model_gateway::ModelGatewayAdapterResult,
+    ModelGatewayError,
+> {
+    invoke_openai_image_edit_with_model(input, "gpt-image-1")
+}
+
+fn invoke_openai_image_edit_with_model(
+    input: &serde_json::Value,
+    model: &str,
+) -> Result<
+    commerce_shoot_studio_lib::services::model_gateway::ModelGatewayAdapterResult,
+    ModelGatewayError,
+> {
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: "http://127.0.0.1:1",
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/images/edits",
+            input,
+            input_summary: "test",
+            model,
+            provider_profile_id: "openai",
+        })
+}
+
+fn valid_png_data_url() -> &'static str {
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLQ6QAAAABJRU5ErkJggg=="
+}
+
+fn valid_png_bytes() -> &'static [u8] {
+    &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 248, 207, 192, 240, 31,
+        0, 5, 128, 2, 63, 73, 194, 208, 233, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+}
+
+fn data_url_from_bytes(mime_type: &str, bytes: &[u8]) -> String {
+    format!("data:{mime_type};base64,{}", base64_encode(bytes))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[((first & 0x03) << 4 | second >> 4) as usize] as char);
+        encoded.push(match chunk.len() {
+            1 => '=',
+            _ => ALPHABET[((second & 0x0f) << 2 | third >> 6) as usize] as char,
+        });
+        encoded.push(match chunk.len() {
+            1 | 2 => '=',
+            _ => ALPHABET[(third & 0x3f) as usize] as char,
+        });
+    }
+    encoded
+}
+
+struct CapturedHttpRequest {
+    headers: String,
+    body: Vec<u8>,
+}
+
+impl CapturedHttpRequest {
+    fn matches(&self, text: &str) -> usize {
+        count_byte_occurrences(&self.body, text.as_bytes())
+    }
+}
+
+fn spawn_openai_image_edit_server() -> (
+    String,
+    std::sync::mpsc::Receiver<CapturedHttpRequest>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request should arrive");
+        let request = read_http_request(&mut stream);
+        sender.send(request).expect("request should be captured");
+        let response_body = r#"{"data":[{"url":"https://example.test/generated.png"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len(),
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("response should write");
+    });
+    (base_url, receiver, server)
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> CapturedHttpRequest {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream
+            .read(&mut buffer)
+            .expect("request should be readable");
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim())
+        })
+        .expect("request should contain a content length")
+        .parse::<usize>()
+        .expect("content length should be numeric");
+    while bytes.len() < header_end + content_length {
+        let read = stream
+            .read(&mut buffer)
+            .expect("request body should be readable");
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    CapturedHttpRequest {
+        headers: String::from_utf8_lossy(&bytes[..header_end]).into_owned(),
+        body: bytes[header_end..header_end + content_length].to_vec(),
+    }
+}
+
+fn assert_multipart_request_contains(request: &CapturedHttpRequest, snippets: &[&str]) {
+    assert!(
+        request
+            .headers
+            .to_ascii_lowercase()
+            .contains("content-type: multipart/form-data; boundary="),
+        "OpenAI image edit must use multipart/form-data"
+    );
+    for snippet in snippets {
+        assert!(
+            request_body_contains(request, snippet.as_bytes()),
+            "multipart request should contain {snippet:?}"
+        );
+    }
+}
+
+fn assert_multipart_image_part(request: &CapturedHttpRequest, file_name: &str, bytes: &[u8]) {
+    assert!(
+        request_body_contains(
+            request,
+            format!(
+                "name=\"image[]\"; filename=\"{file_name}\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        ),
+        "multipart image part should declare image/png"
+    );
+    assert!(
+        request_body_contains(request, bytes),
+        "multipart image part should preserve source bytes"
+    );
+}
+
+fn assert_multipart_text_part(request: &CapturedHttpRequest, name: &str, value: &str) {
+    assert!(
+        request_body_contains(
+            request,
+            format!("name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes(),
+        ),
+        "multipart request should preserve {name} value"
+    );
+}
+
+fn assert_multipart_closing_boundary(request: &CapturedHttpRequest) {
+    let boundary = multipart_boundary(request);
+    assert!(
+        request
+            .body
+            .ends_with(format!("--{boundary}--\r\n").as_bytes()),
+        "multipart body should end with the closing boundary"
+    );
+}
+
+fn multipart_boundary(request: &CapturedHttpRequest) -> String {
+    request
+        .headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-type")
+                .then(|| value.trim().strip_prefix("multipart/form-data; boundary="))
+                .flatten()
+        })
+        .expect("multipart request should declare a boundary")
+        .to_string()
+}
+
+fn request_body_contains(request: &CapturedHttpRequest, expected: &[u8]) -> bool {
+    request
+        .body
+        .windows(expected.len())
+        .any(|window| window == expected)
+}
+
+fn count_byte_occurrences(bytes: &[u8], expected: &[u8]) -> usize {
+    bytes
+        .windows(expected.len())
+        .filter(|window| *window == expected)
+        .count()
+}
+
+#[test]
 fn builds_text_only_responses_request_without_user_images() {
     let body = build_model_gateway_request_body(
         &HttpModelGatewayRequestConfig {

@@ -15,7 +15,7 @@ use commerce_shoot_studio_lib::services::provider_connection::{
 };
 use commerce_shoot_studio_lib::services::secrets::{SecretScope, SecretService};
 use commerce_shoot_studio_lib::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
 #[test]
 fn model_config_lists_builtin_mock_profile_and_seeded_mock_configs() {
@@ -156,7 +156,7 @@ fn tested_real_default_keeps_real_provider_only_capability_available() {
 }
 
 #[test]
-fn openai_provider_profile_includes_only_current_release_capabilities() {
+fn openai_provider_profile_includes_image_to_image_capabilities() {
     let service = ModelConfigService::new();
 
     let profiles = service
@@ -179,13 +179,13 @@ fn openai_provider_profile_includes_only_current_release_capabilities() {
         vec!["text-to-text"],
         "DeepSeek 第一版只作为文生文能力接入，避免 UI 误选图片能力",
     );
-    assert!(!openai
+    assert!(openai
         .supported_categories
         .contains(&"image-to-image".to_string()));
-    assert!(!openai
+    assert!(openai
         .supported_capabilities
         .contains(&"clothing-tryon-generation".to_string()));
-    assert!(!openai
+    assert!(openai
         .supported_capabilities
         .contains(&"image-edit".to_string()));
     assert!(openai
@@ -200,12 +200,12 @@ fn openai_provider_profile_includes_only_current_release_capabilities() {
 }
 
 #[test]
-fn openai_rejects_unimplemented_image_to_image_capabilities() {
-    let workspace_dir = initialized_workspace("model-config-openai-image-to-image-rejected");
+fn saving_openai_image_to_image_uses_fixed_images_edits_endpoint() {
+    let workspace_dir = initialized_workspace("model-config-openai-image-to-image-endpoint");
     let service = ModelConfigService::new();
 
     for capability_id in ["clothing-tryon-generation", "image-edit"] {
-        let error = service
+        let saved = service
             .save_config(
                 &workspace_dir,
                 SaveLocalModelConfigInput {
@@ -215,60 +215,61 @@ fn openai_rejects_unimplemented_image_to_image_capabilities() {
                     display_name: "OpenAI 图生图".to_string(),
                     execution_mode: "sync".to_string(),
                     model: "gpt-image-1".to_string(),
-                    endpoint_path: None,
+                    endpoint_path: Some("/v1/responses".to_string()),
                     enabled: true,
                 },
             )
-            .expect_err(
-                "OpenAI image-to-image should stay disabled until its request is implemented",
-            );
+            .expect("OpenAI image-to-image config should save");
 
-        assert!(error.to_string().contains("provider profile 不支持该能力"));
+        assert_eq!(saved.endpoint_path.as_deref(), Some("/v1/images/edits"));
     }
 
     remove_workspace(&workspace_dir);
 }
 
 #[test]
-fn resolver_rejects_legacy_openai_image_to_image_defaults() {
-    for capability_id in ["clothing-tryon-generation", "image-edit"] {
-        let workspace_dir = initialized_workspace(&format!(
-            "model-config-legacy-openai-{}",
-            capability_id.replace('-', "_")
-        ));
-        let service = ModelConfigService::new();
-        service
-            .list_configs(&workspace_dir)
-            .expect("mock defaults should seed");
-        let database = Connection::open(workspace_dir.join("workspace.db"))
-            .expect("workspace database should open");
-        database
-            .execute(
-                "UPDATE model_configs SET is_default = 0 WHERE capability_id = ?1",
-                [capability_id],
-            )
-            .expect("mock default should clear");
-        database
-            .execute(
-                "
-                INSERT INTO model_configs (
-                    id, capability_id, provider_profile_id, display_name, protocol,
-                    execution_mode, model, endpoint_path, enabled, is_default
-                )
-                VALUES (?1, ?2, 'openai', 'Legacy OpenAI 图生图', 'openai',
-                        'sync', 'gpt-image-1', '/v1/responses', 1, 1)
-                ",
-                params![format!("cfg_legacy_{capability_id}"), capability_id],
-            )
-            .expect("legacy config should insert");
+fn legacy_openai_image_to_image_connection_is_untested_after_endpoint_remap() {
+    let workspace_dir = initialized_workspace("model-config-legacy-openai-image-edit-fingerprint");
+    let service = ModelConfigService::new();
+    service
+        .list_configs(&workspace_dir)
+        .expect("mock defaults should seed");
 
-        let error = default_resolved_config_for_capability(&workspace_dir, capability_id)
-            .expect_err("resolver must reject provider capabilities removed from the allowlist");
+    let database = Connection::open(workspace_dir.join("workspace.db"))
+        .expect("workspace database should open");
+    database
+        .execute(
+            "UPDATE model_configs SET is_default = 0 WHERE capability_id = 'clothing-tryon-generation'",
+            [],
+        )
+        .expect("mock default should clear");
+    database
+        .execute(
+            "
+            INSERT INTO model_configs (
+                id, capability_id, provider_profile_id, display_name, protocol,
+                execution_mode, model, endpoint_path, enabled, is_default,
+                connection_status, connection_fingerprint
+            )
+            VALUES ('cfg_legacy_openai_image_edit', 'clothing-tryon-generation',
+                    'openai', 'Legacy OpenAI 图生图', 'openai',
+                    'sync', 'gpt-image-1', '/v1/responses', 1, 1,
+                    'available', 'openai|sync|gpt-image-1|/v1/responses|')
+            ",
+            [],
+        )
+        .expect("legacy OpenAI config should insert");
 
-        assert!(error.to_string().contains("provider profile 不支持该能力"));
-        drop(database);
-        remove_workspace(&workspace_dir);
-    }
+    let config = service
+        .get_config(&workspace_dir, "cfg_legacy_openai_image_edit")
+        .expect("legacy OpenAI config should load");
+
+    assert_eq!(config.connection_status, "untested");
+    assert_eq!(config.connection_message, None);
+    assert_eq!(config.connection_tested_at, None);
+
+    drop(database);
+    remove_workspace(&workspace_dir);
 }
 
 #[test]

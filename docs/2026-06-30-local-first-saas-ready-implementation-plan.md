@@ -730,7 +730,7 @@ export type LocalModelConfigView = {
 - `executionMode` 表示出参模式。`auto` 由 adapter 根据响应自动识别。
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
 - `baseUrl` 只能作为内置 provider profile 的只读展示字段，MVP 不作为用户自由输入字段。
-- OpenAI 当前只暴露已实现的文生文、图生文和纯文生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation`，以及 `image-to-image` / `clothing-tryon-generation` / `image-edit`，在 Images Edits 或 Responses `image_generation` 工具链路和比例语义落地前不对 OpenAI 开放。
+- OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。图生图覆盖 `clothing-tryon-generation` 与 `image-edit`，统一使用 `/v1/images/edits` 的 `multipart/form-data`：仅接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，不裁剪或转码输入图。保存配置、Provider 连接探测和历史配置执行都强制解析该 endpoint，不允许旧 `/v1/responses` 回写。上述行为只在本地 HTTP/单元测试中验证，尚未验证真实 OpenAI 外网调用。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放；Responses `image_generation` 工具链路仍待后续切片。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
 - API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。

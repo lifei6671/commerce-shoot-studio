@@ -5,6 +5,8 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{blocking::Response, StatusCode, Url};
 use serde_json::{json, Value};
 
+use crate::infrastructure::providers::openai_images::build_openai_image_edit_multipart;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConnectionProbe {
     pub provider_profile_id: String,
@@ -51,6 +53,11 @@ pub struct HttpProviderConnectionTester {
     client: Client,
 }
 
+struct ProviderProbeRequest {
+    content_type: String,
+    body: Vec<u8>,
+}
+
 impl HttpProviderConnectionTester {
     pub fn new() -> Result<Self, ProviderConnectionError> {
         let client = Client::builder()
@@ -77,15 +84,15 @@ impl ProviderConnectionTester for HttpProviderConnectionTester {
         }
 
         let endpoint = provider_endpoint(&probe.base_url, &probe.endpoint_path)?;
-        let request_body = provider_probe_body(&probe);
+        let request = provider_probe_request(&probe)?;
         let started_at = Instant::now();
         let response = self
             .client
             .post(endpoint)
             .bearer_auth(&probe.api_key)
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, request.content_type)
             .timeout(provider_probe_timeout(&probe))
-            .body(request_body.to_string())
+            .body(request.body)
             .send();
         let elapsed_ms = elapsed_ms(started_at);
 
@@ -103,6 +110,35 @@ impl ProviderConnectionTester for HttpProviderConnectionTester {
             }),
         }
     }
+}
+
+fn provider_probe_request(
+    probe: &ProviderConnectionProbe,
+) -> Result<ProviderProbeRequest, ProviderConnectionError> {
+    if probe.provider_profile_id == "openai"
+        && probe.category == "image-to-image"
+        && probe.endpoint_path == "/v1/images/edits"
+    {
+        let multipart = build_openai_image_edit_multipart(
+            &probe.model,
+            &json!({
+                "prompt": { "rolelessPrompt": "hello" },
+                "userImages": [{ "dataUrl": probe_png_data_url() }],
+            }),
+        )
+        .map_err(|_| {
+            ProviderConnectionError::Transport("OpenAI 图生图探测请求构造失败。".to_string())
+        })?;
+        return Ok(ProviderProbeRequest {
+            content_type: multipart.content_type,
+            body: multipart.body,
+        });
+    }
+
+    Ok(ProviderProbeRequest {
+        content_type: "application/json".to_string(),
+        body: provider_probe_body(probe).to_string().into_bytes(),
+    })
 }
 
 fn provider_probe_body(probe: &ProviderConnectionProbe) -> Value {
@@ -383,6 +419,29 @@ mod tests {
         assert!(body.get("messages").is_none());
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn builds_openai_image_to_image_probe_as_multipart() {
+        let request =
+            provider_probe_request(&probe("image-to-image", "/v1/images/edits", "openai"))
+                .expect("OpenAI 图生图探测请求应可构造");
+
+        assert!(request
+            .content_type
+            .starts_with("multipart/form-data; boundary="));
+        assert!(request
+            .body
+            .windows(b"name=\"model\"".len())
+            .any(|part| part == b"name=\"model\""));
+        assert!(request
+            .body
+            .windows(b"name=\"prompt\"".len())
+            .any(|part| part == b"name=\"prompt\""));
+        assert!(request
+            .body
+            .windows(b"name=\"image[]\"".len())
+            .any(|part| part == b"name=\"image[]\""));
     }
 
     #[test]

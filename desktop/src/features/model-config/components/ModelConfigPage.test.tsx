@@ -49,9 +49,9 @@ const mockLocalProfile: ProviderProfileView = {
 
 const openaiProfile: ProviderProfileView = {
   id: "openai",
-  baseUrl: "https://api.openai.com/v1",
+  baseUrl: "https://api.openai.com",
   customEnabled: false,
-  defaultEndpointPath: "/responses",
+  defaultEndpointPath: "/v1/responses",
   displayName: "OpenAI",
   protocol: "openai",
   providerLabel: "OpenAI",
@@ -422,6 +422,62 @@ describe("ModelConfigPage", () => {
       capabilityId: "clothing-base-model-generation",
       providerProfileId: "openai",
     });
+  });
+
+  it("exposes OpenAI for image-to-image and saves both runtime capabilities", async () => {
+    const user = userEvent.setup();
+    const savedConfigFromInput = (input: SaveLocalModelConfigInput): LocalModelConfigView => ({
+      ...deepseekConfig(input.capabilityId),
+      id: input.id ?? `cfg_saved_${input.capabilityId}`,
+      displayName: input.displayName,
+      enabled: input.enabled,
+      executionMode: input.executionMode,
+      model: input.model,
+      providerProfileId: input.providerProfileId,
+    });
+    const modelConfigPort: ModelConfigPort = {
+      deleteConfig: vi.fn(),
+      getConfig: vi.fn(),
+      listConfigs: vi.fn(() => Promise.resolve([])),
+      listProviderProfiles: vi.fn(() => Promise.resolve([mockLocalProfile, openaiProfile])),
+      saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
+      setDefaultConfig: vi.fn((input) => Promise.resolve(savedConfigFromInput({
+        capabilityId: input.capabilityId,
+        displayName: "默认配置",
+        enabled: true,
+        executionMode: "auto",
+        model: "gpt-image-1.5",
+        providerProfileId: "openai",
+      }))),
+      testConfig: vi.fn(),
+    };
+    const secretPort: SecretPort = {
+      deleteSecret: vi.fn(),
+      getSecretStatus: vi.fn(() => Promise.resolve({ configured: false, storage: "sqlite-local" as const })),
+      revealSecret: vi.fn(),
+      saveSecret: vi.fn(),
+      testProviderConnection: vi.fn(),
+    };
+
+    render(
+      <ToastProvider>
+        <ModelConfigPage modelConfigPort={modelConfigPort} secretPort={secretPort} />
+      </ToastProvider>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "图生图 Provider Mock Local" }));
+    await user.click(screen.getByRole("button", { name: "OpenAI" }));
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    await waitFor(() => expect(screen.getByText("配置已保存")).toBeInTheDocument());
+    expect(modelConfigPort.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      capabilityId: "clothing-tryon-generation",
+      providerProfileId: "openai",
+    }));
+    expect(modelConfigPort.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      capabilityId: "image-edit",
+      providerProfileId: "openai",
+    }));
   });
 
   it("opens API key input for editing after switching to an unconfigured provider", async () => {

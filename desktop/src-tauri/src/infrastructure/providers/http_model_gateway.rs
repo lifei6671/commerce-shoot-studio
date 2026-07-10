@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 
 use crate::domain::errors::{normalize_provider_http_error, ProviderTransportErrorKind};
 use crate::infrastructure::providers::openai_compatible::normalize_openai_compatible_response;
+use crate::infrastructure::providers::openai_images::{
+    build_openai_image_edit_multipart, OpenAiMultipartBody,
+};
 use crate::services::model_gateway::{
     ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
 };
@@ -256,35 +259,36 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 ModelGatewayError::ProviderUnavailable("模型配置缺少 API Key。".to_string())
             })?;
         let endpoint = provider_endpoint(request.base_url, request.endpoint_path)?;
-        let request_body = build_model_gateway_request_body(
-            &HttpModelGatewayRequestConfig {
-                endpoint_path: request.endpoint_path,
-                model: request.model,
-                provider_profile_id: request.provider_profile_id,
-            },
-            request.input,
-        )?;
+        let request_config = HttpModelGatewayRequestConfig {
+            endpoint_path: request.endpoint_path,
+            model: request.model,
+            provider_profile_id: request.provider_profile_id,
+        };
+        let request_body = if uses_openai_image_edit(&request_config) {
+            GatewayRequestBody::Multipart(build_openai_image_edit_multipart(
+                request.model,
+                request.input,
+            )?)
+        } else {
+            GatewayRequestBody::Json(build_model_gateway_request_body(
+                &request_config,
+                request.input,
+            )?)
+        };
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "request",
             "capabilityId": request.capability_id,
-            "request": sanitize_model_gateway_request_for_diagnostics(
-                &HttpModelGatewayRequestConfig {
-                    endpoint_path: request.endpoint_path,
-                    model: request.model,
-                    provider_profile_id: request.provider_profile_id,
-                },
-                &request_body,
-            ),
+            "request": request_body.diagnostic(&request_config),
         }));
         let request_started_at = Instant::now();
         let response = match self
             .client
             .post(endpoint)
             .bearer_auth(api_key)
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, request_body.content_type())
             .timeout(model_gateway_request_timeout(request.capability_id))
-            .body(request_body.to_string())
+            .body(request_body.into_bytes())
             .send()
         {
             Ok(response) => response,
@@ -366,6 +370,42 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
             output_json: normalized.output_json,
             usage_json: Some(normalized.usage_json),
         })
+    }
+}
+
+enum GatewayRequestBody {
+    Json(Value),
+    Multipart(OpenAiMultipartBody),
+}
+
+impl GatewayRequestBody {
+    fn content_type(&self) -> &str {
+        match self {
+            Self::Json(_) => "application/json",
+            Self::Multipart(body) => &body.content_type,
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Json(body) => body.to_string().into_bytes(),
+            Self::Multipart(body) => body.body,
+        }
+    }
+
+    fn diagnostic(&self, config: &HttpModelGatewayRequestConfig<'_>) -> Value {
+        match self {
+            Self::Json(body) => sanitize_model_gateway_request_for_diagnostics(config, body),
+            Self::Multipart(body) => json!({
+                "providerProfileId": config.provider_profile_id,
+                "endpointPath": config.endpoint_path,
+                "model": config.model,
+                "multipart": {
+                    "contentType": "multipart/form-data",
+                    "bodyByteLength": body.body.len(),
+                },
+            }),
+        }
     }
 }
 
@@ -582,6 +622,10 @@ fn parse_user_images(input: &Value) -> Result<Vec<String>, ModelGatewayError> {
 fn uses_responses_api(provider_profile_id: &str, endpoint_path: &str) -> bool {
     endpoint_path.contains("/responses")
         || (provider_profile_id == "volcengine" && endpoint_path == "/responses")
+}
+
+fn uses_openai_image_edit(config: &HttpModelGatewayRequestConfig<'_>) -> bool {
+    config.provider_profile_id == "openai" && config.endpoint_path.contains("/images/edits")
 }
 
 fn responses_input(images: &[String], user_prompt: &str) -> Value {
