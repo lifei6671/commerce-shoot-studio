@@ -23,7 +23,7 @@ commerce-shoot-studio/
 │   ├── src/shared/           # shared UI primitives and helpers
 │   └── src-tauri/            # Rust commands, capabilities, Tauri config
 ├── docs/                     # current planning and technical docs
-├── .codex/docs-sync/         # this project docs-sync skill
+├── .codex/skills/docs-sync/  # this project docs-sync skill
 ├── Makefile                  # repository-defined validation and dev commands
 └── README.md                 # repository entry point
 ```
@@ -46,7 +46,7 @@ Update only documents whose ownership matches the change.
   - Current scene-module integration plan.
   - Update when `场景` module scope, ecom-details-image mapping, scene templates, prompt flow, output sizes, or main/detail image behavior changes.
 
-- `.codex/docs-sync/SKILL.md`
+- `.codex/skills/docs-sync/SKILL.md`
   - Long-lived docs synchronization rules for this repository.
   - Update when this project gains new authoritative docs, validation commands, or reusable docs-sync boundaries.
 
@@ -63,7 +63,7 @@ If a document named above is absent, do not treat it as authoritative. Mention t
 Use this skill when a change affects any of these areas:
 
 - Product scope, first-phase desktop boundary, or non-goals.
-- `docs/`, `README.md`, `.codex/docs-sync/SKILL.md`, `AGENTS.md`, or long-lived project rules.
+- `docs/`, `README.md`, `.codex/skills/docs-sync/SKILL.md`, `AGENTS.md`, or long-lived project rules.
 - `desktop/src/app/` app state, workspace routing, toolbar, navigation rail, generation history, or shared shell behavior.
 - 商品 workflow: native image picker, generation settings, A+ / detail page formats, viral style analysis, listing copy generation, strategy draft step, result grouping, source image handling, failed-card behavior, download, long preview, or history restore.
 - 服饰 workflow: AI generation panel, model attributes, size controls, scene draft step, result generation, or clothing-specific UI state.
@@ -154,7 +154,7 @@ Usually skip docs when the change is:
 
    ```bash
    find docs -maxdepth 2 -type f | sort
-   rg -n "场景|商品|服饰|模型|设置|生成记录|ecom-details-image|验收|checklist|acceptance|MVP|desktop|Tauri|Makefile|Provider|API Key" docs README.md .codex/docs-sync/SKILL.md
+   rg -n "场景|商品|服饰|模型|设置|生成记录|ecom-details-image|验收|checklist|acceptance|MVP|desktop|Tauri|Makefile|Provider|API Key" docs README.md .codex/skills/docs-sync/SKILL.md
    ```
 
 4. Decide updates:
@@ -162,7 +162,7 @@ Usually skip docs when the change is:
    - Update docs when the intended contract or verified behavior changed.
    - Update README when the entry point, setup, command, or scope summary changed.
    - Update checklist/acceptance docs when status, evidence, blockers, or residual risks changed.
-   - Update `.codex/docs-sync/SKILL.md` only for reusable docs-sync rules.
+   - Update `.codex/skills/docs-sync/SKILL.md` only for reusable docs-sync rules.
 
 5. Edit docs/rules:
 
@@ -216,7 +216,7 @@ For code changes, run the narrow relevant test first, then the broader repositor
 - Keep `场景` separate from `商品` and `服饰` unless a request explicitly merges workflows.
 - `场景` uses the ecom-details-image mapping and currently tracks 25 templates grouped by business tabs.
 - Product generation state must survive workspace switching unless the user explicitly resets or starts a new task.
-- 商品 result source image is not a generated asset: it should not participate in selection, download, long preview, or image viewer behavior unless requirements change.
+- 商品和服饰 result source image is not a generated asset: it should appear first in the result grid with an `原图` badge, but it should not participate in selection, batch/all-image download, long preview / long-image download, or image viewer behavior.
 - Failed generated cards can be selected for deletion but must not participate in download, long preview, image viewing, or album preview.
 - API key/provider behavior must not be documented as production-ready storage or real network integration unless verified.
 - Native image selection should use Tauri/native picker paths; do not document browser `<input type="file">` as the desktop UX.
