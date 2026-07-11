@@ -85,6 +85,7 @@ impl ProviderConnectionTester for HttpProviderConnectionTester {
 
         let endpoint = provider_endpoint(&probe.base_url, &probe.endpoint_path)?;
         let request = provider_probe_request(&probe)?;
+        write_connection_diagnostic(connection_probe_request_diagnostic(&probe, &request));
         let started_at = Instant::now();
         let response = self
             .client
@@ -97,17 +98,32 @@ impl ProviderConnectionTester for HttpProviderConnectionTester {
         let elapsed_ms = elapsed_ms(started_at);
 
         match response {
-            Ok(response) => Ok(result_from_response(response, elapsed_ms)),
-            Err(source) if source.is_timeout() => Ok(ProviderConnectionResult {
-                ok: false,
-                message: "Provider 连接超时。".to_string(),
-                elapsed_ms,
-            }),
-            Err(_) => Ok(ProviderConnectionResult {
-                ok: false,
-                message: "Provider 网络连接失败。".to_string(),
-                elapsed_ms,
-            }),
+            Ok(response) => {
+                let (result, diagnostic) = result_from_response(response, elapsed_ms);
+                write_connection_diagnostic(diagnostic);
+                Ok(result)
+            }
+            Err(source) if source.is_timeout() => {
+                write_connection_diagnostic(connection_probe_transport_diagnostic(
+                    "timeout", elapsed_ms,
+                ));
+                Ok(ProviderConnectionResult {
+                    ok: false,
+                    message: "Provider 连接超时。".to_string(),
+                    elapsed_ms,
+                })
+            }
+            Err(_) => {
+                write_connection_diagnostic(connection_probe_transport_diagnostic(
+                    "network_error",
+                    elapsed_ms,
+                ));
+                Ok(ProviderConnectionResult {
+                    ok: false,
+                    message: "Provider 网络连接失败。".to_string(),
+                    elapsed_ms,
+                })
+            }
         }
     }
 }
@@ -278,21 +294,101 @@ fn provider_endpoint(base_url: &str, path: &str) -> Result<Url, ProviderConnecti
     Ok(url)
 }
 
-fn result_from_response(response: Response, elapsed_ms: i64) -> ProviderConnectionResult {
+fn result_from_response(response: Response, elapsed_ms: i64) -> (ProviderConnectionResult, Value) {
     let status = response.status();
     if status.is_success() {
-        return ProviderConnectionResult {
+        let result = ProviderConnectionResult {
             ok: true,
             message: "Provider 连接可用。".to_string(),
             elapsed_ms,
         };
+        return (
+            result,
+            connection_probe_response_diagnostic(
+                status,
+                elapsed_ms,
+                response.content_length().map(|length| length as usize),
+                None,
+            ),
+        );
     }
 
-    let provider_error_code = response
-        .text()
-        .ok()
-        .and_then(|body| provider_error_code(&body));
-    result_from_error_status(status, provider_error_code.as_deref(), elapsed_ms)
+    let response_body = response.text().ok();
+    let provider_error_code = response_body.as_deref().and_then(provider_error_code);
+    let result = result_from_error_status(status, provider_error_code.as_deref(), elapsed_ms);
+    let diagnostic = connection_probe_response_diagnostic(
+        status,
+        elapsed_ms,
+        response_body.as_ref().map(|body| body.len()),
+        provider_error_code.as_deref(),
+    );
+    (result, diagnostic)
+}
+
+fn write_connection_diagnostic(payload: Value) {
+    eprintln!("[provider-connection-diagnostic] {payload}");
+}
+
+fn connection_probe_request_diagnostic(
+    probe: &ProviderConnectionProbe,
+    request: &ProviderProbeRequest,
+) -> Value {
+    json!({
+        "event": "connection_probe_request",
+        "providerProfileId": probe.provider_profile_id,
+        "baseUrl": safe_diagnostic_base_url(&probe.base_url),
+        "category": probe.category,
+        "model": probe.model,
+        "contentType": request.content_type,
+        "requestByteLength": request.body.len(),
+    })
+}
+
+fn connection_probe_response_diagnostic(
+    status: StatusCode,
+    elapsed_ms: i64,
+    response_byte_length: Option<usize>,
+    provider_error_code: Option<&str>,
+) -> Value {
+    json!({
+        "event": "connection_probe_response",
+        "status": status.as_u16(),
+        "success": status.is_success(),
+        "elapsedMs": elapsed_ms,
+        "elapsed": format_elapsed_duration(elapsed_ms),
+        "responseByteLength": response_byte_length,
+        "providerErrorCode": safe_diagnostic_provider_error_code(provider_error_code),
+    })
+}
+
+fn connection_probe_transport_diagnostic(kind: &str, elapsed_ms: i64) -> Value {
+    json!({
+        "event": "connection_probe_transport_error",
+        "kind": kind,
+        "elapsedMs": elapsed_ms,
+        "elapsed": format_elapsed_duration(elapsed_ms),
+    })
+}
+
+fn safe_diagnostic_base_url(base_url: &str) -> String {
+    let Ok(url) = Url::parse(base_url) else {
+        return "<invalid-base-url>".to_string();
+    };
+    url.origin().ascii_serialization()
+}
+
+fn safe_diagnostic_provider_error_code(error_code: Option<&str>) -> Option<&str> {
+    match error_code {
+        Some(
+            "ModelNotOpen"
+            | "ModelNotFound"
+            | "InvalidEndpointOrModel.NotFound"
+            | "NotFound"
+            | "InvalidParameter"
+            | "InvalidRequestError",
+        ) => error_code,
+        _ => None,
+    }
 }
 
 fn result_from_error_status(
@@ -343,6 +439,20 @@ fn elapsed_ms(started_at: Instant) -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+fn format_elapsed_duration(elapsed_ms: i64) -> String {
+    let elapsed_ms = elapsed_ms.max(0);
+    let total_seconds = elapsed_ms / 1_000;
+    let milliseconds = elapsed_ms % 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+
+    if minutes == 0 {
+        format!("{seconds}.{milliseconds:03}s")
+    } else {
+        format!("{minutes}m {seconds}.{milliseconds:03}s")
+    }
 }
 
 #[cfg(test)]
@@ -549,5 +659,91 @@ mod tests {
         assert_eq!(body["response_format"], "url");
         assert_eq!(body["size"], "2K");
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn connection_probe_request_diagnostic_omits_secret_and_body_content() {
+        let mut probe = probe("image-to-image", "/v1/images/edits", "openai");
+        probe.api_key = "sk-connection-diagnostic-secret".to_string();
+        let request = provider_probe_request(&probe).expect("探测请求应可构造");
+
+        let diagnostic = connection_probe_request_diagnostic(&probe, &request);
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["event"], "connection_probe_request");
+        assert_eq!(diagnostic["providerProfileId"], "openai");
+        assert!(diagnostic.get("endpointPath").is_none());
+        assert!(diagnostic["requestByteLength"].as_u64().unwrap() > 0);
+        assert!(!serialized.contains("sk-connection-diagnostic-secret"));
+        assert!(!serialized.contains("hello"));
+        assert!(!serialized.contains("data:image/png;base64,"));
+        assert!(!serialized.contains("Content-Disposition"));
+    }
+
+    #[test]
+    fn connection_probe_request_diagnostic_omits_user_configured_paths() {
+        let mut probe = probe(
+            "text-to-text",
+            "/private/sk-endpoint-secret/chat/completions?api_key=sk-query-secret#response",
+            "openai",
+        );
+        probe.base_url = "https://gateway.example/private/sk-base-secret".to_string();
+        let request = provider_probe_request(&probe).expect("探测请求应可构造");
+
+        let diagnostic = connection_probe_request_diagnostic(&probe, &request);
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["baseUrl"], "https://gateway.example");
+        assert!(diagnostic.get("endpointPath").is_none());
+        assert!(!serialized.contains("sk-base-secret"));
+        assert!(!serialized.contains("sk-endpoint-secret"));
+        assert!(!serialized.contains("sk-query-secret"));
+        assert!(!serialized.contains("/private/"));
+        assert!(!serialized.contains("response"));
+    }
+
+    #[test]
+    fn connection_probe_response_diagnostic_omits_raw_response_body() {
+        let raw_body = r#"{"error":{"code":"ModelNotOpen","message":"response-raw-marker"}}"#;
+
+        let diagnostic = connection_probe_response_diagnostic(
+            StatusCode::NOT_FOUND,
+            12,
+            Some(raw_body.len()),
+            provider_error_code(raw_body).as_deref(),
+        );
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["event"], "connection_probe_response");
+        assert_eq!(diagnostic["status"], 404);
+        assert_eq!(diagnostic["elapsedMs"], 12);
+        assert_eq!(diagnostic["elapsed"], "0.012s");
+        assert_eq!(diagnostic["providerErrorCode"], "ModelNotOpen");
+        assert_eq!(diagnostic["responseByteLength"], raw_body.len());
+        assert!(!serialized.contains("response-raw-marker"));
+        assert!(!serialized.contains("rawResponse"));
+    }
+
+    #[test]
+    fn connection_probe_response_diagnostic_redacts_unknown_provider_error_code() {
+        let diagnostic = connection_probe_response_diagnostic(
+            StatusCode::BAD_REQUEST,
+            12,
+            None,
+            Some("unknown-code-sk-connection-diagnostic-secret"),
+        );
+        let serialized = diagnostic.to_string();
+
+        assert!(diagnostic["providerErrorCode"].is_null());
+        assert!(!serialized.contains("unknown-code-sk-connection-diagnostic-secret"));
+        assert!(!serialized.contains("sk-connection-diagnostic-secret"));
+    }
+
+    #[test]
+    fn connection_probe_transport_diagnostic_includes_human_readable_elapsed() {
+        let diagnostic = connection_probe_transport_diagnostic("timeout", 60_002);
+
+        assert_eq!(diagnostic["elapsedMs"], 60_002);
+        assert_eq!(diagnostic["elapsed"], "1m 0.002s");
     }
 }

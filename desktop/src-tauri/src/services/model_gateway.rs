@@ -334,7 +334,7 @@ fn resolve_gateway_context(
 
     Ok(ResolvedGatewayContext {
         api_key,
-        base_url: profile.base_url.to_string(),
+        base_url: config.view.base_url.clone(),
         config,
         endpoint_path,
     })

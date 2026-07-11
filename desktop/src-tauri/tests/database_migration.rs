@@ -82,6 +82,15 @@ fn open_workspace_database_creates_db_and_configures_sqlite_pragmas() {
         )
         .expect("query generation task output column");
     assert_eq!(task_output_column_count, 1);
+    let model_config_base_url_column_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('model_configs') WHERE name = 'base_url'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query model config base URL column");
+    assert_eq!(model_config_base_url_column_count, 1);
 
     remove_workspace(&workspace_dir);
 }

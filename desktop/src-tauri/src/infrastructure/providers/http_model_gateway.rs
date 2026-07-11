@@ -104,12 +104,14 @@ impl HttpModelGatewayAdapter {
                 } else {
                     ProviderTransportErrorKind::Network
                 };
+                let elapsed_ms = request_started_at.elapsed().as_millis();
                 self.write_diagnostic(json!({
                     "timestampMs": current_timestamp_ms(),
                     "event": "request_error",
-                    "elapsedMs": request_started_at.elapsed().as_millis(),
+                    "elapsedMs": elapsed_ms,
+                    "elapsed": format_elapsed_duration(elapsed_ms),
                     "isTimeout": source.is_timeout(),
-                    "source": source.to_string(),
+                    "transportKind": transport_kind_for_diagnostic(kind),
                 }));
                 return Err(ModelGatewayError::ProviderTransport(kind));
             }
@@ -129,10 +131,12 @@ impl HttpModelGatewayAdapter {
             ));
             return Err(error);
         }
+        let elapsed_ms = request_started_at.elapsed().as_millis();
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "stream_response_status",
-            "elapsedMs": request_started_at.elapsed().as_millis(),
+            "elapsedMs": elapsed_ms,
+            "elapsed": format_elapsed_duration(elapsed_ms),
             "status": status_code,
             "success": true,
         }));
@@ -298,12 +302,14 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 } else {
                     ProviderTransportErrorKind::Network
                 };
+                let elapsed_ms = request_started_at.elapsed().as_millis();
                 self.write_diagnostic(json!({
                     "timestampMs": current_timestamp_ms(),
                     "event": "request_error",
-                    "elapsedMs": request_started_at.elapsed().as_millis(),
+                    "elapsedMs": elapsed_ms,
+                    "elapsed": format_elapsed_duration(elapsed_ms),
                     "isTimeout": source.is_timeout(),
-                    "source": source.to_string(),
+                    "transportKind": transport_kind_for_diagnostic(kind),
                 }));
                 return Err(ModelGatewayError::ProviderTransport(kind));
             }
@@ -398,7 +404,6 @@ impl GatewayRequestBody {
             Self::Json(body) => sanitize_model_gateway_request_for_diagnostics(config, body),
             Self::Multipart(body) => json!({
                 "providerProfileId": config.provider_profile_id,
-                "endpointPath": config.endpoint_path,
                 "model": config.model,
                 "multipart": {
                     "contentType": "multipart/form-data",
@@ -512,6 +517,9 @@ pub fn model_gateway_request_timeout(capability_id: &str) -> Duration {
     if capability_id == "prompt-plan" {
         return Duration::from_secs(300);
     }
+    if matches!(capability_id, "clothing-tryon-generation" | "image-edit") {
+        return Duration::from_secs(60);
+    }
     Duration::from_secs(90)
 }
 
@@ -558,7 +566,6 @@ pub fn sanitize_model_gateway_request_for_diagnostics(
 ) -> Value {
     json!({
         "providerProfileId": config.provider_profile_id,
-        "endpointPath": config.endpoint_path,
         "model": config.model,
         "body": sanitize_diagnostic_value(None, body),
     })
@@ -743,11 +750,32 @@ fn response_diagnostic_payload(
         "timestampMs": current_timestamp_ms(),
         "event": event,
         "elapsedMs": elapsed_ms,
+        "elapsed": format_elapsed_duration(elapsed_ms),
         "status": status_code,
         "success": success,
         "responseByteLength": response_body.len(),
         "providerErrorCode": provider_error_code,
     })
+}
+
+fn format_elapsed_duration(elapsed_ms: u128) -> String {
+    let total_seconds = elapsed_ms / 1_000;
+    let milliseconds = elapsed_ms % 1_000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+
+    if minutes > 0 {
+        format!("{minutes}m {seconds}.{milliseconds:03}s")
+    } else {
+        format!("{seconds}.{milliseconds:03}s")
+    }
+}
+
+fn transport_kind_for_diagnostic(kind: ProviderTransportErrorKind) -> &'static str {
+    match kind {
+        ProviderTransportErrorKind::Timeout => "timeout",
+        ProviderTransportErrorKind::Network => "network",
+    }
 }
 
 fn append_diagnostic_json_line(path: &Path, payload: Value) -> std::io::Result<()> {
@@ -946,10 +974,12 @@ fn value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_complete_sse_blocks, parse_model_gateway_sse_event, provider_http_error,
-        response_diagnostic_payload, sanitize_model_gateway_request_for_diagnostics,
+        drain_complete_sse_blocks, format_elapsed_duration, parse_model_gateway_sse_event,
+        provider_http_error, response_diagnostic_payload,
+        sanitize_model_gateway_request_for_diagnostics, GatewayRequestBody,
         HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
     };
+    use crate::infrastructure::providers::openai_images::OpenAiMultipartBody;
     use crate::services::model_gateway::ModelGatewayError;
     use serde_json::json;
 
@@ -1011,7 +1041,7 @@ mod tests {
         let serialized = diagnostic.to_string();
 
         assert_eq!(diagnostic["providerProfileId"], "openai");
-        assert_eq!(diagnostic["endpointPath"], "/v1/responses");
+        assert!(diagnostic.get("endpointPath").is_none());
         assert_eq!(diagnostic["model"], "gpt-4.1-mini");
         assert_eq!(diagnostic["body"]["model"], "gpt-4.1-mini");
         assert_eq!(diagnostic["body"]["prompt"]["stringCharCount"], 17);
@@ -1026,6 +1056,41 @@ mod tests {
         assert!(!serialized.contains("content-raw-marker"));
         assert!(!serialized.contains("data:image/png;base64,image-raw-marker"));
         assert!(!serialized.contains("sk-diagnostic-secret-marker"));
+    }
+
+    #[test]
+    fn json_request_diagnostic_omits_configured_endpoint_path() {
+        let diagnostic = sanitize_model_gateway_request_for_diagnostics(
+            &HttpModelGatewayRequestConfig {
+                endpoint_path: "/private/sk-endpoint-secret/chat?api_key=sk-query-secret",
+                model: "gpt-4.1-mini",
+                provider_profile_id: "openai",
+            },
+            &json!({ "prompt": "hello" }),
+        );
+        let serialized = diagnostic.to_string();
+
+        assert!(diagnostic.get("endpointPath").is_none());
+        assert!(!serialized.contains("sk-endpoint-secret"));
+        assert!(!serialized.contains("sk-query-secret"));
+    }
+
+    #[test]
+    fn multipart_request_diagnostic_omits_configured_endpoint_path() {
+        let request = GatewayRequestBody::Multipart(OpenAiMultipartBody {
+            content_type: "multipart/form-data; boundary=test".to_string(),
+            body: vec![1, 2, 3],
+        });
+        let diagnostic = request.diagnostic(&HttpModelGatewayRequestConfig {
+            endpoint_path: "/private/sk-endpoint-secret/edits?api_key=sk-query-secret",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        });
+        let serialized = diagnostic.to_string();
+
+        assert!(diagnostic.get("endpointPath").is_none());
+        assert!(!serialized.contains("sk-endpoint-secret"));
+        assert!(!serialized.contains("sk-query-secret"));
     }
 
     #[test]
@@ -1075,9 +1140,18 @@ mod tests {
         );
         let serialized = diagnostic.to_string();
 
+        assert_eq!(diagnostic["elapsedMs"], 12);
+        assert_eq!(diagnostic["elapsed"], "0.012s");
         assert_eq!(diagnostic["providerErrorCode"], "ModelNotOpen");
         assert!(diagnostic["responseByteLength"].as_u64().unwrap() > 0);
         assert!(!serialized.contains("diagnostic-response-marker"));
         assert!(!serialized.contains("rawResponse"));
+    }
+
+    #[test]
+    fn formats_elapsed_duration_for_console_diagnostics() {
+        assert_eq!(format_elapsed_duration(999), "0.999s");
+        assert_eq!(format_elapsed_duration(60_000), "1m 0.000s");
+        assert_eq!(format_elapsed_duration(90_002), "1m 30.002s");
     }
 }

@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use commerce_shoot_studio_lib::infrastructure::filesystem::WorkspaceFileSystem;
 use commerce_shoot_studio_lib::services::capability::CapabilityService;
 use commerce_shoot_studio_lib::services::model_config::{
-    default_resolved_config_for_capability, LocalModelConfigView, ModelConfigService,
-    SaveLocalModelConfigInput, SetDefaultModelConfigInput,
+    default_resolved_config_for_capability, LocalModelConfigView, ModelConfigError,
+    ModelConfigService, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
 };
 use commerce_shoot_studio_lib::services::provider_connection::{
     ProviderConnectionError, ProviderConnectionProbe, ProviderConnectionResult,
@@ -117,6 +117,7 @@ fn tested_real_default_keeps_real_provider_only_capability_available() {
                 display_name: "OpenAI 服饰基准模特".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-1".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -215,6 +216,7 @@ fn saving_openai_image_to_image_uses_fixed_images_edits_endpoint() {
                     display_name: "OpenAI 图生图".to_string(),
                     execution_mode: "sync".to_string(),
                     model: "gpt-image-1".to_string(),
+                    base_url: None,
                     endpoint_path: Some("/v1/responses".to_string()),
                     enabled: true,
                 },
@@ -269,6 +271,29 @@ fn legacy_openai_image_to_image_connection_is_untested_after_endpoint_remap() {
     assert_eq!(config.connection_tested_at, None);
 
     drop(database);
+    SecretService::new()
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some("clothing-tryon-generation".to_string()),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("legacy config should accept a secret");
+    service
+        .test_config_with_tester(
+            &workspace_dir,
+            "cfg_legacy_openai_image_edit",
+            &SuccessfulConnectionTester,
+        )
+        .expect("legacy config should become available after testing");
+    let retested = service
+        .get_config(&workspace_dir, "cfg_legacy_openai_image_edit")
+        .expect("retested legacy config should load");
+
+    assert_eq!(retested.connection_status, "available");
+
     remove_workspace(&workspace_dir);
 }
 
@@ -288,6 +313,7 @@ fn saving_config_updates_capability_immediately_without_api_key_for_mock_provide
                 display_name: "场景图 Mock".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "mock-scene-image-v1".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -320,6 +346,7 @@ fn provider_connection_status_is_persisted_after_test_config() {
                 display_name: "OpenAI 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-4.1-mini".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/chat/completions".to_string()),
                 enabled: true,
             },
@@ -366,6 +393,7 @@ fn clothing_scene_planning_reuses_available_image_to_text_default_config() {
                 display_name: "OpenAI 图生文".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-5.1".to_string(),
+                base_url: None,
                 endpoint_path: Some("/responses".to_string()),
                 enabled: true,
             },
@@ -565,6 +593,7 @@ fn test_config_passes_resolved_provider_probe_to_connection_tester() {
                 display_name: "DeepSeek 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "deepseek-v4-flash".to_string(),
+                base_url: None,
                 endpoint_path: Some("/chat/completions".to_string()),
                 enabled: true,
             },
@@ -600,6 +629,103 @@ fn test_config_passes_resolved_provider_probe_to_connection_tester() {
 }
 
 #[test]
+fn saving_base_url_persists_uses_it_for_probe_and_invalidates_connection_status() {
+    let workspace_dir = initialized_workspace("model-config-base-url");
+    let model_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let capability_id = "listing-copy".to_string();
+    let config = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 文案".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                base_url: Some("https://gateway.example/v1".to_string()),
+                endpoint_path: Some("/chat/completions".to_string()),
+                enabled: true,
+            },
+        )
+        .expect("config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(capability_id.clone()),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    let tester = RecordingConnectionTester::new(true);
+
+    model_service
+        .test_config_with_tester(&workspace_dir, &config.id, &tester)
+        .expect("test config should use the persisted base URL");
+    let probe = tester
+        .take_probe()
+        .expect("provider probe should be recorded");
+
+    assert_eq!(probe.base_url, "https://gateway.example/v1");
+    assert_eq!(config.base_url, "https://gateway.example/v1");
+
+    let updated = model_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: Some(config.id),
+                capability_id,
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 文案".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                base_url: Some("https://gateway-next.example/v1".to_string()),
+                endpoint_path: Some("/chat/completions".to_string()),
+                enabled: true,
+            },
+        )
+        .expect("config should save after base URL change");
+
+    assert_eq!(updated.base_url, "https://gateway-next.example/v1");
+    assert_eq!(updated.connection_status, "untested");
+    assert!(updated.connection_tested_at.is_none());
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn saving_remote_http_base_url_is_rejected() {
+    let workspace_dir = initialized_workspace("model-config-http-base-url");
+
+    let error = ModelConfigService::new()
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: "listing-copy".to_string(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 文案".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                base_url: Some("http://gateway.example/v1".to_string()),
+                endpoint_path: Some("/chat/completions".to_string()),
+                enabled: true,
+            },
+        )
+        .expect_err("remote HTTP base URL must be rejected");
+
+    assert!(matches!(
+        error,
+        ModelConfigError::Validation(message) if message.contains("https")
+    ));
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
 fn volcengine_image_generation_uses_images_generations_endpoint() {
     let workspace_dir = initialized_workspace("model-config-volcengine-image-endpoint");
     let model_service = ModelConfigService::new();
@@ -615,6 +741,7 @@ fn volcengine_image_generation_uses_images_generations_endpoint() {
                 display_name: "火山文生图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "doubao-seedream-4-0-250828".to_string(),
+                base_url: None,
                 endpoint_path: Some("/chat/completions".to_string()),
                 enabled: true,
             },
@@ -667,6 +794,7 @@ fn openai_text_to_image_uses_images_generations_endpoint_for_saved_config_and_pr
                 display_name: "OpenAI 文生图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-1".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/responses".to_string()),
                 enabled: true,
             },
@@ -720,6 +848,7 @@ fn volcengine_image_understanding_uses_responses_endpoint() {
                 display_name: "火山图片理解".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "doubao-seed-2-1-pro-260628".to_string(),
+                base_url: None,
                 endpoint_path: Some("/chat/completions".to_string()),
                 enabled: true,
             },
@@ -914,6 +1043,7 @@ fn saving_related_category_config_reuses_existing_provider_secret() {
                 display_name: "火山图生文".to_string(),
                 execution_mode: "auto".to_string(),
                 model: "doubao-seed-2-0-lite-260428".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -949,6 +1079,7 @@ fn saving_related_category_config_reuses_existing_provider_secret() {
                 display_name: "火山图生文".to_string(),
                 execution_mode: "auto".to_string(),
                 model: "doubao-seed-2-0-lite-260428".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -1008,6 +1139,7 @@ fn test_config_persists_unavailable_when_provider_connection_fails() {
                 display_name: "OpenAI 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-4.1-mini".to_string(),
+                base_url: None,
                 endpoint_path: Some("/responses".to_string()),
                 enabled: true,
             },
@@ -1061,6 +1193,7 @@ fn modifying_endpoint_or_secret_invalidates_provider_connection_status() {
                 display_name: "OpenAI 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-4.1-mini".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/chat/completions".to_string()),
                 enabled: true,
             },
@@ -1090,6 +1223,7 @@ fn modifying_endpoint_or_secret_invalidates_provider_connection_status() {
                 display_name: "OpenAI 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-4.1-mini".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/responses".to_string()),
                 enabled: true,
             },
@@ -1137,6 +1271,7 @@ fn saving_same_secret_does_not_invalidate_provider_connection_status() {
                 display_name: "火山文生文".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "deepseek-v4-flash-260425".to_string(),
+                base_url: None,
                 endpoint_path: Some("/chat/completions".to_string()),
                 enabled: true,
             },
@@ -1182,6 +1317,7 @@ fn provider_connection_status_controls_capability_availability() {
                 display_name: "OpenAI 文案".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-4.1-mini".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/chat/completions".to_string()),
                 enabled: true,
             },
@@ -1242,6 +1378,7 @@ fn set_default_config_is_unique_per_capability() {
                 display_name: "文案 Mock A".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "mock-copy-a".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -1257,6 +1394,7 @@ fn set_default_config_is_unique_per_capability() {
                 display_name: "文案 Mock B".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "mock-copy-b".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -1380,6 +1518,7 @@ fn save_volcengine_text_to_image_config(
                 display_name: format!("{capability_id} 火山文生图"),
                 execution_mode: "sync".to_string(),
                 model: "doubao-seedream-4-0-250828".to_string(),
+                base_url: None,
                 endpoint_path: Some("/chat/completions".to_string()),
                 enabled: true,
             },

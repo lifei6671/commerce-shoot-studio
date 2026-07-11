@@ -844,12 +844,70 @@ describe("ModelConfigPage", () => {
     expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
   });
 
-  it("keeps provider base URL read-only because the runtime contract owns provider endpoints", async () => {
+  it("edits and persists the base URL for every capability in the category", async () => {
+    const user = userEvent.setup();
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
+      saveConfig: vi.fn((input) => Promise.resolve(deepseekConfig(input.capabilityId))),
+      setDefaultConfig: vi.fn((input) => Promise.resolve(deepseekConfig(input.capabilityId))),
+      testConfig: vi.fn(),
+    };
+    const secretPort: SecretPort = {
+      deleteSecret: vi.fn(),
+      getSecretStatus: vi.fn(),
+      revealSecret: vi.fn(),
+      saveSecret: vi.fn(),
+      testProviderConnection: vi.fn(),
+    };
+
+    render(
+      <ToastProvider>
+        <ModelConfigPage modelConfigPort={modelConfigPort} secretPort={secretPort} />
+      </ToastProvider>,
+    );
+
+    const baseUrlInput = await screen.findByRole("textbox", { name: "文生文 Base URL" });
+
+    expect(baseUrlInput).toHaveValue("https://api.deepseek.com");
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, "https://gateway.example/v1");
+    await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+    await waitFor(() => expect(screen.getByText("配置已保存")).toBeInTheDocument());
+    expect(modelConfigPort.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      baseUrl: "https://gateway.example/v1",
+      capabilityId: "listing-copy",
+    }));
+    expect(modelConfigPort.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      baseUrl: "https://gateway.example/v1",
+      capabilityId: "prompt-plan",
+    }));
+  });
+
+  it("keeps Mock Local base URLs read-only", async () => {
+    const mockTextConfig = (
+      capabilityId: "listing-copy" | "prompt-plan",
+    ): LocalModelConfigView => ({
+      ...deepseekConfig(capabilityId, "available"),
+      baseUrl: "mock://local",
+      model: "mock-text-v1",
+      providerLabel: "Mock Local",
+      providerProfileId: "mock-local",
+      secretStatus: { configured: true, storage: "sqlite-local" },
+    });
+    const modelConfigPort: ModelConfigPort = {
+      deleteConfig: vi.fn(),
+      getConfig: vi.fn(),
+      listConfigs: vi.fn(() =>
+        Promise.resolve([
+          mockTextConfig("listing-copy"),
+          mockTextConfig("prompt-plan"),
+        ]),
+      ),
+      listProviderProfiles: vi.fn(() => Promise.resolve([mockLocalProfile])),
       saveConfig: vi.fn(),
       setDefaultConfig: vi.fn(),
       testConfig: vi.fn(),
@@ -870,7 +928,7 @@ describe("ModelConfigPage", () => {
 
     const baseUrlInput = await screen.findByRole("textbox", { name: "文生文 Base URL" });
 
-    expect(baseUrlInput).toHaveValue("https://api.deepseek.com");
+    expect(baseUrlInput).toHaveValue("mock://local");
     expect(baseUrlInput).toHaveAttribute("readonly");
   });
 

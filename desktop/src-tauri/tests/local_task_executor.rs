@@ -383,6 +383,7 @@ fn run_next_marks_task_failed_when_model_capability_is_unavailable() {
                 display_name: "火山引擎场景图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-test".to_string(),
+                base_url: None,
                 endpoint_path: Some("/images/generations".to_string()),
                 enabled: true,
             },

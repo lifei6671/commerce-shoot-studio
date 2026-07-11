@@ -115,6 +115,7 @@ const BASELINE_MIGRATIONS: &[Migration] = &[Migration::new(
         protocol TEXT NOT NULL CHECK (protocol IN ('openai', 'openai-compatible')),
         execution_mode TEXT NOT NULL CHECK (execution_mode IN ('sync', 'stream', 'async-task', 'auto')),
         model TEXT NOT NULL,
+        base_url TEXT,
         endpoint_path TEXT,
         secret_ref TEXT,
         enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
@@ -316,6 +317,7 @@ fn repair_baseline_schema(
     // 仍需要重放 IF NOT EXISTS 语句来补齐新增表，避免要求用户手动删库。
     connection.execute_batch(migration.sql)?;
     repair_generation_tasks_listing_copy_schema(connection)?;
+    repair_model_configs_base_url_column(connection)?;
     repair_model_secrets_version_column(connection)?;
     Ok(())
 }
@@ -419,6 +421,18 @@ fn rebuild_generation_tasks_table(connection: &Connection) -> Result<(), Databas
         PRAGMA legacy_alter_table = OFF;
         ",
     )?;
+    Ok(())
+}
+
+fn repair_model_configs_base_url_column(connection: &Connection) -> Result<(), DatabaseError> {
+    let base_url_column_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('model_configs') WHERE name = 'base_url'",
+        [],
+        |row| row.get(0),
+    )?;
+    if base_url_column_count == 0 {
+        connection.execute_batch("ALTER TABLE model_configs ADD COLUMN base_url TEXT;")?;
+    }
     Ok(())
 }
 

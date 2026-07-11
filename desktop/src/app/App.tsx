@@ -184,6 +184,7 @@ export function App() {
   const activeGenerationRecordIdRef = useRef<string | null>(null);
   const historyViewingRecordIdRef = useRef<string | null>(null);
   const deletedGenerationRecordIdsRef = useRef(new Set<string>());
+  const clothingRetrySequenceRef = useRef(0);
   const clothingGeneratingRecordIdRef = useRef<string | null>(null);
   const clothingScenePlanningRequestIdRef = useRef(0);
   const clothingScenePlanningTaskIdsRef = useRef(new Set<string>());
@@ -975,6 +976,126 @@ export function App() {
         };
       }),
     );
+  }
+
+  function updateClothingSceneImageById(
+    imageId: string,
+    updater: (image: GeneratedDetailImage) => GeneratedDetailImage,
+  ) {
+    setClothingSceneImages((currentImages) => currentImages.map((image) => (image.id === imageId ? updater(image) : image)));
+    setGenerationRecords((currentRecords) =>
+      currentRecords.map((record) => {
+        if (record.workspace !== "clothing" || !record.images.some((recordImage) => recordImage.id === imageId)) {
+          return record;
+        }
+        const images = record.images.map((recordImage) => (recordImage.id === imageId ? updater(recordImage) : recordImage));
+        return {
+          ...record,
+          images,
+          status: deriveProductGenerationRecordStatus(images),
+        };
+      }),
+    );
+  }
+
+  async function retryClothingSceneImage(image: GeneratedDetailImage) {
+    try {
+      const parentRecord = generationRecords.find(
+        (record) => record.workspace === "clothing" && record.images.some((recordImage) => recordImage.id === image.id),
+      );
+      if (!parentRecord?.persistedTaskId) {
+        throw new Error("找不到服饰场景图所属任务，无法重新生成。");
+      }
+
+      const originalDetail = await localGenerationPort.getTaskDetail(parentRecord.persistedTaskId);
+      const originalInput = originalDetail.input && typeof originalDetail.input === "object" ? (originalDetail.input as Record<string, unknown>) : null;
+      const originalItems = Array.isArray(originalInput?.items) ? originalInput.items : [];
+      const imageNo = resolveGeneratedImageNo(image, parentRecord.images);
+      const retryItem = originalItems[imageNo - 1];
+      if (!retryItem || typeof retryItem !== "object") {
+        throw new Error("服饰场景图缺少可复用的生成参数，无法重新生成。");
+      }
+      const inputAssets: GenerationTaskInputAssetInput[] = originalDetail.inputAssets.flatMap((item) => {
+        if (item.role !== "source" && item.role !== "reference" && item.role !== "model") {
+          return [];
+        }
+        return [
+          {
+            assetId: item.asset.id,
+            role: item.role as GenerationTaskInputAssetInput["role"],
+            sortOrder: item.sortOrder,
+          },
+        ];
+      });
+      if (inputAssets.length === 0) {
+        throw new Error("服饰场景图缺少可复用的参考图资产，无法重新生成。");
+      }
+
+      const retryInput = {
+        ...originalInput,
+        items: [
+          {
+            ...(retryItem as Record<string, unknown>),
+            imageId: image.id,
+            imageNo,
+            title: image.title,
+          },
+        ],
+        parentTaskId: parentRecord.persistedTaskId,
+        retrySequence: Math.max(Date.now(), clothingRetrySequenceRef.current + 1),
+      };
+      clothingRetrySequenceRef.current = retryInput.retrySequence;
+      updateClothingSceneImageById(image.id, (currentImage) => ({
+        ...currentImage,
+        errorMessage: undefined,
+        status: "generating",
+      }));
+
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `${image.id}:retry:${Date.now()}`,
+        input: retryInput,
+        inputAssets,
+        kind: "image-generation",
+        title: `重新生成 ${image.title}`,
+        workspace: "clothing",
+      });
+      if (!task?.id) {
+        throw new Error("服饰场景图重新生成任务创建失败。");
+      }
+      if (deletedGenerationRecordIdsRef.current.has(parentRecord.id)) {
+        deletePersistedGenerationTasks([task.id]);
+        return;
+      }
+      setGenerationRecords((currentRecords) =>
+        currentRecords.map((record) =>
+          record.id === parentRecord.id
+            ? { ...record, relatedTaskIds: Array.from(new Set([...(record.relatedTaskIds ?? []), task.id])) }
+            : record,
+        ),
+      );
+
+      let retryImages: GeneratedDetailImage[] = [{ ...image, errorMessage: undefined, status: "generating" }];
+      await requestGenerationTaskStart(task.id, "服饰场景图重新生成任务未能启动。");
+      await pollClothingImageTask(
+        task.id,
+        () => retryImages,
+        (nextImages) => {
+          retryImages = nextImages;
+          const retriedImage = nextImages[0];
+          if (retriedImage) {
+            updateClothingSceneImageById(image.id, () => retriedImage);
+          }
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "服饰场景图重新生成失败。";
+      updateClothingSceneImageById(image.id, (currentImage) => ({
+        ...currentImage,
+        errorMessage: message,
+        status: "failed",
+      }));
+      showToast({ message: `服饰场景图重新生成失败：${message}`, variant: "error" });
+    }
   }
 
   async function retryProductDetailImage(image: GeneratedDetailImage) {
@@ -1824,7 +1945,7 @@ export function App() {
           .filter((record): record is GenerationRecord => record !== null);
         const retryPatches = productTaskDetails
           .filter((detail) => detail.task.kind === "image-generation")
-          .map(createRestoredSingleImageRetryPatchFromTaskDetail)
+          .map((detail) => createRestoredSingleImageRetryPatchFromTaskDetail(detail))
           .filter((patch): patch is RestoredSingleImageRetryPatch => patch !== null);
         const listingCopyImages = productTaskDetails
           .filter((detail) => detail.task.kind === "listing-copy")
@@ -1832,11 +1953,19 @@ export function App() {
           .filter((item): item is RestoredListingCopyImage => item !== null);
         const restoredRecordsWithRetries = mergeRestoredSingleImageRetryPatches(restoredRecords, retryPatches);
         const restoredRecordsWithListingCopy = mergeRestoredListingCopyImages(restoredRecordsWithRetries, listingCopyImages);
+        const clothingRetryPatches = clothingTaskDetails
+          .filter((detail) => detail.task.kind === "image-generation")
+          .map((detail) => createRestoredSingleImageRetryPatchFromTaskDetail(detail, { includeIncomplete: true }))
+          .filter((patch): patch is RestoredSingleImageRetryPatch => patch !== null);
         const restoredClothingRecords = clothingTaskDetails
           .filter((detail) => detail.task.kind === "image-generation")
           .map(createClothingGenerationRecordFromTaskDetail)
           .filter((record): record is GenerationRecord => record !== null);
-        const restoredGenerationRecords = [...restoredRecordsWithListingCopy, ...restoredClothingRecords];
+        const restoredClothingRecordsWithRetries = mergeRestoredSingleImageRetryPatches(
+          restoredClothingRecords,
+          clothingRetryPatches,
+        );
+        const restoredGenerationRecords = [...restoredRecordsWithListingCopy, ...restoredClothingRecordsWithRetries];
 
         if (!cancelled && restoredGenerationRecords.length > 0) {
           setGenerationRecords((currentRecords) => mergeGenerationRecords(currentRecords, restoredGenerationRecords));
@@ -1982,7 +2111,7 @@ export function App() {
           )
         ) : isClothingWorkspace ? (
           clothingSceneImages.length > 0 ? (
-            <PreviewCanvas boards={previewBoards} detailImages={clothingSceneImages} />
+            <PreviewCanvas boards={previewBoards} detailImages={clothingSceneImages} onImageRetry={retryClothingSceneImage} />
           ) : (
             <ClothingPreviewCanvas />
           )
@@ -2101,7 +2230,7 @@ function createProductGenerationRecordFromTaskDetail(detail: GenerationTaskDetai
 
 function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDetail): GenerationRecord | null {
   const input = detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {};
-  if (readOutputString(input.kind) !== "clothing-tryon-generation") {
+  if (readOutputString(input.kind) !== "clothing-tryon-generation" || isSingleImageRetryTaskDetail(detail)) {
     return null;
   }
 
@@ -2175,12 +2304,18 @@ type RestoredSingleImageRetryPatch = {
   image: GeneratedDetailImage;
   imageNo: number;
   parentTaskId?: string;
+  retrySequence?: number;
   taskId: string;
   targetImageId: string;
+  updatedAt: number;
 };
 
-function createRestoredSingleImageRetryPatchFromTaskDetail(detail: GenerationTaskDetail): RestoredSingleImageRetryPatch | null {
-  if (!isSingleImageRetryTaskDetail(detail) || detail.task.status !== "succeeded") {
+function createRestoredSingleImageRetryPatchFromTaskDetail(
+  detail: GenerationTaskDetail,
+  options: { includeIncomplete?: boolean } = {},
+): RestoredSingleImageRetryPatch | null {
+  const includeIncomplete = options.includeIncomplete ?? false;
+  if (!isSingleImageRetryTaskDetail(detail) || (!includeIncomplete && detail.task.status !== "succeeded")) {
     return null;
   }
   const input = detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {};
@@ -2189,28 +2324,39 @@ function createRestoredSingleImageRetryPatchFromTaskDetail(detail: GenerationTas
   const targetImageId = readOutputString(item.imageId);
   const imageNo = readOutputNumber(item.imageNo);
   const parentTaskId = readOutputString(input.parentTaskId) || detail.task.retryOfTaskId;
+  const retrySequence = readOutputNumber(input.retrySequence);
   const outputAsset = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
   const src = outputAsset?.asset.url ?? outputAsset?.asset.localPath;
-  if (!targetImageId || !src) {
+  if (!targetImageId || (!includeIncomplete && !src)) {
     return null;
   }
+  const stale = isRestoredTaskStale(detail.task);
+  const status =
+    !includeIncomplete || (detail.task.status === "succeeded" && src)
+      ? "complete"
+      : stale || isTaskTerminal(detail.task.status)
+        ? "failed"
+        : "generating";
 
   return {
     targetImageId,
     imageNo,
     parentTaskId,
+    retrySequence: retrySequence > 0 ? retrySequence : undefined,
     taskId: detail.task.id,
+    updatedAt: dateTimeToTimestamp(detail.task.completedAt || detail.task.updatedAt || detail.task.createdAt),
     image: {
       id: targetImageId,
-      assetId: outputAsset.asset.id,
-      assetLocalPath: outputAsset.asset.localPath,
-      assetRelativePath: outputAsset.asset.relativePath,
+      assetId: outputAsset?.asset.id,
+      assetLocalPath: outputAsset?.asset.localPath,
+      assetRelativePath: outputAsset?.asset.relativePath,
+      errorMessage: status === "failed" ? detail.task.error?.message || "服饰场景图重新生成失败。" : undefined,
       imageNo: imageNo || undefined,
       prompt: readOutputString(item.imagePrompt) || undefined,
       referenceImages: readReferenceImagesFromTaskDetail(detail, input),
       sceneDescription: readOutputString(item.sceneDescription) || undefined,
       src,
-      status: "complete",
+      status,
       title: readOutputString(item.title) || detail.task.title.replace(/^重新生成\s*/, "") || "详情图",
     },
   };
@@ -2253,8 +2399,24 @@ function mergeRestoredSingleImageRetryPatches(
   }
 
   return records.map((record) => {
+    const relatedRetryTaskIds = retryPatches
+      .filter((patch) => isRestoredRetryPatchScopedToRecord(record, patch))
+      .map((patch) => patch.taskId);
     let images = record.images;
-    for (const patch of retryPatches) {
+    const orderedRetryPatches = [...retryPatches].sort((left, right) => {
+      if (left.retrySequence !== undefined && right.retrySequence !== undefined) {
+        const retrySequenceDifference = left.retrySequence - right.retrySequence;
+        if (retrySequenceDifference !== 0) {
+          return retrySequenceDifference;
+        }
+      } else if (left.retrySequence !== undefined) {
+        return 1;
+      } else if (right.retrySequence !== undefined) {
+        return -1;
+      }
+      return left.updatedAt - right.updatedAt;
+    });
+    for (const patch of orderedRetryPatches) {
       const relatedByParentTask = isRestoredRetryPatchScopedToRecord(record, patch);
       const exactMatchIndex = images.findIndex((image) => restoredImageMatchesRetryTarget(image, patch));
       const imageNoMatchIndex =
@@ -2267,23 +2429,36 @@ function mergeRestoredSingleImageRetryPatches(
       }
       images = images.map((image, index) =>
         index === targetIndex
-          ? {
-              ...image,
-              assetId: patch.image.assetId ?? image.assetId,
-              assetLocalPath: patch.image.assetLocalPath ?? image.assetLocalPath,
-              assetRelativePath: patch.image.assetRelativePath ?? image.assetRelativePath,
-              errorMessage: undefined,
-              prompt: patch.image.prompt || image.prompt,
-              referenceImages: patch.image.referenceImages?.length ? patch.image.referenceImages : image.referenceImages,
-              sceneDescription: patch.image.sceneDescription || image.sceneDescription,
-              src: patch.image.src,
-              status: "complete",
-            }
+          ? patch.image.status === "complete"
+            ? {
+                ...image,
+                assetId: patch.image.assetId ?? image.assetId,
+                assetLocalPath: patch.image.assetLocalPath ?? image.assetLocalPath,
+                assetRelativePath: patch.image.assetRelativePath ?? image.assetRelativePath,
+                errorMessage: undefined,
+                prompt: patch.image.prompt || image.prompt,
+                referenceImages: patch.image.referenceImages?.length ? patch.image.referenceImages : image.referenceImages,
+                sceneDescription: patch.image.sceneDescription || image.sceneDescription,
+                src: patch.image.src,
+                status: "complete",
+              }
+            : {
+                ...image,
+                assetId: undefined,
+                assetLocalPath: undefined,
+                assetRelativePath: undefined,
+                errorMessage: patch.image.errorMessage,
+                prompt: patch.image.prompt || image.prompt,
+                referenceImages: patch.image.referenceImages?.length ? patch.image.referenceImages : image.referenceImages,
+                sceneDescription: patch.image.sceneDescription || image.sceneDescription,
+                src: undefined,
+                status: patch.image.status,
+              }
           : image,
       );
     }
 
-    return images === record.images
+    return images === record.images && relatedRetryTaskIds.length === 0
       ? record
       : {
           ...record,
@@ -2291,12 +2466,10 @@ function mergeRestoredSingleImageRetryPatches(
           relatedTaskIds: Array.from(
             new Set([
               ...(record.relatedTaskIds ?? []),
-              ...retryPatches
-                .filter((patch) => isRestoredRetryPatchScopedToRecord(record, patch))
-                .map((patch) => patch.taskId),
+              ...relatedRetryTaskIds,
             ]),
           ),
-          status: deriveProductGenerationRecordStatus(images),
+          status: images === record.images ? record.status : deriveProductGenerationRecordStatus(images),
         };
   });
 }

@@ -125,6 +125,7 @@ Rust 代码按以下方向组织：
 - `LocalModelConfigView` 不包含 secret 明文。
 - 日志、`task_events.detail_json`、settings、asset、导出默认包和前端 DTO 都不能包含 API Key 明文。
 - raw prompt、系统 Prompt、Provider raw request、Provider raw response 永不入库。
+- 模型“测试连接”的控制台诊断只能输出脱敏摘要，且不得持久化；禁止输出请求/响应原文、Authorization、Cookie、原始 header、API Key、Prompt、图片数据或用户配置的 Base URL / endpoint 原始路径。
 - SQLite 只保存 workspace 内相对路径，不保存用户原始绝对路径。
 - workspace / DB 文件要做权限加固：macOS/Linux 目录建议 `0700`、DB 文件建议 `0600`；Windows 使用当前用户 ACL。
 
@@ -214,7 +215,7 @@ M7 真实场景生图闭环
 ### 模型配置页规则
 
 - 模型配置页必须通过 `ModelConfigPort`、`CapabilityPort`、`SecretPort`、`RuntimeInfoPort` 接真实后端，不允许页面维护假 provider 状态。
-- provider 是否可用以持久化 `connectionStatus` 和连接指纹为准；provider、model、endpoint、API Key 任一变化后必须回到 `untested / 不可用`，直到测试成功。
+- 除固定为 `mock://local` 的 Mock Local 外，本地模型配置的 Base URL 可编辑并持久化，但只接受无凭据、无查询参数的 HTTPS 地址；provider 是否可用以持久化 `connectionStatus` 和连接指纹为准，provider、model、Base URL、endpoint、API Key 任一变化后必须回到 `untested / 不可用`，直到测试成功。
 - 测试连接必须异步执行，测试中禁止修改当前卡片的 provider、model、base URL、API Key，并禁用重复点击。
 - 测试失败必须 toast 展示归一化后的错误原因；不要直接暴露 Provider raw error、raw response 或 secret。
 - API Key 输入框未配置时可输入；已配置时默认显示脱敏值，点击眼睛后可查看当前输入框内明文，但不得从后端 DTO 回传 secret 明文。
@@ -225,12 +226,13 @@ M7 真实场景生图闭环
 
 - MVP provider allowlist 为 `mock-local`、`openai`、`deepseek`、`volcengine`。
 - MVP 不开放任意 custom gateway；SQLite 中的 provider/profile 不能绕过 Rust 内置 allowlist。
+- 用户可为内置 provider profile 的本地模型配置修改并持久化 Base URL；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。连接探测和真实调用使用该持久化地址。React 页面不提供 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别继续使用已保存的 endpoint path 或 provider profile 默认值。
 - DeepSeek 当前只开放文生文能力。
 - OpenAI-compatible 文生文默认走 `/chat/completions`。
 - OpenAI 图生图的 `clothing-tryon-generation` 与 `image-edit` 固定走 `/v1/images/edits` 的 `multipart/form-data`；只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，输入图不裁剪、不转码。保存配置、Provider 连接探测和历史配置执行都必须强制解析该 endpoint，不能回写旧 `/v1/responses`；当前仅有本地 HTTP/单元测试证据，未验证真实 OpenAI 外网调用。
 - 火山引擎文生图和图生图使用 Ark `/api/v3/images/generations`；图生图测试图片可用很小的 base64 图片。
 - 火山引擎图生文使用 Ark `/api/v3/responses`，图片理解输入按官方 `input_image` + `input_text` 结构组织。
-- endpoint path 由 Rust runtime 根据 provider profile 和 capability 内置映射，页面不要让用户自由编辑真实执行 endpoint。
+- React 页面不要让用户自由编辑真实执行 endpoint；Rust runtime 对 OpenAI / 火山引擎的特殊图像能力强制解析内置 endpoint，其他类别使用已保存的 endpoint path 或 provider profile 默认值。
 
 ## Rust 规范
 
@@ -275,9 +277,10 @@ M7 真实场景生图闭环
 - M2 已支持导入图片到 workspace 相对路径、sha256 去重、PNG/JPEG 尺寸读取、`staged/active/deleted` 生命周期、列表/详情、reveal、软删除和 GC。
 - M3 的任务历史后端基础已建立：`generation_tasks` / `task_events` baseline schema、Rust `GenerationService` / Tauri command、前端 `localGenerationPort` adapter。
 - M3 已支持 create/get/list/getTaskDetail、idempotency key、failed idempotency 返回 `TASK_RETRY_REQUIRED`、input asset relations、创建任务时激活输入资产、retry/cancel/delete 基础语义。
+- 普通任务重试必须调用 `retryTask`，由 runtime 写入 `retry_of_task_id` / `attempt_no`；服饰单图重试为保留单项 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、该项 `imageId` 和 `imageNo`，不伪造 runtime 级 retry 关联。
 - M5 的模型配置基础已建立：`model_configs` / `model_secrets` baseline schema、内置 provider profile allowlist、Rust `ModelConfigService` / `SecretService` / `CapabilityService`、前端 local adapters 和模型配置页真实 UI。
 - 默认内置 `mock-local` provider，并为 `listing-copy`、`prompt-plan`、`viral-style-analysis`、`scene-image-generation`、`product-detail-generation`、`clothing-tryon-generation`、`image-edit` 生成默认 mock 配置；mock 不触发真实模型调用。
 - 当前 provider allowlist 是 `mock-local`、`openai`、`deepseek`、`volcengine`。DeepSeek 第一版只开放文生文能力；OpenAI 和火山引擎可作为多能力 provider profile。
-- provider 可用性持久化在 `model_configs.connection_status` 等字段中；连接指纹包含 provider、模型、执行模式、endpointPath 和 secret version，修改 API Key、模型或接入路径后会自动回到 `untested`。
+- provider 可用性持久化在 `model_configs.connection_status` 等字段中；连接指纹包含 provider、模型、Base URL、执行模式、endpointPath 和 secret version，修改 API Key、模型、Base URL 或接入路径后会自动回到 `untested`。
 - M6 的 deterministic `ModelGatewayService` 基础已建立，可对 7 个 capability 返回 mock 输出，不触发真实 Provider 调用。
 - 下一步继续 M6/M7：真实 Provider HTTP adapter 依赖确认、ModelGateway invocation 表、LocalTaskExecutor 接 mock gateway、Windows 文件名规则、历史页 UI 对接。涉及素材库 UI、历史页 UI、导入交互或初始化失败恢复入口等 UI 交互时必须先确认方案。

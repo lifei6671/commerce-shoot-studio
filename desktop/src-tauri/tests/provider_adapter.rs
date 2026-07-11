@@ -106,6 +106,41 @@ fn http_adapter_preserves_network_failure() {
 }
 
 #[test]
+fn http_adapter_network_failure_diagnostic_omits_base_url_path() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let address = listener.local_addr().expect("address should resolve");
+    drop(listener);
+    let base_url = format!("http://{address}/private/sk-network-diagnostic-secret");
+    let diagnostic_log_path = test_diagnostic_log_path("network-error");
+    let input = provider_text_input();
+
+    let error = HttpModelGatewayAdapter::new(Some(diagnostic_log_path.clone()))
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .expect_err("closed listener should propagate as a network error");
+
+    assert_eq!(
+        error,
+        ModelGatewayError::ProviderTransport(ProviderTransportErrorKind::Network)
+    );
+    let diagnostic = fs::read_to_string(&diagnostic_log_path)
+        .expect("network failure diagnostic log should exist");
+
+    assert!(diagnostic.contains("\"transportKind\":\"network\""));
+    assert!(!diagnostic.contains("sk-network-diagnostic-secret"));
+    fs::remove_file(diagnostic_log_path).expect("diagnostic log should be removable");
+}
+
+#[test]
 fn http_adapter_extracts_nested_error_code_without_logging_response_body() {
     let response_body =
         r#"{"error":{"code":"ModelNotOpen","message":"diagnostic-response-marker"}}"#;
@@ -1439,8 +1474,13 @@ fn builds_text_only_chat_completion_request_with_string_content() {
 }
 
 #[test]
-fn uses_longer_timeout_for_prompt_plan_generation() {
+fn uses_one_minute_timeout_for_image_to_image_calls() {
     assert_eq!(model_gateway_request_timeout("prompt-plan").as_secs(), 300);
+    assert_eq!(
+        model_gateway_request_timeout("clothing-tryon-generation").as_secs(),
+        60
+    );
+    assert_eq!(model_gateway_request_timeout("image-edit").as_secs(), 60);
     assert_eq!(
         model_gateway_request_timeout("viral-style-analysis").as_secs(),
         90
@@ -1517,7 +1557,7 @@ fn model_gateway_request_diagnostics_summarize_prompt_content_and_image_data() {
     let serialized = sanitized.to_string();
 
     assert_eq!(sanitized["providerProfileId"], "openai");
-    assert_eq!(sanitized["endpointPath"], "/v1/responses");
+    assert!(sanitized.get("endpointPath").is_none());
     assert_eq!(sanitized["model"], "gpt-4.1-mini");
     assert_eq!(sanitized["body"]["model"], "gpt-4.1-mini");
     assert_eq!(sanitized["body"]["input"]["itemCount"], 1);

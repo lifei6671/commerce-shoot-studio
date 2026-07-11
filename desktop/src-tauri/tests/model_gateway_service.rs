@@ -328,6 +328,7 @@ fn model_gateway_uses_current_default_provider_profile_in_mock_mode() {
                 display_name: "火山引擎调试配置".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "debug-compatible-model".to_string(),
+                base_url: None,
                 endpoint_path: Some("/v1/images/generations".to_string()),
                 enabled: true,
             },
@@ -391,6 +392,7 @@ fn model_gateway_reuses_image_to_text_config_and_secret_for_clothing_scene_plann
                 display_name: "OpenAI 图生文".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-5.1".to_string(),
+                base_url: None,
                 endpoint_path: Some("/responses".to_string()),
                 enabled: true,
             },
@@ -464,6 +466,7 @@ fn model_gateway_uses_openai_images_endpoint_for_legacy_text_to_image_config() {
                 display_name: "OpenAI 文生图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-1".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -547,6 +550,7 @@ fn model_gateway_uses_openai_image_edits_endpoint_for_legacy_image_to_image_conf
                 display_name: "OpenAI 图生图".to_string(),
                 execution_mode: "sync".to_string(),
                 model: "gpt-image-1".to_string(),
+                base_url: None,
                 endpoint_path: None,
                 enabled: true,
             },
@@ -609,6 +613,77 @@ fn model_gateway_uses_openai_image_edits_endpoint_for_legacy_image_to_image_conf
             .expect("endpoint capture lock")
             .as_deref(),
         Some("/v1/images/edits")
+    );
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn model_gateway_uses_persisted_base_url() {
+    let workspace_dir = initialized_workspace("model-gateway-persisted-base-url");
+    let model_config_service = ModelConfigService::new();
+    let secret_service = SecretService::new();
+    let gateway_service = ModelGatewayService::new();
+    let adapter = CapturingAdapter::default();
+    let capability_id = "listing-copy".to_string();
+
+    let config = model_config_service
+        .save_config(
+            &workspace_dir,
+            SaveLocalModelConfigInput {
+                id: None,
+                capability_id: capability_id.clone(),
+                provider_profile_id: "openai".to_string(),
+                display_name: "OpenAI 文案".to_string(),
+                execution_mode: "sync".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                base_url: Some("https://gateway.example/v1".to_string()),
+                endpoint_path: Some("/chat/completions".to_string()),
+                enabled: true,
+            },
+        )
+        .expect("config should save");
+    secret_service
+        .save_secret(
+            &workspace_dir,
+            SecretScope {
+                provider_profile_id: "openai".to_string(),
+                capability_id: Some(capability_id.clone()),
+            },
+            "sk-test-secret".to_string(),
+        )
+        .expect("secret should save");
+    model_config_service
+        .set_default_config(
+            &workspace_dir,
+            SetDefaultModelConfigInput {
+                capability_id: capability_id.clone(),
+                config_id: config.id.clone(),
+            },
+        )
+        .expect("config should become the default");
+    model_config_service
+        .test_config_with_tester(&workspace_dir, &config.id, &SuccessfulConnectionTester)
+        .expect("config should become available");
+
+    gateway_service
+        .invoke_with_adapter(
+            &workspace_dir,
+            ModelGatewayRequest {
+                capability_id,
+                input: serde_json::json!({ "prompt": { "messages": [{ "role": "user", "content": "生成文案" }] } }),
+            },
+            &adapter,
+        )
+        .expect("gateway should invoke the configured provider");
+
+    assert_eq!(
+        adapter
+            .captured_base_url
+            .lock()
+            .expect("base URL capture lock")
+            .as_deref(),
+        Some("https://gateway.example/v1")
     );
 
     remove_workspace(&workspace_dir);
@@ -680,6 +755,7 @@ impl ProviderConnectionTester for RecordingConnectionTester {
 #[derive(Default)]
 struct CapturingAdapter {
     captured_api_key: Mutex<Option<String>>,
+    captured_base_url: Mutex<Option<String>>,
     captured_endpoint_path: Mutex<Option<String>>,
     captured_input: Mutex<Option<serde_json::Value>>,
 }
@@ -691,6 +767,10 @@ impl ModelGatewayAdapter for CapturingAdapter {
     ) -> Result<ModelGatewayAdapterResult, ModelGatewayError> {
         *self.captured_api_key.lock().expect("api key capture lock") =
             request.api_key.map(str::to_string);
+        *self
+            .captured_base_url
+            .lock()
+            .expect("base URL capture lock") = Some(request.base_url.to_string());
         *self
             .captured_endpoint_path
             .lock()

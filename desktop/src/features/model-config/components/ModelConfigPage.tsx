@@ -334,6 +334,7 @@ export function ModelConfigPage({
         displayName: `${config.title} 默认配置`,
         executionMode: "auto",
         model: config.model,
+        baseUrl: config.baseUrl,
         endpointPath: config.endpointPath || providerProfiles[config.provider]?.defaultEndpointPath,
         enabled: true,
       });
@@ -635,7 +636,8 @@ function ModelConfigCard({
             aria-label={`${config.title} Base URL`}
             className="h-9 w-full rounded-[11px] border border-slate-200/90 bg-white/70 px-3 text-[13px] text-slate-500 outline-none shadow-[inset_0_1px_2px_rgba(15,23,42,0.04),inset_0_1px_0_rgba(255,255,255,0.9)]"
             disabled={isTesting}
-            readOnly
+            onChange={(event) => onUpdate({ baseUrl: event.target.value, connectionStatus: "untested" })}
+            readOnly={config.provider === "mock-local"}
             value={config.baseUrl}
           />
         </ModelField>

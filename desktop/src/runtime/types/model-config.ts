@@ -68,6 +68,7 @@ export type SaveLocalModelConfigInput = {
   displayName: string;
   executionMode: "sync" | "stream" | "async-task" | "auto";
   model: string;
+  baseUrl?: string;
   endpointPath?: string;
   enabled: boolean;
 };

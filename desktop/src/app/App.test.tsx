@@ -1509,6 +1509,264 @@ describe("App shell", () => {
     expect(warnMock).toHaveBeenCalledWith("restore product generation task list failed", expect.any(Error));
   });
 
+  it("restores the newest clothing retry when retries share the same persisted second", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const parentTask = createRestoredClothingTaskDetail("task_clothing_retry_parent", "服饰场景图");
+    const retryTask = {
+      events: [],
+      input: {
+        items: [
+          {
+            id: "task_clothing_retry_parent-item-1",
+            imageId: "live-clothing-image-id",
+            imageNo: 1,
+            poseAction: "自然站立展示服装版型",
+            ratio: "3:4",
+            scene: "都市街头",
+          },
+        ],
+        kind: "clothing-tryon-generation",
+        parentTaskId: parentTask.task.id,
+        ratio: "3:4",
+        retrySequence: 2,
+      },
+      inputAssets: [],
+      outputAssets: [
+        {
+          asset: {
+            id: "asset_clothing_retry_restored",
+            localPath: "/workspace/current/assets/generated/clothing-retry-restored.png",
+            relativePath: "assets/generated/clothing-retry-restored.png",
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: {
+        completedAt: "2026-07-02T11:00:00.000Z",
+        createdAt: "2026-07-02T10:59:00.000Z",
+        id: "task_clothing_retry_restored",
+        kind: "image-generation",
+        stage: "completed",
+        status: "succeeded",
+        title: "重新生成 都市街头",
+        updatedAt: "2026-07-02T11:00:00.000Z",
+        workspace: "clothing",
+      },
+    };
+    const olderRetryTask = {
+      ...retryTask,
+      input: {
+        ...retryTask.input,
+        retrySequence: 1,
+      },
+      outputAssets: [
+        {
+          asset: {
+            id: "asset_clothing_retry_older",
+            localPath: "/workspace/current/assets/generated/clothing-retry-older.png",
+            relativePath: "assets/generated/clothing-retry-older.png",
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: {
+        ...retryTask.task,
+        completedAt: "2026-07-02T11:00:00.000Z",
+        createdAt: "2026-07-02T10:59:00.000Z",
+        id: "task_clothing_retry_older",
+        updatedAt: "2026-07-02T11:00:00.000Z",
+      },
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const items = workspace === "clothing" ? [retryTask.task, olderRetryTask.task, parentTask.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === retryTask.task.id) {
+          return Promise.resolve(retryTask);
+        }
+        return Promise.resolve(taskId === olderRetryTask.task.id ? olderRetryTask : parentTask);
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_get_task_detail", {
+        taskId: retryTask.task.id,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+
+    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    expect(screen.queryByText("重新生成 都市街头")).not.toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+    expect(screen.getByRole("img", { name: "都市街头" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("clothing-retry-restored.png"),
+    );
+  });
+
+  it.each([
+    { stage: "failed", status: "failed", statusLabel: "失败" },
+    { stage: "running", status: "running", statusLabel: "生成中" },
+  ] as const)("restores a $status clothing retry under its parent record", async ({ stage, status, statusLabel }) => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const now = new Date().toISOString();
+    const parentTask = createRestoredClothingTaskDetail(`task_clothing_${status}_retry_parent`, "服饰场景图");
+    const retryTask = {
+      events: [],
+      input: {
+        items: [
+          {
+            id: `${parentTask.task.id}-item-1`,
+            imageId: `${parentTask.task.id}-item-1`,
+            imageNo: 1,
+            poseAction: "自然站立展示服装版型",
+            ratio: "3:4",
+            scene: "都市街头",
+          },
+        ],
+        kind: "clothing-tryon-generation",
+        parentTaskId: parentTask.task.id,
+        ratio: "3:4",
+      },
+      inputAssets: [],
+      outputAssets: [],
+      task: {
+        ...(status === "failed" ? { error: { code: "PROVIDER_TIMEOUT", message: "Provider 连接超时。", retryable: true } } : {}),
+        createdAt: now,
+        id: `task_clothing_${status}_retry_child`,
+        kind: "image-generation",
+        stage,
+        status,
+        title: "重新生成 都市街头",
+        updatedAt: now,
+        workspace: "clothing",
+      },
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const items = workspace === "clothing" ? [retryTask.task, parentTask.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        return Promise.resolve(taskId === retryTask.task.id ? retryTask : parentTask);
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_get_task_detail", {
+        taskId: retryTask.task.id,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+
+    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    expect(screen.getByText(statusLabel)).toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "删除记录 服饰场景图" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: retryTask.task.id,
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", { taskId: parentTask.task.id });
+  });
+
+  it("deletes a clothing single-image retry created after its parent record was removed", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const parentTask = {
+      ...createRestoredClothingTaskDetail("task_clothing_retry_delete_parent", "服饰场景图"),
+      inputAssets: [
+        { asset: { id: "source_retry_delete", relativePath: "assets/source/retry-delete.png" }, role: "source", sortOrder: 0 },
+        { asset: { id: "model_retry_delete", relativePath: "assets/model/retry-delete.png" }, role: "model", sortOrder: 1 },
+      ],
+      outputAssets: [],
+      task: {
+        ...createRestoredClothingTaskDetail("task_clothing_retry_delete_parent", "服饰场景图").task,
+        error: { code: "PROVIDER_TIMEOUT", message: "Provider 连接超时。", retryable: true },
+        stage: "failed",
+        status: "failed",
+      },
+    };
+    let resolveRetryTask: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const items = workspace === "clothing" ? [parentTask.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        return Promise.resolve(parentTask);
+      }
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          return new Promise((resolve) => {
+            resolveRetryTask = resolve;
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_get_task_detail", {
+        taskId: parentTask.task.id,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+    await user.click(within(await screen.findByTestId("failed-result-card")).getByRole("button", { name: "重试 都市街头" }));
+    await waitFor(() => expect(resolveRetryTask).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(screen.getByRole("button", { name: "删除记录 服饰场景图" }));
+    await act(async () => {
+      resolveRetryTask?.({
+        attemptNo: 1,
+        createdAt: "2026-07-02T11:00:00.000Z",
+        id: "task_clothing_retry_deleted_parent",
+        kind: "image-generation",
+        stage: "queued",
+        status: "queued",
+        title: "重新生成 都市街头",
+        updatedAt: "2026-07-02T11:00:00.000Z",
+        workspace: "clothing",
+      });
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: "task_clothing_retry_deleted_parent",
+      }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", { taskId: "task_clothing_retry_deleted_parent" });
+  });
+
   it("restores healthy history records when another task detail fails", async () => {
     const user = userEvent.setup();
     const baseInvoke = invokeMock.getMockImplementation();
@@ -3979,6 +4237,266 @@ describe("App shell", () => {
       );
     });
     expect(importCallCount).toBe(2);
+  });
+
+  it("retries a failed clothing result through a real single-item task", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    let tryonCreateCount = 0;
+    let retryCreateInput: unknown = null;
+
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "asset_import_images") {
+        const input = (args as { input?: { kind?: string; paths?: string[] } } | undefined)?.input;
+        const kind = input?.kind ?? "source";
+        return Promise.resolve(
+          (input?.paths ?? []).map((path, index) => ({
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: `${kind}_retry_${index + 1}`,
+            kind,
+            lifecycle: "active",
+            localPath: `/workspace/current/assets/${kind}/${kind}-retry-${index + 1}.png`,
+            mimeType: "image/png",
+            name: `${kind}-retry-${index + 1}.png`,
+            originalName: path.split(/[\\/]/).pop() ?? `${kind}.png`,
+            relativePath: `assets/${kind}/${kind}-retry-${index + 1}.png`,
+            sha256: `sha256-${kind}-retry-${index + 1}`,
+            sizeBytes: 128,
+            updatedAt: "2026-07-02T00:00:00.000Z",
+          })),
+        );
+      }
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          tryonCreateCount += 1;
+          if (tryonCreateCount === 2) {
+            retryCreateInput = input;
+          }
+          const id = tryonCreateCount === 1 ? "task_clothing_initial_failure" : "task_clothing_retry_item";
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id,
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景图",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_run_task") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        return Promise.resolve({ invocationId: `inv_${taskId}`, taskId });
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId === "task_clothing-scene-planning") {
+          return Promise.resolve(createClothingPlanningTaskDetail(taskId, "可复用场景"));
+        }
+        if (taskId === "task_clothing_initial_failure") {
+          return Promise.resolve({
+            events: [],
+            input: {
+              items: [
+                {
+                  cameraSetup: {
+                    framing: "全身",
+                    perspective: "正面",
+                    shootingPosition: "平视机位",
+                  },
+                  id: "retry-scene-item",
+                  poseAction: "自然站立展示服装版型",
+                  ratio: "3:4",
+                  scene: "可复用场景",
+                  scenePromptSegment: "商业服饰摄影",
+                  sceneVisualAnchor: "街头自然光",
+                },
+              ],
+              kind: "clothing-tryon-generation",
+              ratio: "3:4",
+            },
+            inputAssets: [
+              {
+                asset: { id: "source_retry_1", mimeType: "image/png", relativePath: "assets/source/source-retry-1.png" },
+                role: "source",
+                sortOrder: 0,
+              },
+              {
+                asset: { id: "model_retry_1", mimeType: "image/png", relativePath: "assets/model/model-retry-1.png" },
+                role: "model",
+                sortOrder: 1,
+              },
+            ],
+            outputAssets: [],
+            task: {
+              error: { code: "PROVIDER_TIMEOUT", message: "Provider 连接超时。", retryable: true },
+              id: taskId,
+              kind: "image-generation",
+              stage: "failed",
+              status: "failed",
+              title: "服饰场景图",
+              workspace: "clothing",
+            },
+          });
+        }
+        if (taskId === "task_clothing_retry_item") {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_clothing_retry_result",
+                  localPath: "/workspace/current/assets/generated/clothing-retry.png",
+                  relativePath: "assets/generated/clothing-retry.png",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              id: taskId,
+              kind: "image-generation",
+              stage: "completed",
+              status: "succeeded",
+              title: "重新生成 可复用场景",
+              workspace: "clothing",
+            },
+          });
+        }
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/retry-shirt.png",
+        name: "retry-shirt.png",
+        path: "/Users/demo/Pictures/retry-shirt.png",
+        src: "asset://retry-shirt.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await user.click(await screen.findByRole("checkbox", { name: "可复用场景站姿" }));
+    await user.click(screen.getByRole("button", { name: "生成场景图片（1张）" }));
+
+    const failedCard = await screen.findByTestId("failed-result-card");
+    await user.click(within(failedCard).getByRole("button", { name: "重试 可复用场景" }));
+
+    await waitFor(() => expect(retryCreateInput).not.toBeNull());
+    expect(retryCreateInput).toEqual(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          items: [
+            expect.objectContaining({
+              id: "retry-scene-item",
+              imageId: expect.any(String),
+              imageNo: 1,
+            }),
+          ],
+          kind: "clothing-tryon-generation",
+          parentTaskId: "task_clothing_initial_failure",
+          retrySequence: expect.any(Number),
+        }),
+        inputAssets: [
+          { assetId: "source_retry_1", role: "source", sortOrder: 0 },
+          { assetId: "model_retry_1", role: "model", sortOrder: 1 },
+        ],
+        workspace: "clothing",
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_run_task", { taskId: "task_clothing_retry_item" });
+    expect(await screen.findByTestId("generated-detail-image-card")).toHaveTextContent("可复用场景");
+  });
+
+  it("shows a toast and keeps the clothing image failed when retry preparation fails", async () => {
+    const user = userEvent.setup();
+    installBuiltinClothingModelMock();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    let initialDetailReadCount = 0;
+
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_create_task") {
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input;
+        if (input?.input?.kind === "clothing-tryon-generation") {
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-02T00:00:00.000Z",
+            id: "task_clothing_retry_preparation_failure",
+            kind: "image-generation",
+            stage: "queued",
+            status: "queued",
+            title: "服饰场景图",
+            updatedAt: "2026-07-02T00:00:00.000Z",
+            workspace: "clothing",
+          });
+        }
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId;
+        if (taskId === "task_clothing-scene-planning") {
+          return Promise.resolve(createClothingPlanningTaskDetail(taskId, "失败重试场景"));
+        }
+        if (taskId === "task_clothing_retry_preparation_failure") {
+          initialDetailReadCount += 1;
+          if (initialDetailReadCount > 1) {
+            return Promise.reject(new Error("读取原任务失败"));
+          }
+          return Promise.resolve({
+            events: [],
+            input: {
+              items: [{ id: "failed-scene-item", poseAction: "自然站立", ratio: "3:4", scene: "失败重试场景" }],
+              kind: "clothing-tryon-generation",
+              ratio: "3:4",
+            },
+            inputAssets: [],
+            outputAssets: [],
+            task: {
+              error: { code: "PROVIDER_TIMEOUT", message: "Provider 连接超时。", retryable: true },
+              id: taskId,
+              kind: "image-generation",
+              stage: "failed",
+              status: "failed",
+              title: "服饰场景图",
+              workspace: "clothing",
+            },
+          });
+        }
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/retry-failure-shirt.png",
+        name: "retry-failure-shirt.png",
+        path: "/Users/demo/Pictures/retry-failure-shirt.png",
+        src: "asset://retry-failure-shirt.png",
+      },
+    ]);
+
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "服饰" }));
+    await user.click(screen.getByRole("button", { name: "服装图片" }));
+    await user.click(await screen.findByRole("button", { name: "选择内置模特 内置模特 01" }));
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+    await user.click(await screen.findByRole("checkbox", { name: "失败重试场景站姿" }));
+    await user.click(screen.getByRole("button", { name: "生成场景图片（1张）" }));
+
+    const failedCard = await screen.findByTestId("failed-result-card");
+    await user.click(within(failedCard).getByRole("button", { name: "重试 失败重试场景" }));
+
+    expect(await screen.findByText("服饰场景图重新生成失败：读取原任务失败")).toBeInTheDocument();
+    expect(screen.getByTestId("failed-result-card")).toBeInTheDocument();
   });
 
   it("does not show fallback mock scenes when clothing scene planning fails", async () => {

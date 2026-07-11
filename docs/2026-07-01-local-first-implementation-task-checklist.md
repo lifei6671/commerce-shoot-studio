@@ -419,16 +419,16 @@ M7 真实场景生图闭环
 ### M3-T04 retry/cancel/delete 语义
 
 - 依赖：M3-T03。
-- 当前状态：部分完成。`retryTask` 创建新 task 并写 `retry_of_task_id` / `attempt_no`，`cancelTask` 更新状态并写事件，`deleteTask` 写 `hidden_at` 做历史软隐藏；输入资产关系已落库，结果资产关系仍待 M7 联动。
+- 当前状态：部分完成。普通任务由 `retryTask` 创建新 task 并写 `retry_of_task_id` / `attempt_no`；服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中写 `parentTaskId`、目标 `imageId` 和 `imageNo`，不写 runtime 级 retry 关联。`cancelTask` 更新状态并写事件，`deleteTask` 写 `hidden_at` 做历史软隐藏；输入资产关系已落库，结果资产关系仍待 M7 联动。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src/runtime/local/generation*`
 - 执行动作：
-  - `retryTask` 创建新 task，写 `retry_of_task_id` 和 `attempt_no`。
+  - 普通任务由 `retryTask` 创建新 task，写 `retry_of_task_id` 和 `attempt_no`；服饰单图重试用 `createTask` 创建只含目标项的子任务，并在冻结输入中写 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id` / `attempt_no`。
   - `cancelTask` 更新状态和事件。
   - `deleteTask` 只写 `hidden_at`，不删除资产。
 - 验收标准：
-  - retry 新旧 task 关联正确。
+  - 普通 retry 新旧 task 的 `retry_of_task_id` / `attempt_no` 关联正确；服饰单图 retry 的冻结输入能关联父 task 与目标 `imageId` / `imageNo`。
   - delete 后默认历史不显示，`includeDeleted` 可查。
   - delete 不物理删除输入资产或结果资产。
   - `make cargo-check` 通过。
@@ -547,38 +547,40 @@ M7 真实场景生图闭环
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
-- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，MVP 不开放 custom gateway，`provider_profile_id` 由 Rust allowlist 校验；DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 已开放已实现的文生文、图生文、`clothing-base-model-generation` 纯文生图，以及图生图 `clothing-tryon-generation` / `image-edit` capability；后两项统一固定到 `/v1/images/edits`。`clothing-base-model-generation` 固定生成 2:3 纵向图且不接收参考图；需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放。
+- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，`provider_profile_id` 由 Rust allowlist 校验；用户可为内置 profile 的模型配置修改并持久化 Base URL，Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。协议和 capability 矩阵仍由 Rust 内置映射控制。DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 已开放已实现的文生文、图生文、`clothing-base-model-generation` 纯文生图，以及图生图 `clothing-tryon-generation` / `image-edit` capability；后两项统一固定到 `/v1/images/edits`。`clothing-base-model-generation` 固定生成 2:3 纵向图且不接收参考图；需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
 - 执行动作：
   - 定义内置 provider profile allowlist。
-  - MVP 不开放任意 custom gateway。
+  - 允许内置 profile 持久化其模型配置的 Base URL；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址；不开放任意 custom provider/profile。
   - `provider_profile_id` 只能引用内置 profile。
 - 验收标准：
   - 手动修改 SQLite 不能绕过 allowlist。
   - `custom-disabled` 不可被调用。
   - `make cargo-check` 通过。
-- 退出条件：模型配置不能指向任意 baseUrl。
+- 退出条件：模型配置只能引用内置 provider profile；Mock Local 固定使用 `mock://local`，其他 Base URL 只能是无凭据、无查询参数的 HTTPS 地址；React 页面不开放 endpoint path 编辑，Base URL 也不能改变协议或 capability 映射。
 
 ### M5-T01A Provider 连接探测抽象
 
 - 依赖：M5-T01、M5-T03。
-- 当前状态：已完成第一版。已新增 Rust `ProviderConnectionTester` 抽象和 `HttpProviderConnectionTester`，`ModelConfigService.testConfig` 会用当前 workspace SQLite 中的 API Key，对内置 provider 的 models endpoint 发起最小 HTTP 探测，并将结果写回 `model_configs.connection_status`、`connection_message`、`connection_tested_at` 和连接指纹。
+- 当前状态：已完成第一版。已新增 Rust `ProviderConnectionTester` 抽象和 `HttpProviderConnectionTester`，`ModelConfigService.testConfig` 会用当前 workspace SQLite 中的 API Key 和通过安全校验的持久化 Base URL，对内置 provider 的 runtime 映射 endpoint 发起最小 HTTP 探测，并将结果写回 `model_configs.connection_status`、`connection_message`、`connection_tested_at` 和连接指纹。
 - 主要文件：
   - `desktop/src-tauri/src/services/provider_connection.rs`
   - `desktop/src-tauri/src/services/model_config.rs`
   - `desktop/src-tauri/tests/model_config_service.rs`
 - 执行动作：
   - mock-local 不触发网络请求，直接视为可用。
-  - OpenAI / DeepSeek / 火山引擎只从 Rust 内置 profile 解析 baseUrl 和 models path。
+  - OpenAI / DeepSeek / 火山引擎使用已持久化的 Base URL；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。
   - 连接测试只读取 HTTP status，不保存 provider raw response。
+  - 连接探测可在终端输出请求/响应脱敏摘要（provider profile、脱敏后的 Base URL origin、模型、Content-Type、字节数、状态码、耗时、响应长度和白名单错误码），不落库且不包含原始 body、secret、header 或用户配置的 Base URL / endpoint 原始路径。
   - 401 / 403 / 429 / 404 / timeout / network error 归一化为可展示文案。
 - 验收标准：
   - API Key 不进入 `LocalModelConfigView`。
   - `testConfig` 成功和失败状态均可持久读取。
-  - 配置、endpoint 或 API Key 变化后连接状态自动回到 `untested`。
+  - 配置、Base URL、endpoint 或 API Key 变化后连接状态自动回到 `untested`。
   - 单测可注入 fake tester，避免测试阶段真实访问 Provider。
+  - 单测锁定诊断摘要不包含 API Key、请求 body、Prompt、图片数据、原始响应或非白名单错误码。
   - `make cargo-check` 和 Rust 全量测试通过。
 - 退出条件：模型配置页的“测试连接”具备真实 Provider 探测能力，但不代表真实生成链路已接入。
 
@@ -594,7 +596,7 @@ M7 真实场景生图闭环
   - 建立 `model_configs` 表。
   - `model_configs` 只保存模型配置和 `secret_ref`，不直接保存 API Key。
   - 持久化 provider 连接状态和连接指纹。
-  - 修改 API Key、模型、执行模式或 endpointPath 后，连接状态自动回到 `untested`。
+  - 修改 API Key、模型、Base URL、执行模式或 endpointPath 后，连接状态自动回到 `untested`。
   - 实现 `listConfigs`、`getConfig`、`saveConfig`、`setDefaultConfig`、`deleteConfig`、`listProviderProfiles`、`testConfig`。
   - `LocalModelConfigView` 不含 secret 明文。
   - remote mode 误调用返回 `MODEL_CONFIG_UNAVAILABLE`。
@@ -602,7 +604,7 @@ M7 真实场景生图闭环
   - API Key 不进入 `model_configs`。
   - `LocalModelConfigView` 不包含 secret 明文。
   - 默认配置唯一性生效。
-  - provider 连接测试结果可持久读取，配置或密钥变化后自动失效。
+  - provider 连接测试结果可持久读取，配置、Base URL 或密钥变化后自动失效。
   - `make test`、`make cargo-check` 通过。
 - 退出条件：模型配置页可接真实本地配置。
 
@@ -651,13 +653,13 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
-- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；保存配置走 `ModelConfigPort`，保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。OpenAI 图生图 profile 会在“图生图 Provider”菜单中出现；选择并保存时，页面会分别提交 `clothing-tryon-generation` 与 `image-edit` 两项配置，实际 endpoint 仍由 Rust runtime 固定解析。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；Mock Local 的 Base URL 固定为 `mock://local`，其他 provider 的 Base URL 可编辑并随模型配置通过 `ModelConfigPort` 持久化，但只接受无凭据、无查询参数的 HTTPS 地址。连接探测和真实调用均使用持久化地址，变更后连接状态回到 `untested`。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。OpenAI 图生图 profile 会在“图生图 Provider”菜单中出现；选择并保存时，页面会分别提交 `clothing-tryon-generation` 与 `image-edit` 两项配置，实际 endpoint 仍由 Rust runtime 固定解析。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
 - 执行动作：
   - 页面展示 provider profiles 和 local configs。
-  - 保存配置走 `ModelConfigPort`。
+  - 保存配置（包含非 Mock Local provider 可编辑的 HTTPS Base URL）走 `ModelConfigPort`。
   - 保存 API Key 走 `SecretPort`。
   - 连接测试走 `testConfig`。
   - remote mode 隐藏配置入口。
@@ -709,7 +711,7 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
-- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸但不裁剪或转码输入图；保存配置、Provider 连接探测和历史配置执行都会强制解析该 endpoint，避免旧 `/v1/responses` 路径回写。上述证据来自本地 HTTP/单元测试，未验证真实 OpenAI 外网调用。已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
+- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸但不裁剪或转码输入图；保存配置、Provider 连接探测和历史配置执行都会强制解析该 endpoint，避免旧 `/v1/responses` 路径回写。`clothing-tryon-generation` 和 `image-edit` 的真实调用超时为 60 秒，其余普通能力为 90 秒，既有 `prompt-plan` 为 300 秒。诊断同时保留机器可读的 `elapsedMs` 与人类可读的 `elapsed` 总耗时；当前通用执行器分支在 HTTP 调用前失败时会输出不含原始输入、Prompt、图片或密钥的 `task_execution_error` 摘要，商品详情图逐项执行路径尚未统一接入该摘要。上述证据来自本地 HTTP/单元测试，未验证真实 OpenAI 外网调用。已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
   - `desktop/src-tauri/src/infrastructure/providers/openai_images.rs`
@@ -723,7 +725,7 @@ M7 真实场景生图闭环
 - 验收标准：
   - 编译通过。
   - 单测覆盖 URL 脱敏。
-  - 本地调试诊断日志只记录状态、耗时、响应长度、脱敏后的响应结构摘要和经清理的 `providerErrorCode`；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，且 raw response 不得进入 SQLite、`task_events`、导出包或前端 DTO。
+- 本地调试诊断日志只记录状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 `providerErrorCode`；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，且 raw response 不得进入 SQLite、`task_events`、导出包或前端 DTO。
   - `make cargo-check` 通过。
 - 退出条件：真实 Provider 接入点稳定。
 
@@ -777,7 +779,7 @@ M7 真实场景生图闭环
 ### M7-T02 场景任务调用 ModelGateway
 
 - 依赖：M7-T01、M6-T03。
-- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；服饰菜单已补充 `clothing-base-model-generation` 文生图、`clothing-scene-planning` 图生文规划映射和 `clothing-tryon-generation` 逐动作出图映射。基准模特 Prompt 支持婴儿、儿童、青少年、青年、中年、老年；规划阶段会渲染 `clothing_scene_planning.toml` 并要求模型输出可展示的场景/动作结构，第三步出图阶段会渲染 `clothing_tryon_generation.toml` 并拼接用户上传服装图、用户选择模特和第二步选中的场景动作。服饰基准模特、规划和试穿执行路径要求真实 provider，`mock-local` 只保留为底层 adapter/测试替身。真实同步 HTTP 和文本流式调用入口已接入；`async-task` Provider 提交与轮询仍待后续切片。
+- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；服饰菜单已补充 `clothing-base-model-generation` 文生图、`clothing-scene-planning` 图生文规划映射和 `clothing-tryon-generation` 逐动作出图映射。基准模特 Prompt 支持婴儿、儿童、青少年、青年、中年、老年；规划阶段会渲染 `clothing_scene_planning.toml` 并要求模型输出可展示的场景/动作结构，第三步出图阶段会渲染 `clothing_tryon_generation.toml` 并拼接用户上传服装图、用户选择模特和第二步用户选择的场景动作。失败服饰结果卡的“重新生成”会复用原任务的输入资产和对应单项参数，创建并立即启动新的单项 `clothing-tryon-generation` 任务，不重跑已成功卡片。服饰基准模特、规划和试穿执行路径要求真实 provider，`mock-local` 只保留为底层 adapter/测试替身。真实同步 HTTP 和文本流式调用入口已接入；`async-task` Provider 提交与轮询仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/services/model_gateway*`
@@ -899,7 +901,7 @@ M7 真实场景生图闭环
 - [ ] remote mode 不暴露 provider、model、baseUrl、endpointPath。
 - [x] `provider_profile_id` 不能绕过 allowlist。
 - [x] 保存配置或 secret 后 `CapabilityPort` 立即反映。
-- [x] provider 可用性持久化，修改 API Key、模型或 endpointPath 后自动失效。
+- [x] provider 可用性持久化，修改 API Key、模型、Base URL 或 endpointPath 后自动失效。
 - [x] 切换离开并返回已配置 Provider 后恢复 API Key 遮罩状态，不自动 reveal 明文，且过期状态/明文响应不会覆盖当前 Provider。
 
 ### Windows 兼容

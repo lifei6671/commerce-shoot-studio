@@ -729,7 +729,7 @@ export type LocalModelConfigView = {
 - `protocol` 表示入参协议。第三方网关第一版只要求支持 OpenAI-compatible。
 - `executionMode` 表示出参模式。`auto` 由 adapter 根据响应自动识别。
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
-- `baseUrl` 只能作为内置 provider profile 的只读展示字段，MVP 不作为用户自由输入字段。
+- `baseUrl` 是单机模式下内置 provider profile 的可持久化配置；Mock Local 固定为 `mock://local`，其他 provider 的 React 页面允许编辑，但 Rust runtime 只接受无凭据、无查询参数的 HTTPS 地址。保存后用于连接探测和真实调用，且 Base URL 变化必须使连接状态回到 `untested`。
 - OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。图生图覆盖 `clothing-tryon-generation` 与 `image-edit`，统一使用 `/v1/images/edits` 的 `multipart/form-data`：仅接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，不裁剪或转码输入图。保存配置、Provider 连接探测和历史配置执行都强制解析该 endpoint，不允许旧 `/v1/responses` 回写。上述行为只在本地 HTTP/单元测试中验证，尚未验证真实 OpenAI 外网调用。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放；Responses `image_generation` 工具链路仍待后续切片。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
@@ -754,6 +754,8 @@ struct ResolvedModelConfig {
 
 `ResolvedModelConfig` 只能存在于 Rust runtime 内存中，不能序列化给前端。
 
+当前 timeout 策略为：`prompt-plan` 使用 300 秒；`clothing-tryon-generation` 和 `image-edit` 使用 60 秒；其余同步能力使用 90 秒。图生图的两项 60 秒策略仅约束真实 Provider 调用，不改变连接超时、下载超时或任务状态机语义。
+
 ### 6.4 ProviderProfileView
 
 ```ts
@@ -774,6 +776,7 @@ export type SaveLocalModelConfigInput = {
   displayName: string;
   executionMode: "sync" | "stream" | "async-task" | "auto";
   model: string;
+  baseUrl?: string;
   endpointPath?: string;
   enabled: boolean;
 };
@@ -1332,6 +1335,7 @@ model_configs
 ├── protocol
 ├── execution_mode
 ├── model
+├── base_url
 ├── endpoint_path
 ├── secret_ref
 ├── enabled
@@ -1480,7 +1484,7 @@ ai_assist_invocations
 - `model_secrets.secret_value` MVP 按本地明文密钥处理，依赖 workspace 文件权限和用户设备安全；后续可以在不改变 Public Port 的前提下升级为加密存储或系统凭据库。
 - 不存系统 Prompt 或最终 raw prompt。
 - `model_configs` 只服务本地单机 runtime，SaaS 模式不下发到客户端。
-- `model_configs.provider_profile_id` 只能引用 Rust runtime 内置 profile，不信任 SQLite 中的任意 `base_url`。
+- `model_configs.provider_profile_id` 只能引用 Rust runtime 内置 profile；除 Mock Local 固定使用 `mock://local` 外，持久化 `base_url` 必须是无凭据、无查询参数的 HTTPS 地址，且不能改变协议或 capability 映射。React 页面不开放 `endpoint_path` 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 `endpoint_path` 或 profile 默认值。
 - `model_configs.secret_ref` 只能引用同 workspace、同 provider profile 的 `model_secrets` 记录。
 - `prompt_plans` / `prompt_plan_items` 保存当前可编辑方案。
 - `generation_tasks.prompt_plan_snapshot_json` 保存任务执行时的冻结快照。
@@ -1489,7 +1493,7 @@ ai_assist_invocations
 - `input_json` 只能作为输入快照，不能作为资产引用、删除保护和历史查询的结构化事实来源。
 - 输入资产关系必须写入 `generation_task_input_assets`。
 - 任务诊断、阶段流转和失败原因必须写入 `task_events`。
-- 重试 MVP 采用“创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务”的策略。
+- 普通任务重试采用“创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务”的策略。服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、目标 `imageId` 和 `imageNo`；该例外不写 `retry_of_task_id` / `attempt_no`。
 - `generation_tasks.deleted_at` 用于隐藏历史任务，不触发资产物理删除。
 
 SQLite 运行约束：
@@ -1545,8 +1549,9 @@ CREATE INDEX idx_task_events_task_created_at ON task_events(task_id, created_at)
 - 如果前端未传 `idempotencyKey`，由 runtime 生成。
 - 如果 `idempotencyKey` 已存在且任务未 failed，直接返回已有 task。
 - 如果 `idempotencyKey` 已存在且任务为 failed，`createTask` 返回 `TASK_RETRY_REQUIRED`，不插入新行，不复用旧任务。
-- 用户点击重试时必须调用 `retryTask`。
+- 普通任务的用户重试必须调用 `retryTask`。
 - `retryTask` 创建新 task，并写入 `retry_of_task_id` 和 `attempt_no`。
+- 服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务；冻结输入必须包含 `parentTaskId`、目标 `imageId` 和 `imageNo`，且不写 `retry_of_task_id` / `attempt_no`。
 
 `task_events.detail_json` 只允许保存脱敏后的结构化摘要：
 
@@ -1618,7 +1623,7 @@ finalizing
 
 - UI 不能自行把任务改成成功。
 - Provider 错误必须归一化后写入 `failed`。
-- 用户重试时创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务。
+- 普通任务用户重试时创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务；服饰单图重试使用带 `parentTaskId`、目标 `imageId` 和 `imageNo` 的单项 `items` 输入创建子任务，不写 runtime 级 retry 关联。
 - 应用启动时，发现 `running` 但无执行上下文的任务，应恢复为 `failed`，错误为 `interrupted`。
 - UI 可以展示阶段式进度，但不要展示假百分比。
 - 每次 `stage` 变化、Provider 调用、轮询、下载、保存、失败都写入 `task_events`。
@@ -1761,7 +1766,8 @@ custom-disabled
 - 限制下载文件大小和 MIME。
 - 所有 URL 入库前脱敏。
 - 导入 workspace 中的 provider 配置必须二次确认。
-- 本地调试诊断日志只记录请求/响应状态、耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
+- 本地调试诊断日志只记录 provider profile、脱敏后的 Base URL origin、请求/响应状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header、API Key 或用户配置的 Base URL / endpoint 原始路径，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
+- 当前通用执行器分支（不含商品详情图逐项执行路径）在 HTTP 调用前遇到任务校验、资产读取或模型配置失败时，会在终端输出 `task_execution_error` 脱敏摘要；摘要只含 task、capability、错误码、重试标记和归一化 Provider 状态，不含原始输入、Prompt、图片、密钥或原始错误文本。商品详情图逐项执行路径尚未统一接入该摘要。
 
 ### 10.5 Adapter 接口
 
@@ -2134,7 +2140,7 @@ Local 到 SaaS 迁移边界：
 1. SQLite 依赖选择：MVP 建议 `rusqlite + migration 工具`；如选择 `sqlx` 需确认编译和迁移成本。
 2. Secret 存储方式：MVP 已确认使用 SQLite 本地密钥表，不使用 macOS Keychain / Windows Credential Manager；正式发布前可再评估是否升级。
 3. 第一条真实模型通道：建议先接稳定官方 Provider，再接 OpenAI-compatible 网关。
-4. 单机版第三方 API 网关是否允许用户自定义 `baseUrl`、`endpointPath` 和 `executionMode`。MVP 建议不开放任意 custom，只做预设 profile。
+4. 单机版已确认允许用户为内置 provider profile 的模型配置自定义并持久化 `baseUrl`；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 `endpointPath` 编辑。OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别沿用已保存的 `endpointPath` 或 profile 默认值；不开放任意 custom provider/profile。
 5. 异步网关第一版是否只支持轮询，还是同时预留 webhook/callback。MVP 建议单机只做 polling。
 6. SaaS 版服务端模型能力列表是否按租户、套餐、工作区或用户粒度返回。
 7. SaaS 版是否允许客户端知道模型能力名称之外的任何模型元数据。
@@ -2222,6 +2228,7 @@ Task：
 - `createTask` 双击不会创建重复任务。
 - `createTask` 命中 failed 的 `idempotencyKey` 时返回 `TASK_RETRY_REQUIRED`。
 - `retryTask` 创建新 task，并关联 `retry_of_task_id`。
+- 服饰单图重试创建只含目标项的子 task，并在冻结输入中关联 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id`。
 - `deleteTask` 只隐藏任务历史，不物理删除输入资产或生成结果资产。
 - `stage` 变化会写 `task_events`。
 - local mode 下 `task_events` 写入后会触发 runtime 事件。

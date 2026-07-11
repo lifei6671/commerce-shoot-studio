@@ -408,6 +408,11 @@ fn execute_claimed_task(
         Ok(results) => results,
         Err(source) => {
             let error = normalize_model_gateway_task_error(source);
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_for_claimed_task(&task),
+                &error,
+            ));
             mark_task_failed(workspace_directory, &task.id, &error)?;
             return Ok(LocalTaskExecutionResult {
                 task_id: task.id,
@@ -429,6 +434,11 @@ fn execute_claimed_task(
     };
     if let Err(_source) = persist_result {
         let error = normalized_persist_error(&task);
+        write_task_execution_diagnostic(task_execution_error_diagnostic(
+            &task.id,
+            capability_for_claimed_task(&task),
+            &error,
+        ));
         mark_task_failed(workspace_directory, &task.id, &error)?;
         return Ok(LocalTaskExecutionResult {
             task_id: task.id,
@@ -483,6 +493,26 @@ fn normalize_model_gateway_task_error(source: TaskModelInvocationError) -> Norma
     };
     error.stage = Some(GenerationTaskStage::Failed);
     error
+}
+
+fn write_task_execution_diagnostic(payload: serde_json::Value) {
+    eprintln!("[local-task-executor-diagnostic] {payload}");
+}
+
+fn task_execution_error_diagnostic(
+    task_id: &str,
+    capability_id: &str,
+    error: &NormalizedTaskError,
+) -> serde_json::Value {
+    json!({
+        "event": "task_execution_error",
+        "taskId": task_id,
+        "capabilityId": capability_id,
+        "errorCode": error.code,
+        "retryable": error.retryable,
+        "providerStatusCode": error.provider_status_code,
+        "providerErrorCode": error.provider_error_code,
+    })
 }
 
 fn is_product_detail_image_task(task: &ClaimedTask) -> bool {
@@ -2408,15 +2438,16 @@ mod tests {
         mark_task_failed, mark_task_succeeded, normalize_model_gateway_task_error,
         normalized_persist_error, parse_listing_copy_output, persist_structured_model_output,
         product_detail_input_batches, product_detail_item_gateway_input,
-        product_detail_output_sort_order_start, task_gateway_inputs,
-        task_input_with_asset_reference_images, task_is_running, update_stage,
+        product_detail_output_sort_order_start, task_execution_error_diagnostic,
+        task_gateway_inputs, task_input_with_asset_reference_images, task_is_running, update_stage,
         validate_clothing_scene_plan_output, ClaimedTask, TaskModelInvocationError,
         BACKGROUND_TASK_CONCURRENCY, PRODUCT_DETAIL_ITEM_CONCURRENCY,
     };
     use crate::domain::assets::AssetKind;
     use crate::domain::errors::ProviderTransportErrorKind;
     use crate::domain::generation::{
-        GenerationTaskKind, GenerationTaskStage, GenerationTaskStatus, WorkspaceKind,
+        GenerationTaskKind, GenerationTaskStage, GenerationTaskStatus, NormalizedTaskError,
+        WorkspaceKind,
     };
     use crate::infrastructure::database::WorkspaceDatabase;
     use crate::infrastructure::filesystem::WorkspaceFileSystem;
@@ -2512,6 +2543,30 @@ mod tests {
         assert_eq!(error.provider_status_code, None);
         assert_eq!(error.provider_error_code, None);
         assert_eq!(error.stage, Some(GenerationTaskStage::Failed));
+    }
+
+    #[test]
+    fn task_execution_diagnostic_omits_raw_error_message() {
+        let diagnostic = task_execution_error_diagnostic(
+            "task_clothing_retry",
+            "clothing-tryon-generation",
+            &NormalizedTaskError {
+                code: "VALIDATION_ERROR".to_string(),
+                message: "raw prompt marker sk-task-diagnostic-secret".to_string(),
+                retryable: false,
+                stage: Some(GenerationTaskStage::Failed),
+                provider_status_code: None,
+                provider_error_code: None,
+            },
+        );
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["event"], "task_execution_error");
+        assert_eq!(diagnostic["taskId"], "task_clothing_retry");
+        assert_eq!(diagnostic["capabilityId"], "clothing-tryon-generation");
+        assert_eq!(diagnostic["errorCode"], "VALIDATION_ERROR");
+        assert!(!serialized.contains("raw prompt marker"));
+        assert!(!serialized.contains("sk-task-diagnostic-secret"));
     }
 
     #[test]

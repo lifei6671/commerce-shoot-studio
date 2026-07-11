@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reqwest::Url;
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
@@ -297,6 +298,8 @@ pub struct SaveLocalModelConfigInput {
     pub display_name: String,
     pub execution_mode: String,
     pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
     pub endpoint_path: Option<String>,
     pub enabled: bool,
 }
@@ -400,6 +403,7 @@ impl ModelConfigService {
         ensure_profile_supports_capability(profile, &input.capability_id)?;
         let id = input.id.unwrap_or_else(create_config_id);
         let should_be_default = default_config_exists(&database, &input.capability_id)? == 0;
+        let base_url = resolve_base_url(profile, input.base_url.as_deref())?;
         let endpoint_path =
             resolve_endpoint_path(profile, capability.category, input.endpoint_path.as_deref());
 
@@ -411,9 +415,9 @@ impl ModelConfigService {
             "
             INSERT INTO model_configs (
                 id, capability_id, provider_profile_id, display_name, protocol,
-                execution_mode, model, endpoint_path, enabled, is_default, updated_at
+                execution_mode, model, base_url, endpoint_path, enabled, is_default, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
             ON CONFLICT(id) DO UPDATE SET
                 capability_id = excluded.capability_id,
                 provider_profile_id = excluded.provider_profile_id,
@@ -421,6 +425,7 @@ impl ModelConfigService {
                 protocol = excluded.protocol,
                 execution_mode = excluded.execution_mode,
                 model = excluded.model,
+                base_url = excluded.base_url,
                 endpoint_path = excluded.endpoint_path,
                 enabled = excluded.enabled,
                 updated_at = datetime('now')
@@ -433,6 +438,7 @@ impl ModelConfigService {
                 profile.protocol,
                 input.execution_mode,
                 input.model,
+                base_url,
                 endpoint_path,
                 bool_to_i64(input.enabled),
                 bool_to_i64(should_be_default),
@@ -541,12 +547,10 @@ impl ModelConfigService {
                 &config.capability_id,
             )?
             .ok_or_else(|| ModelConfigError::Validation("模型配置缺少 API Key。".to_string()))?;
-            // 探测请求只使用 runtime 内置 profile 的 baseUrl 和默认接入路径。
-            // SQLite 中保存的模型配置不能覆盖 baseUrl，避免绕过 allowlist。
             tester
                 .test_connection(ProviderConnectionProbe {
                     provider_profile_id: config.provider_profile_id.clone(),
-                    base_url: profile.base_url.to_string(),
+                    base_url: config.base_url.clone(),
                     endpoint_path: resolve_endpoint_path(
                         profile,
                         capability.category,
@@ -651,16 +655,17 @@ fn related_default_config_id(
               AND config.provider_profile_id = ?2
               AND config.execution_mode = ?3
               AND config.model = ?4
-              AND COALESCE(config.endpoint_path, '') = COALESCE(?5, '')
+              AND COALESCE(config.base_url, ?5) = ?6
+              AND COALESCE(config.endpoint_path, '') = COALESCE(?7, '')
               AND config.is_default = 1
               AND config.enabled = 1
               AND (
-                  ?6 = 0
+                  ?8 = 0
                   OR EXISTS (
                       SELECT 1
                       FROM model_secrets tested_secret
                       WHERE tested_secret.provider_profile_id = config.provider_profile_id
-                        AND tested_secret.capability_id = ?7
+                        AND tested_secret.capability_id = ?9
                         AND tested_secret.secret_value = secret.secret_value
                   )
               )
@@ -670,6 +675,10 @@ fn related_default_config_id(
                 tested_config.provider_profile_id.as_str(),
                 tested_config.execution_mode.as_str(),
                 tested_config.model.as_str(),
+                provider_profile(&tested_config.provider_profile_id)
+                    .map(|profile| profile.base_url)
+                    .unwrap_or(""),
+                tested_config.base_url.as_str(),
                 tested_config.endpoint_path.as_deref(),
                 bool_to_i64(requires_secret),
                 tested_config.capability_id.as_str(),
@@ -849,7 +858,7 @@ fn current_connection_fingerprint_for_config(
         .query_row(
             "
             SELECT config.capability_id, config.provider_profile_id, config.execution_mode,
-                   config.model, config.endpoint_path, secret.updated_at, secret.version
+                   config.model, config.base_url, config.endpoint_path, secret.updated_at, secret.version
             FROM model_configs config
             LEFT JOIN model_secrets secret
               ON secret.provider_profile_id = config.provider_profile_id
@@ -862,9 +871,22 @@ fn current_connection_fingerprint_for_config(
                 let provider_profile_id: String = row.get(1)?;
                 let execution_mode: String = row.get(2)?;
                 let model: String = row.get(3)?;
-                let endpoint_path: Option<String> = row.get(4)?;
-                let secret_updated_at: Option<String> = row.get(5)?;
-                let secret_version: Option<i64> = row.get(6)?;
+                let base_url: Option<String> = row.get(4)?;
+                let endpoint_path: Option<String> = row.get(5)?;
+                let secret_updated_at: Option<String> = row.get(6)?;
+                let secret_version: Option<i64> = row.get(7)?;
+                let fingerprint_base_url = if let Some(profile) = provider_profile(&provider_profile_id)
+                {
+                    resolve_base_url(profile, base_url.as_deref()).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?
+                } else {
+                    base_url.unwrap_or_default()
+                };
                 let fingerprint_endpoint_path = provider_profile(&provider_profile_id)
                     .and_then(|profile| {
                         resolve_endpoint_path_for_config(
@@ -877,6 +899,7 @@ fn current_connection_fingerprint_for_config(
 
                 Ok(connection_fingerprint(
                     &provider_profile_id,
+                    Some(fingerprint_base_url.as_str()),
                     &execution_mode,
                     &model,
                     fingerprint_endpoint_path.as_deref(),
@@ -954,7 +977,7 @@ fn config_select_sql(where_clause: &str) -> String {
                config.model, config.endpoint_path, config.enabled, config.is_default,
                config.connection_status, config.connection_message,
                config.connection_tested_at, config.connection_fingerprint,
-               config.updated_at, secret.updated_at, secret.version
+               config.updated_at, config.base_url, secret.updated_at, secret.version
         FROM model_configs config
         LEFT JOIN model_secrets secret
           ON secret.provider_profile_id = config.provider_profile_id
@@ -968,8 +991,9 @@ fn config_select_sql(where_clause: &str) -> String {
 fn config_from_row(row: &Row<'_>) -> Result<LocalModelConfigView, rusqlite::Error> {
     let provider_profile_id: String = row.get(2)?;
     let capability_id: String = row.get(1)?;
-    let secret_updated_at: Option<String> = row.get(15)?;
-    let secret_version: Option<i64> = row.get(16)?;
+    let base_url: Option<String> = row.get(15)?;
+    let secret_updated_at: Option<String> = row.get(16)?;
+    let secret_version: Option<i64> = row.get(17)?;
     let stored_connection_status: String = row.get(10)?;
     let stored_connection_message: Option<String> = row.get(11)?;
     let stored_connection_tested_at: Option<String> = row.get(12)?;
@@ -986,11 +1010,15 @@ fn config_from_row(row: &Row<'_>) -> Result<LocalModelConfigView, rusqlite::Erro
     let execution_mode: String = row.get(5)?;
     let model: String = row.get(6)?;
     let endpoint_path: Option<String> = row.get(7)?;
+    let base_url = resolve_base_url(profile, base_url.as_deref()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     let fingerprint_endpoint_path =
         resolve_endpoint_path_for_config(profile, &capability_id, endpoint_path.as_deref())
             .or(endpoint_path.clone());
     let current_connection_fingerprint = connection_fingerprint(
         &provider_profile_id,
+        Some(base_url.as_str()),
         &execution_mode,
         &model,
         fingerprint_endpoint_path.as_deref(),
@@ -1008,7 +1036,7 @@ fn config_from_row(row: &Row<'_>) -> Result<LocalModelConfigView, rusqlite::Erro
         protocol: row.get(4)?,
         execution_mode,
         model,
-        base_url: profile.base_url.to_string(),
+        base_url,
         endpoint_path,
         secret_status: secret_status_for_profile(
             profile,
@@ -1096,6 +1124,38 @@ fn validate_config_input(input: &SaveLocalModelConfigInput) -> Result<(), ModelC
         ));
     }
     Ok(())
+}
+
+fn resolve_base_url(
+    profile: &ProviderProfile,
+    configured_base_url: Option<&str>,
+) -> Result<String, ModelConfigError> {
+    let base_url = configured_base_url.unwrap_or(profile.base_url).trim();
+    if profile.id == "mock-local" {
+        if base_url == profile.base_url {
+            return Ok(base_url.to_string());
+        }
+        return Err(ModelConfigError::Validation(
+            "Mock Local 的 Base URL 必须为 mock://local。".to_string(),
+        ));
+    }
+
+    let url = Url::parse(base_url).map_err(|_| {
+        ModelConfigError::Validation("Base URL 必须是有效的 https 地址。".to_string())
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ModelConfigError::Validation(
+            "Base URL 必须是无凭据、无查询参数的 https 地址。".to_string(),
+        ));
+    }
+
+    Ok(base_url.trim_end_matches('/').to_string())
 }
 
 fn ensure_profile_supports_capability(
@@ -1200,6 +1260,7 @@ fn bool_to_i64(value: bool) -> i64 {
 
 fn connection_fingerprint(
     provider_profile_id: &str,
+    base_url: Option<&str>,
     execution_mode: &str,
     model: &str,
     endpoint_path: Option<&str>,
@@ -1208,8 +1269,9 @@ fn connection_fingerprint(
     // 连接测试只在这些执行参数未变化时继续有效。
     // API Key 明文本身不参与指纹，使用 secret 更新时间避免泄漏。
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         provider_profile_id,
+        base_url.unwrap_or(""),
         execution_mode,
         model,
         endpoint_path.unwrap_or(""),
