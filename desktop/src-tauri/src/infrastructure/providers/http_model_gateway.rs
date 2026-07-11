@@ -74,6 +74,7 @@ impl HttpModelGatewayAdapter {
             },
             request.input,
         )?;
+        write_debug_prompt_to_stderr(&request);
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "stream_request",
@@ -279,6 +280,7 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
                 request.input,
             )?)
         };
+        write_debug_prompt_to_stderr(&request);
         self.write_diagnostic(json!({
             "timestampMs": current_timestamp_ms(),
             "event": "request",
@@ -569,6 +571,42 @@ pub fn sanitize_model_gateway_request_for_diagnostics(
         "model": config.model,
         "body": sanitize_diagnostic_value(None, body),
     })
+}
+
+#[cfg(debug_assertions)]
+fn write_debug_prompt_to_stderr(request: &ModelGatewayAdapterRequest<'_>) {
+    let debug_flag = std::env::var("COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS").ok();
+    if let Some(payload) = debug_prompt_payload(
+        debug_flag.as_deref(),
+        request.capability_id,
+        request.provider_profile_id,
+        request.input,
+    ) {
+        eprintln!("[model-gateway-debug-prompt] {payload}");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn write_debug_prompt_to_stderr(_: &ModelGatewayAdapterRequest<'_>) {}
+
+#[cfg(debug_assertions)]
+fn debug_prompt_payload(
+    debug_flag: Option<&str>,
+    capability_id: &str,
+    provider_profile_id: &str,
+    input: &Value,
+) -> Option<Value> {
+    if debug_flag != Some("1") {
+        return None;
+    }
+    let prompt = parse_prompt(input).ok()?;
+    Some(json!({
+        "capabilityId": capability_id,
+        "providerProfileId": provider_profile_id,
+        "systemPrompt": prompt.system,
+        "userPrompt": prompt.user,
+        "rolelessPrompt": prompt.roleless,
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -974,8 +1012,8 @@ fn value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_complete_sse_blocks, format_elapsed_duration, parse_model_gateway_sse_event,
-        provider_http_error, response_diagnostic_payload,
+        debug_prompt_payload, drain_complete_sse_blocks, format_elapsed_duration,
+        parse_model_gateway_sse_event, provider_http_error, response_diagnostic_payload,
         sanitize_model_gateway_request_for_diagnostics, GatewayRequestBody,
         HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
     };
@@ -1056,6 +1094,33 @@ mod tests {
         assert!(!serialized.contains("content-raw-marker"));
         assert!(!serialized.contains("data:image/png;base64,image-raw-marker"));
         assert!(!serialized.contains("sk-diagnostic-secret-marker"));
+    }
+
+    #[test]
+    fn debug_prompt_payload_requires_explicit_debug_flag_and_omits_user_images() {
+        let input = json!({
+            "prompt": {
+                "messages": [
+                    { "role": "system", "content": "system-marker" },
+                    { "role": "user", "content": "user-marker" }
+                ],
+                "rolelessPrompt": "effective-marker"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,image-raw-marker" }]
+        });
+
+        let payload = debug_prompt_payload(Some("1"), "listing-copy", "openai", &input)
+            .expect("debug flag should enable payload");
+        let serialized = payload.to_string();
+
+        assert_eq!(payload["capabilityId"], "listing-copy");
+        assert_eq!(payload["providerProfileId"], "openai");
+        assert_eq!(payload["systemPrompt"], "system-marker");
+        assert_eq!(payload["userPrompt"], "user-marker");
+        assert_eq!(payload["rolelessPrompt"], "effective-marker");
+        assert!(!serialized.contains("image-raw-marker"));
+        assert!(debug_prompt_payload(Some("true"), "listing-copy", "openai", &input).is_none());
+        assert!(debug_prompt_payload(None, "listing-copy", "openai", &input).is_none());
     }
 
     #[test]

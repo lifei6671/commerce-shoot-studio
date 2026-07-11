@@ -126,6 +126,7 @@ Rust 代码按以下方向组织：
 - 日志、`task_events.detail_json`、settings、asset、导出默认包和前端 DTO 都不能包含 API Key 明文。
 - raw prompt、系统 Prompt、Provider raw request、Provider raw response 永不入库。
 - 模型“测试连接”的控制台诊断只能输出脱敏摘要，且不得持久化；禁止输出请求/响应原文、Authorization、Cookie、原始 header、API Key、Prompt、图片数据或用户配置的 Base URL / endpoint 原始路径。
+- 真实模型调用默认不输出 raw Prompt。仅 Debug 构建且显式设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，可将 system、user 和 roleless Prompt 输出到终端 `stderr`；该例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建必须编译期禁用。
 - SQLite 只保存 workspace 内相对路径，不保存用户原始绝对路径。
 - workspace / DB 文件要做权限加固：macOS/Linux 目录建议 `0700`、DB 文件建议 `0600`；Windows 使用当前用户 ACL。
 

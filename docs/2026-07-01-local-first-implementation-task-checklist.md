@@ -726,6 +726,7 @@ M7 真实场景生图闭环
   - 编译通过。
   - 单测覆盖 URL 脱敏。
 - 本地调试诊断日志只记录状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 `providerErrorCode`；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，且 raw response 不得进入 SQLite、`task_events`、导出包或前端 DTO。
+  - 真实模型调用默认不输出 raw Prompt；仅 Debug 构建且设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，可将 system、user 和 roleless Prompt 输出到终端 `stderr`。该例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，Release 构建编译期禁用。
   - `make cargo-check` 通过。
 - 退出条件：真实 Provider 接入点稳定。
 

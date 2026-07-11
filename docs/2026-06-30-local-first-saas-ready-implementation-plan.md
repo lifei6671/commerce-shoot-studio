@@ -1767,6 +1767,7 @@ custom-disabled
 - 所有 URL 入库前脱敏。
 - 导入 workspace 中的 provider 配置必须二次确认。
 - 本地调试诊断日志只记录 provider profile、脱敏后的 Base URL origin、请求/响应状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header、API Key 或用户配置的 Base URL / endpoint 原始路径，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
+- 真实模型调用默认不打印 raw Prompt。仅 Debug 构建且显式设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，允许将 system、user 和 roleless Prompt 输出到终端 `stderr` 供本地排障；该输出不写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建编译期禁用。
 - 当前通用执行器分支（不含商品详情图逐项执行路径）在 HTTP 调用前遇到任务校验、资产读取或模型配置失败时，会在终端输出 `task_execution_error` 脱敏摘要；摘要只含 task、capability、错误码、重试标记和归一化 Provider 状态，不含原始输入、Prompt、图片、密钥或原始错误文本。商品详情图逐项执行路径尚未统一接入该摘要。
 
 ### 10.5 Adapter 接口
