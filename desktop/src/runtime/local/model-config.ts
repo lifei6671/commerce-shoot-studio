@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   LocalModelConfigView,
+  ModelCapability,
   ModelConfigPort,
+  ModelImageSizeOptions,
   ProviderProfileView,
   ProviderTestResult,
   SaveLocalModelConfigInput,
@@ -11,6 +13,9 @@ import type {
 export const localModelConfigPort: ModelConfigPort = {
   listConfigs() {
     return invoke<LocalModelConfigView[]>("model_config_list_configs");
+  },
+  listImageSizeOptions(capabilityId: ModelCapability["id"]) {
+    return invoke<ModelImageSizeOptions>("model_config_list_image_size_options", { capabilityId });
   },
   getConfig(configId: string) {
     return invoke<LocalModelConfigView>("model_config_get_config", { configId });

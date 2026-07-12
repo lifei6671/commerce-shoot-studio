@@ -1,18 +1,21 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reqwest::blocking::Client;
+use reqwest::blocking::Client as BlockingClient;
 use reqwest::header::CONTENT_TYPE;
-use reqwest::Url;
+use reqwest::{Client, Url};
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 
 use crate::domain::errors::{normalize_provider_http_error, ProviderTransportErrorKind};
 use crate::infrastructure::providers::openai_compatible::normalize_openai_compatible_response;
 use crate::infrastructure::providers::openai_images::{
     build_openai_image_edit_multipart, OpenAiMultipartBody,
 };
+use crate::services::model_config::validate_image_size;
 use crate::services::model_gateway::{
     ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
 };
@@ -25,22 +28,200 @@ pub struct HttpModelGatewayRequestConfig<'a> {
 }
 
 pub struct HttpModelGatewayAdapter {
+    blocking_client: OnceLock<BlockingClient>,
     client: Client,
+    concurrency_registry: ProviderConcurrencyRegistry,
     diagnostic_log_path: Option<PathBuf>,
+}
+
+/// Provider 限流在整个进程内共享，避免多个本地任务各自创建并发池。
+#[derive(Clone, Default)]
+pub struct ProviderConcurrencyRegistry {
+    pools: Arc<Mutex<std::collections::HashMap<String, Arc<ProviderConcurrencyPool>>>>,
+}
+
+impl ProviderConcurrencyRegistry {
+    fn pool(
+        &self,
+        provider_profile_id: &str,
+        base_url: &str,
+    ) -> Result<Arc<ProviderConcurrencyPool>, ModelGatewayError> {
+        let local_origin = local_provider_origin(base_url);
+        let (key, limit) = match local_origin {
+            Some(origin) => (format!("local:{origin}"), 1),
+            None => (
+                format!("provider:{provider_profile_id}"),
+                provider_concurrency_limit(provider_profile_id),
+            ),
+        };
+        let mut pools = self.pools.lock().map_err(|_| {
+            ModelGatewayError::ProviderUnavailable("Provider 并发控制不可用。".to_string())
+        })?;
+        Ok(pools
+            .entry(key)
+            .or_insert_with(|| Arc::new(ProviderConcurrencyPool::new(limit)))
+            .clone())
+    }
+
+    async fn acquire(
+        &self,
+        provider_profile_id: &str,
+        base_url: &str,
+    ) -> Result<ProviderConcurrencyPermit, ModelGatewayError> {
+        self.pool(provider_profile_id, base_url)?.acquire().await
+    }
+
+    fn acquire_blocking(
+        &self,
+        provider_profile_id: &str,
+        base_url: &str,
+    ) -> Result<ProviderConcurrencyPermit, ModelGatewayError> {
+        self.pool(provider_profile_id, base_url)?.acquire_blocking()
+    }
+}
+
+struct ProviderConcurrencyPool {
+    available: Mutex<usize>,
+    blocking_waiters: Condvar,
+    async_waiters: Notify,
+    #[cfg(test)]
+    async_acquire_test_hook: Mutex<Option<Arc<ProviderAsyncAcquireTestHook>>>,
+}
+
+#[cfg(test)]
+struct ProviderAsyncAcquireTestHook {
+    reached_empty_check: tokio::sync::Barrier,
+    continue_to_wait: tokio::sync::Barrier,
+}
+
+impl ProviderConcurrencyPool {
+    fn new(limit: usize) -> Self {
+        Self {
+            available: Mutex::new(limit),
+            blocking_waiters: Condvar::new(),
+            async_waiters: Notify::new(),
+            #[cfg(test)]
+            async_acquire_test_hook: Mutex::new(None),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> Result<ProviderConcurrencyPermit, ModelGatewayError> {
+        loop {
+            let notified = self.async_waiters.notified();
+            tokio::pin!(notified);
+            // 多等待者先注册通知再检查容量，避免连续 notify_one 合并后遗漏唤醒。
+            notified.as_mut().enable();
+            {
+                let mut available = self.available.lock().map_err(|_| {
+                    ModelGatewayError::ProviderUnavailable("Provider 并发控制不可用。".to_string())
+                })?;
+                if *available > 0 {
+                    *available -= 1;
+                    return Ok(ProviderConcurrencyPermit { pool: self.clone() });
+                }
+            }
+            #[cfg(test)]
+            self.pause_async_acquire_after_empty_check().await;
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_async_acquire_after_empty_check(&self) {
+        let hook = self
+            .async_acquire_test_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook.reached_empty_check.wait().await;
+            hook.continue_to_wait.wait().await;
+        }
+    }
+
+    fn acquire_blocking(self: &Arc<Self>) -> Result<ProviderConcurrencyPermit, ModelGatewayError> {
+        let mut available = self.available.lock().map_err(|_| {
+            ModelGatewayError::ProviderUnavailable("Provider 并发控制不可用。".to_string())
+        })?;
+        while *available == 0 {
+            available = self.blocking_waiters.wait(available).map_err(|_| {
+                ModelGatewayError::ProviderUnavailable("Provider 并发控制不可用。".to_string())
+            })?;
+        }
+        *available -= 1;
+        Ok(ProviderConcurrencyPermit { pool: self.clone() })
+    }
+}
+
+struct ProviderConcurrencyPermit {
+    pool: Arc<ProviderConcurrencyPool>,
+}
+
+pub(crate) struct ProviderInvocationLease {
+    _permit: ProviderConcurrencyPermit,
+}
+
+pub struct LeasedModelGatewayAdapterResult {
+    result: ModelGatewayAdapterResult,
+    lease: ProviderInvocationLease,
+}
+
+impl LeasedModelGatewayAdapterResult {
+    pub(crate) fn into_parts(self) -> (ModelGatewayAdapterResult, ProviderInvocationLease) {
+        (self.result, self.lease)
+    }
+
+    fn into_result(self) -> ModelGatewayAdapterResult {
+        self.result
+    }
+}
+
+impl std::ops::Deref for LeasedModelGatewayAdapterResult {
+    type Target = ModelGatewayAdapterResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
+impl Drop for ProviderConcurrencyPermit {
+    fn drop(&mut self) {
+        let mut available = self
+            .pool
+            .available
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *available += 1;
+        drop(available);
+        self.pool.blocking_waiters.notify_one();
+        self.pool.async_waiters.notify_one();
+    }
+}
+
+fn shared_provider_concurrency_registry() -> ProviderConcurrencyRegistry {
+    static REGISTRY: OnceLock<ProviderConcurrencyRegistry> = OnceLock::new();
+    REGISTRY
+        .get_or_init(ProviderConcurrencyRegistry::default)
+        .clone()
 }
 
 impl HttpModelGatewayAdapter {
     pub fn new(diagnostic_log_path: Option<PathBuf>) -> Result<Self, ModelGatewayError> {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|_| {
-                ModelGatewayError::ProviderUnavailable("Provider 客户端初始化失败。".to_string())
-            })?;
         Ok(Self {
-            client,
+            blocking_client: OnceLock::new(),
+            client: shared_async_http_client()?,
+            concurrency_registry: shared_provider_concurrency_registry(),
             diagnostic_log_path,
         })
+    }
+
+    pub fn with_concurrency_registry(
+        diagnostic_log_path: Option<PathBuf>,
+        concurrency_registry: ProviderConcurrencyRegistry,
+    ) -> Result<Self, ModelGatewayError> {
+        let mut adapter = Self::new(diagnostic_log_path)?;
+        adapter.concurrency_registry = concurrency_registry;
+        Ok(adapter)
     }
 
     fn write_diagnostic(&self, payload: Value) {
@@ -49,6 +230,162 @@ impl HttpModelGatewayAdapter {
         };
         eprintln!("[model-gateway-diagnostics] {payload}");
         let _ = append_diagnostic_json_line(path, payload);
+    }
+
+    fn blocking_client(&self) -> Result<&BlockingClient, ModelGatewayError> {
+        if let Some(client) = self.blocking_client.get() {
+            return Ok(client);
+        }
+        let client = BlockingClient::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|_| {
+                ModelGatewayError::ProviderUnavailable("Provider 客户端初始化失败。".to_string())
+            })?;
+        let _ = self.blocking_client.set(client);
+        self.blocking_client.get().ok_or_else(|| {
+            ModelGatewayError::ProviderUnavailable("Provider 客户端初始化失败。".to_string())
+        })
+    }
+
+    /// 真实 Provider 调用使用 async reqwest，并在完整 HTTP 生命周期内持有 Provider permit。
+    pub async fn invoke_async(
+        &self,
+        request: ModelGatewayAdapterRequest<'_>,
+    ) -> Result<LeasedModelGatewayAdapterResult, ModelGatewayError> {
+        let api_key = request
+            .api_key
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ModelGatewayError::ProviderUnavailable("模型配置缺少 API Key。".to_string())
+            })?;
+        let endpoint = provider_endpoint(request.base_url, request.endpoint_path)?;
+        let request_config = HttpModelGatewayRequestConfig {
+            endpoint_path: request.endpoint_path,
+            model: request.model,
+            provider_profile_id: request.provider_profile_id,
+        };
+        let request_body = if uses_openai_image_edit(&request_config) {
+            GatewayRequestBody::Multipart(build_openai_image_edit_multipart(
+                request.model,
+                request.input,
+            )?)
+        } else {
+            GatewayRequestBody::Json(build_model_gateway_request_body(
+                &request_config,
+                request.input,
+            )?)
+        };
+        write_debug_prompt_to_stderr(&request);
+        self.write_diagnostic(json!({
+            "timestampMs": current_timestamp_ms(),
+            "event": "request",
+            "capabilityId": request.capability_id,
+            "request": request_body.diagnostic(&request_config),
+        }));
+
+        let permit = self
+            .concurrency_registry
+            .acquire(request.provider_profile_id, request.base_url)
+            .await?;
+        let request_started_at = Instant::now();
+        let response = match self
+            .client
+            .post(endpoint)
+            .bearer_auth(api_key)
+            .header(CONTENT_TYPE, request_body.content_type())
+            .timeout(model_gateway_request_timeout(
+                request.provider_profile_id,
+                request.capability_id,
+            ))
+            .body(request_body.into_bytes())
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(source) => {
+                let kind = if source.is_timeout() {
+                    ProviderTransportErrorKind::Timeout
+                } else {
+                    ProviderTransportErrorKind::Network
+                };
+                let elapsed_ms = request_started_at.elapsed().as_millis();
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "request_error",
+                    "elapsedMs": elapsed_ms,
+                    "elapsed": format_elapsed_duration(elapsed_ms),
+                    "isTimeout": source.is_timeout(),
+                    "transportKind": transport_kind_for_diagnostic(kind),
+                }));
+                return Err(ModelGatewayError::ProviderTransport(kind));
+            }
+        };
+        let status_code = i64::from(response.status().as_u16());
+        let success = response.status().is_success();
+        let response_text = response.text().await.map_err(|_| {
+            ModelGatewayError::ProviderUnavailable("读取 Provider 响应失败。".to_string())
+        })?;
+        if !success {
+            let error = provider_http_error(status_code, &response_text);
+            self.write_diagnostic(response_diagnostic_payload(
+                "response",
+                request_started_at.elapsed().as_millis(),
+                status_code,
+                false,
+                &response_text,
+                provider_http_error_code(&error),
+            ));
+            return Err(error);
+        }
+        self.write_diagnostic(response_diagnostic_payload(
+            "response",
+            request_started_at.elapsed().as_millis(),
+            status_code,
+            true,
+            &response_text,
+            None,
+        ));
+        let response_json: Value = serde_json::from_str(&response_text).map_err(|_| {
+            self.write_diagnostic(json!({
+                "timestampMs": current_timestamp_ms(),
+                "event": "response_parse_failed",
+                "responseByteLength": response_text.len(),
+            }));
+            ModelGatewayError::ProviderUnavailable("Provider 返回的 JSON 无法解析。".to_string())
+        })?;
+        self.write_diagnostic(json!({
+            "timestampMs": current_timestamp_ms(),
+            "event": "response_shape",
+            "shape": summarize_provider_response_shape(&response_json),
+        }));
+        let normalized =
+            normalize_openai_compatible_response(&response_json).map_err(|source| {
+                self.write_diagnostic(json!({
+                    "timestampMs": current_timestamp_ms(),
+                    "event": "response_normalize_failed",
+                    "shape": summarize_provider_response_shape(&response_json),
+                }));
+                ModelGatewayError::ProviderUnavailable(source.to_string())
+            })?;
+        self.write_diagnostic(json!({
+            "timestampMs": current_timestamp_ms(),
+            "event": "normalized_response",
+            "hasOutputText": normalized.output_text.is_some(),
+            "outputShape": summarize_provider_response_shape(&normalized.output_json),
+            "usageJson": normalized.usage_json.clone(),
+        }));
+
+        let result = ModelGatewayAdapterResult {
+            output_text: normalized.output_text,
+            output_json: normalized.output_json,
+            usage_json: Some(normalized.usage_json),
+        };
+        write_debug_normalized_result_to_stderr(&request, &result);
+        Ok(LeasedModelGatewayAdapterResult {
+            result,
+            lease: ProviderInvocationLease { _permit: permit },
+        })
     }
 
     pub fn invoke_stream<F>(
@@ -88,13 +425,19 @@ impl HttpModelGatewayAdapter {
                 &request_body,
             ),
         }));
+        let _permit = self
+            .concurrency_registry
+            .acquire_blocking(request.provider_profile_id, request.base_url)?;
         let request_started_at = Instant::now();
         let mut response = match self
-            .client
+            .blocking_client()?
             .post(endpoint)
             .bearer_auth(api_key)
             .header(CONTENT_TYPE, "application/json")
-            .timeout(model_gateway_request_timeout(request.capability_id))
+            .timeout(model_gateway_request_timeout(
+                request.provider_profile_id,
+                request.capability_id,
+            ))
             .body(request_body.to_string())
             .send()
         {
@@ -241,22 +584,24 @@ impl HttpModelGatewayAdapter {
             "outputTextCharCount": output_text.chars().count(),
         }));
 
-        Ok(ModelGatewayAdapterResult {
+        let result = ModelGatewayAdapterResult {
             output_text: Some(output_text),
             output_json: json!({
                 "type": "text",
                 "stream": true,
             }),
             usage_json: Some(usage_json),
-        })
+        };
+        write_debug_normalized_result_to_stderr(&request, &result);
+        Ok(result)
     }
 }
 
-impl ModelGatewayAdapter for HttpModelGatewayAdapter {
-    fn invoke(
+impl HttpModelGatewayAdapter {
+    pub fn invoke_blocking_leased(
         &self,
         request: ModelGatewayAdapterRequest<'_>,
-    ) -> Result<ModelGatewayAdapterResult, ModelGatewayError> {
+    ) -> Result<LeasedModelGatewayAdapterResult, ModelGatewayError> {
         let api_key = request
             .api_key
             .filter(|value| !value.trim().is_empty())
@@ -287,13 +632,19 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
             "capabilityId": request.capability_id,
             "request": request_body.diagnostic(&request_config),
         }));
+        let permit = self
+            .concurrency_registry
+            .acquire_blocking(request.provider_profile_id, request.base_url)?;
         let request_started_at = Instant::now();
         let response = match self
-            .client
+            .blocking_client()?
             .post(endpoint)
             .bearer_auth(api_key)
             .header(CONTENT_TYPE, request_body.content_type())
-            .timeout(model_gateway_request_timeout(request.capability_id))
+            .timeout(model_gateway_request_timeout(
+                request.provider_profile_id,
+                request.capability_id,
+            ))
             .body(request_body.into_bytes())
             .send()
         {
@@ -373,12 +724,63 @@ impl ModelGatewayAdapter for HttpModelGatewayAdapter {
             "usageJson": normalized.usage_json.clone(),
         }));
 
-        Ok(ModelGatewayAdapterResult {
+        let result = ModelGatewayAdapterResult {
             output_text: normalized.output_text,
             output_json: normalized.output_json,
             usage_json: Some(normalized.usage_json),
+        };
+        write_debug_normalized_result_to_stderr(&request, &result);
+        Ok(LeasedModelGatewayAdapterResult {
+            result,
+            lease: ProviderInvocationLease { _permit: permit },
         })
     }
+}
+
+impl ModelGatewayAdapter for HttpModelGatewayAdapter {
+    fn invoke(
+        &self,
+        request: ModelGatewayAdapterRequest<'_>,
+    ) -> Result<ModelGatewayAdapterResult, ModelGatewayError> {
+        self.invoke_blocking_leased(request)
+            .map(LeasedModelGatewayAdapterResult::into_result)
+    }
+}
+
+fn shared_async_http_client() -> Result<Client, ModelGatewayError> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| {
+            ModelGatewayError::ProviderUnavailable("Provider 异步客户端初始化失败。".to_string())
+        })?;
+    let _ = CLIENT.set(client);
+    CLIENT.get().cloned().ok_or_else(|| {
+        ModelGatewayError::ProviderUnavailable("Provider 异步客户端初始化失败。".to_string())
+    })
+}
+
+fn provider_concurrency_limit(provider_profile_id: &str) -> usize {
+    match provider_profile_id {
+        "openai" | "volcengine" => 3,
+        "deepseek" | "mock-local" => 4,
+        _ => 1,
+    }
+}
+
+fn local_provider_origin(base_url: &str) -> Option<String> {
+    let url = Url::parse(base_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let normalized_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(&host);
+    matches!(normalized_host, "localhost" | "127.0.0.1" | "::1")
+        .then(|| url.origin().ascii_serialization())
 }
 
 enum GatewayRequestBody {
@@ -476,10 +878,22 @@ pub fn build_model_gateway_request_body(
     if config.provider_profile_id == "volcengine"
         && config.endpoint_path.contains("/images/generations")
     {
+        let explicit_size = input
+            .get("size")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(size) = explicit_size {
+            validate_image_size(config.provider_profile_id, config.model, size).map_err(|_| {
+                ModelGatewayError::ProviderRequestInvalid(
+                    "当前火山引擎模型不支持所选图片尺寸。".to_string(),
+                )
+            })?;
+        }
         let mut body = json!({
             "model": config.model,
             "prompt": prompt.roleless,
-            "size": "2K",
+            "size": explicit_size.unwrap_or("2K"),
             "response_format": "url",
             "watermark": false,
         });
@@ -515,9 +929,24 @@ pub fn build_model_gateway_stream_request_body(
     Ok(body)
 }
 
-pub fn model_gateway_request_timeout(capability_id: &str) -> Duration {
+pub fn model_gateway_request_timeout(provider_profile_id: &str, capability_id: &str) -> Duration {
+    if provider_profile_id == "volcengine"
+        && matches!(
+            capability_id,
+            "clothing-base-model-generation"
+                | "scene-image-generation"
+                | "product-detail-generation"
+                | "clothing-tryon-generation"
+                | "image-edit"
+        )
+    {
+        return Duration::from_secs(300);
+    }
     if capability_id == "prompt-plan" {
         return Duration::from_secs(300);
+    }
+    if capability_id == "clothing-scene-planning" {
+        return Duration::from_secs(90);
     }
     if matches!(capability_id, "clothing-tryon-generation" | "image-edit") {
         return Duration::from_secs(60);
@@ -588,6 +1017,99 @@ fn write_debug_prompt_to_stderr(request: &ModelGatewayAdapterRequest<'_>) {
 
 #[cfg(not(debug_assertions))]
 fn write_debug_prompt_to_stderr(_: &ModelGatewayAdapterRequest<'_>) {}
+
+#[cfg(debug_assertions)]
+fn write_debug_normalized_result_to_stderr(
+    request: &ModelGatewayAdapterRequest<'_>,
+    result: &ModelGatewayAdapterResult,
+) {
+    let debug_flag = std::env::var("COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS").ok();
+    if let Some(payload) = debug_normalized_result_payload(
+        debug_flag.as_deref(),
+        request.capability_id,
+        request.provider_profile_id,
+        request.model,
+        result,
+    ) {
+        eprintln!("[model-gateway-debug-result] {payload}");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn write_debug_normalized_result_to_stderr(
+    _: &ModelGatewayAdapterRequest<'_>,
+    _: &ModelGatewayAdapterResult,
+) {
+}
+
+#[cfg(debug_assertions)]
+fn debug_normalized_result_payload(
+    debug_flag: Option<&str>,
+    capability_id: &str,
+    provider_profile_id: &str,
+    model: &str,
+    result: &ModelGatewayAdapterResult,
+) -> Option<Value> {
+    if debug_flag != Some("1") {
+        return None;
+    }
+    Some(json!({
+        "capabilityId": capability_id,
+        "providerProfileId": provider_profile_id,
+        "model": model,
+        "status": "normalized",
+        "outputTextCharCount": result.output_text.as_deref().map(|text| text.chars().count()),
+        "outputJson": sanitize_debug_result_value(None, &result.output_json),
+        "usageJson": result.usage_json,
+    }))
+}
+
+#[cfg(debug_assertions)]
+fn sanitize_debug_result_value(key: Option<&str>, value: &Value) -> Value {
+    let normalized_key = key.unwrap_or_default().to_ascii_lowercase();
+    if matches!(
+        normalized_key.as_str(),
+        "authorization" | "cookie" | "set-cookie" | "api_key" | "apikey" | "secret"
+    ) {
+        return Value::String("<omitted:sensitive>".to_string());
+    }
+    if normalized_key == "url" || normalized_key.ends_with("_url") {
+        return json!({
+            "type": "url",
+            "charCount": value.as_str().map(str::len).unwrap_or(0),
+        });
+    }
+    if matches!(
+        normalized_key.as_str(),
+        "dataurl" | "data_url" | "b64_json" | "base64" | "image_data"
+    ) {
+        return json!({
+            "type": "image-data",
+            "charCount": value.as_str().map(str::len).unwrap_or(0),
+        });
+    }
+
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| sanitize_debug_result_value(None, item))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(child_key, child_value)| {
+                    (
+                        child_key.clone(),
+                        sanitize_debug_result_value(Some(child_key), child_value),
+                    )
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
 
 #[cfg(debug_assertions)]
 fn debug_prompt_payload(
@@ -1012,14 +1534,17 @@ fn value_kind(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        debug_prompt_payload, drain_complete_sse_blocks, format_elapsed_duration,
-        parse_model_gateway_sse_event, provider_http_error, response_diagnostic_payload,
-        sanitize_model_gateway_request_for_diagnostics, GatewayRequestBody,
-        HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
+        debug_normalized_result_payload, debug_prompt_payload, drain_complete_sse_blocks,
+        format_elapsed_duration, parse_model_gateway_sse_event, provider_http_error,
+        response_diagnostic_payload, sanitize_model_gateway_request_for_diagnostics,
+        GatewayRequestBody, HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
+        ProviderAsyncAcquireTestHook, ProviderConcurrencyRegistry,
     };
     use crate::infrastructure::providers::openai_images::OpenAiMultipartBody;
-    use crate::services::model_gateway::ModelGatewayError;
+    use crate::services::model_gateway::{ModelGatewayAdapterResult, ModelGatewayError};
     use serde_json::json;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn drains_sse_blocks_without_corrupting_split_utf8_characters() {
@@ -1124,6 +1649,59 @@ mod tests {
     }
 
     #[test]
+    fn debug_normalized_result_payload_summarizes_text_and_omits_sensitive_data() {
+        let output_text = "模型结果 https://example.com/private.png?token=secret-marker data:image/png;base64,raw-text-image-marker Authorization: Bearer sk-debug-secret";
+        let result = ModelGatewayAdapterResult {
+            output_text: Some(output_text.to_string()),
+            output_json: json!({
+                "type": "image",
+                "images": [
+                    {
+                        "dataUrl": "data:image/png;base64,raw-image-marker",
+                        "url": "https://example.com/private-image.png?token=secret-marker",
+                        "mimeType": "image/png",
+                        "size": "1024x1536"
+                    }
+                ]
+            }),
+            usage_json: Some(json!({
+                "inputTokens": 12,
+                "outputTokens": 34,
+                "totalTokens": 46
+            })),
+        };
+
+        let payload = debug_normalized_result_payload(
+            Some("1"),
+            "image-edit",
+            "openai",
+            "gpt-image-1",
+            &result,
+        )
+        .expect("debug flag should enable normalized result logging");
+        let serialized = payload.to_string();
+
+        assert_eq!(payload["outputTextCharCount"], output_text.chars().count());
+        assert!(payload.get("outputText").is_none());
+        assert_eq!(payload["outputJson"]["images"][0]["mimeType"], "image/png");
+        assert_eq!(payload["outputJson"]["images"][0]["size"], "1024x1536");
+        assert_eq!(payload["usageJson"]["totalTokens"], 46);
+        assert!(!serialized.contains("raw-image-marker"));
+        assert!(!serialized.contains("raw-text-image-marker"));
+        assert!(!serialized.contains("private-image.png"));
+        assert!(!serialized.contains("secret-marker"));
+        assert!(!serialized.contains("sk-debug-secret"));
+        assert!(debug_normalized_result_payload(
+            None,
+            "image-edit",
+            "openai",
+            "gpt-image-1",
+            &result,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn json_request_diagnostic_omits_configured_endpoint_path() {
         let diagnostic = sanitize_model_gateway_request_for_diagnostics(
             &HttpModelGatewayRequestConfig {
@@ -1218,5 +1796,234 @@ mod tests {
         assert_eq!(format_elapsed_duration(999), "0.999s");
         assert_eq!(format_elapsed_duration(60_000), "1m 0.000s");
         assert_eq!(format_elapsed_duration(90_002), "1m 30.002s");
+    }
+
+    #[tokio::test]
+    async fn local_provider_concurrency_registry_allows_only_one_in_flight_request() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let permit = registry
+            .acquire("openai", "http://127.0.0.1:11434")
+            .await
+            .expect("first local request should acquire the permit");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(20),
+            registry.acquire("openai", "http://127.0.0.1:11434"),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "second local request must wait for the permit"
+        );
+
+        drop(permit);
+        let _ = registry
+            .acquire("openai", "http://127.0.0.1:11434")
+            .await
+            .expect("permit should release after the first request completes");
+    }
+
+    #[tokio::test]
+    async fn local_provider_same_origin_shares_pool_across_profiles() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let permit = registry
+            .acquire("openai", "http://LOCALHOST:11434/v1")
+            .await
+            .expect("first local request should acquire the permit");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(20),
+            registry.acquire("volcengine", "http://localhost:11434/api/v3"),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "the same normalized local origin must share one pool across profiles"
+        );
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn ipv6_loopback_same_origin_shares_pool_across_profiles() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let permit = registry
+            .acquire("openai", "https://[::1]:11434/v1")
+            .await
+            .expect("first IPv6 loopback request should acquire the permit");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(20),
+            registry.acquire("volcengine", "https://[::1]:11434/api/v3"),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "the same IPv6 loopback origin must share one pool across profiles"
+        );
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn local_provider_different_origins_use_separate_pools_for_same_profile() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let first_permit = registry
+            .acquire("openai", "http://127.0.0.1:11434/v1")
+            .await
+            .expect("first local origin should acquire the permit");
+
+        let second_permit = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.acquire("openai", "http://127.0.0.1:11435/v1"),
+        )
+        .await
+        .expect("a different local origin must not wait on the first origin")
+        .expect("second local origin should acquire its own permit");
+
+        drop(second_permit);
+        drop(first_permit);
+    }
+
+    #[tokio::test]
+    async fn remote_provider_different_origins_share_the_provider_pool() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let first = registry
+            .acquire("openai", "https://api.openai.example/v1")
+            .await
+            .expect("first remote request should acquire a permit");
+        let second = registry
+            .acquire("openai", "https://api.openai.example/v1")
+            .await
+            .expect("second remote request should acquire a permit");
+        let third = registry
+            .acquire("openai", "https://gateway.example/openai")
+            .await
+            .expect("third remote request should acquire a permit");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(20),
+            registry.acquire("openai", "https://another-gateway.example/v1"),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "remote origins for one provider must share the provider-level limit"
+        );
+        drop(third);
+        drop(second);
+        drop(first);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_provider_pool_wakes_every_waiter_when_multiple_permits_release_together() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let base_url = "https://api.openai.example/v1";
+        let first = registry
+            .acquire("openai", base_url)
+            .await
+            .expect("first request should acquire a permit");
+        let second = registry
+            .acquire("openai", base_url)
+            .await
+            .expect("second request should acquire a permit");
+        let third = registry
+            .acquire("openai", base_url)
+            .await
+            .expect("third request should acquire a permit");
+        let pool = registry
+            .pool("openai", base_url)
+            .expect("provider pool should resolve");
+        let hook = Arc::new(ProviderAsyncAcquireTestHook {
+            reached_empty_check: tokio::sync::Barrier::new(3),
+            continue_to_wait: tokio::sync::Barrier::new(3),
+        });
+        *pool
+            .async_acquire_test_hook
+            .lock()
+            .expect("test hook lock should remain available") = Some(hook.clone());
+
+        let first_registry = registry.clone();
+        let first_waiter =
+            tokio::spawn(async move { first_registry.acquire("openai", base_url).await });
+        let second_registry = registry.clone();
+        let second_waiter =
+            tokio::spawn(async move { second_registry.acquire("openai", base_url).await });
+
+        hook.reached_empty_check.wait().await;
+        drop(first);
+        drop(second);
+        hook.continue_to_wait.wait().await;
+
+        let (first_waiter_permit, second_waiter_permit) =
+            tokio::time::timeout(Duration::from_millis(200), async {
+                let first_waiter_permit = first_waiter
+                    .await
+                    .expect("first waiter task should finish")
+                    .expect("first waiter should acquire a released permit");
+                let second_waiter_permit = second_waiter
+                    .await
+                    .expect("second waiter task should finish")
+                    .expect("second waiter should acquire a released permit");
+                (first_waiter_permit, second_waiter_permit)
+            })
+            .await
+            .expect("every waiter should wake after two permits are released");
+
+        drop(first_waiter_permit);
+        drop(second_waiter_permit);
+        drop(third);
+        assert_eq!(
+            *pool
+                .available
+                .lock()
+                .expect("available permit count should remain readable"),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_and_async_requests_share_the_same_provider_limit() {
+        let registry = ProviderConcurrencyRegistry::default();
+        let async_permit = registry
+            .acquire("openai", "http://127.0.0.1:11434")
+            .await
+            .expect("async request should acquire the local permit");
+        let blocking_registry = registry.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let blocking_worker = std::thread::spawn(move || {
+            let permit = blocking_registry
+                .acquire_blocking("openai", "http://127.0.0.1:11434")
+                .expect("blocking request should eventually acquire the permit");
+            acquired_tx.send(()).expect("report blocking acquisition");
+            permit
+        });
+
+        assert!(acquired_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(async_permit);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking request should acquire the released async permit");
+        drop(
+            blocking_worker
+                .join()
+                .expect("blocking worker should finish"),
+        );
+
+        let blocking_permit = registry
+            .acquire_blocking("openai", "http://127.0.0.1:11434")
+            .expect("blocking request should acquire the local permit");
+        let blocked_async = tokio::time::timeout(
+            Duration::from_millis(20),
+            registry.acquire("openai", "http://127.0.0.1:11434"),
+        )
+        .await;
+        assert!(blocked_async.is_err());
+        drop(blocking_permit);
+        let _ = registry
+            .acquire("openai", "http://127.0.0.1:11434")
+            .await
+            .expect("async request should acquire the released blocking permit");
     }
 }

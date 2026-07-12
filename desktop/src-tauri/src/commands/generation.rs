@@ -3,7 +3,8 @@ use serde::Serialize;
 use crate::domain::generation::{GenerationError, GenerationTask, GenerationTaskDetail};
 use crate::infrastructure::filesystem::default_workspace_directory;
 use crate::services::generation::{
-    CreateGenerationTaskInput, GenerationService, GenerationTaskPage, GenerationTaskQuery,
+    CreateGenerationTaskInput, DeleteGenerationResultImageInput, GenerationService,
+    GenerationTaskPage, GenerationTaskQuery, ReplaceGenerationResultImageInput,
     RetryGenerationTaskInput,
 };
 use crate::services::local_task_executor::{LocalTaskExecutionResult, LocalTaskExecutor};
@@ -58,6 +59,24 @@ pub fn generation_delete_task(task_id: String) -> Result<(), GenerationCommandEr
 }
 
 #[tauri::command]
+pub fn generation_replace_result_image(
+    input: ReplaceGenerationResultImageInput,
+) -> Result<(), GenerationCommandError> {
+    GenerationService::new()
+        .replace_result_image(&default_workspace_directory(), input)
+        .map_err(GenerationCommandError::from)
+}
+
+#[tauri::command]
+pub fn generation_delete_result_image(
+    input: DeleteGenerationResultImageInput,
+) -> Result<(), GenerationCommandError> {
+    GenerationService::new()
+        .delete_result_image(&default_workspace_directory(), input)
+        .map_err(GenerationCommandError::from)
+}
+
+#[tauri::command]
 pub fn generation_get_task(task_id: String) -> Result<GenerationTask, GenerationCommandError> {
     GenerationService::new()
         .get_task(&default_workspace_directory(), &task_id)
@@ -84,19 +103,19 @@ pub fn generation_list_tasks(
 }
 
 #[tauri::command]
-pub fn generation_run_next_task() -> Result<Option<LocalTaskExecutionResult>, GenerationCommandError>
-{
+pub async fn generation_run_next_task(
+) -> Result<Option<LocalTaskExecutionResult>, GenerationCommandError> {
     LocalTaskExecutor::background()
-        .start_next(&default_workspace_directory())
+        .start_next_async(&default_workspace_directory())
         .map_err(GenerationCommandError::from)
 }
 
 #[tauri::command]
-pub fn generation_run_task(
+pub async fn generation_run_task(
     task_id: String,
 ) -> Result<Option<LocalTaskExecutionResult>, GenerationCommandError> {
     LocalTaskExecutor::background()
-        .start_task(&default_workspace_directory(), &task_id)
+        .start_task_async(&default_workspace_directory(), &task_id)
         .map_err(GenerationCommandError::from)
 }
 

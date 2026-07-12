@@ -92,3 +92,19 @@ export type CreateGenerationTaskInput = {
 export type RetryGenerationTaskInput = {
   taskId: string;
 };
+
+export type ReplaceGenerationResultImageInput = {
+  taskId: string;
+  currentAssetId?: string;
+  displayedAssetId?: string;
+  replacementTaskId: string;
+  replacementAssetId: string;
+};
+
+export type DeleteGenerationResultImageInput = {
+  taskId: string;
+  imageId: string;
+  imageNo?: number;
+  assetId?: string;
+  displayedAssetId?: string;
+};

@@ -11,7 +11,7 @@ use crate::domain::errors::{
 use crate::infrastructure::database::{DatabaseError, WorkspaceDatabase};
 use crate::services::provider_connection::{
     HttpProviderConnectionTester, ProviderConnectionProbe, ProviderConnectionResult,
-    ProviderConnectionTester,
+    ProviderConnectionTester, VOLCENGINE_SEEDREAM_5_PRO_MODEL,
 };
 use crate::services::secrets::{create_secret_id, secret_status_for_profile, SecretStatus};
 
@@ -283,6 +283,27 @@ pub struct LocalModelConfigView {
     pub is_default: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSizeOption {
+    pub id: String,
+    pub label: String,
+    pub ratio: String,
+    pub width: i64,
+    pub height: i64,
+    pub provider_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImageSizeOptions {
+    pub capability_id: String,
+    pub config_id: String,
+    pub provider_profile_id: String,
+    pub model: String,
+    pub options: Vec<ImageSizeOption>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedModelConfig {
     pub provider_profile_id: String,
@@ -385,6 +406,23 @@ impl ModelConfigService {
         ensure_mock_default_configs(&database)?;
         find_config_by_id(&database, config_id)?
             .ok_or_else(|| ModelConfigError::NotFound(config_id.to_string()))
+    }
+
+    pub fn list_image_size_options(
+        &self,
+        workspace_directory: &Path,
+        capability_id: &str,
+    ) -> Result<ModelImageSizeOptions, ModelConfigError> {
+        let resolved = default_resolved_config_for_capability(workspace_directory, capability_id)?;
+        let config = resolved.view;
+
+        Ok(ModelImageSizeOptions {
+            capability_id: capability_id.to_string(),
+            config_id: config.id,
+            provider_profile_id: resolved.provider_profile_id,
+            model: config.model.clone(),
+            options: image_size_options(&config.provider_profile_id, &config.model),
+        })
     }
 
     pub fn save_config(
@@ -1182,6 +1220,266 @@ fn capability_definition(capability_id: &str) -> Option<&'static ModelCapability
         .find(|capability| capability.id == capability_id)
 }
 
+pub fn image_size_options(provider: &str, model: &str) -> Vec<ImageSizeOption> {
+    let values: &[(&str, &str, &str, i64, i64, &str)] = match (provider, model) {
+        ("openai", "gpt-image-2" | "gpt-image-1.5" | "gpt-image-1" | "gpt-image-1-mini") => &[
+            (
+                "1024x1024",
+                "正方形 1:1 · 1024x1024",
+                "1:1",
+                1024,
+                1024,
+                "1024x1024",
+            ),
+            (
+                "1024x1536",
+                "竖图 2:3 · 1024x1536",
+                "2:3",
+                1024,
+                1536,
+                "1024x1536",
+            ),
+            (
+                "1536x1024",
+                "横图 3:2 · 1536x1024",
+                "3:2",
+                1536,
+                1024,
+                "1536x1024",
+            ),
+        ],
+        ("volcengine", VOLCENGINE_SEEDREAM_5_PRO_MODEL) => &[
+            (
+                "1024x1024",
+                "正方形 1:1 · 1024x1024",
+                "1:1",
+                1024,
+                1024,
+                "1024x1024",
+            ),
+            (
+                "1152x864",
+                "横图 4:3 · 1152x864",
+                "4:3",
+                1152,
+                864,
+                "1152x864",
+            ),
+            (
+                "864x1152",
+                "竖图 3:4 · 864x1152",
+                "3:4",
+                864,
+                1152,
+                "864x1152",
+            ),
+            (
+                "1424x800",
+                "横图 16:9 · 1424x800",
+                "16:9",
+                1424,
+                800,
+                "1424x800",
+            ),
+            (
+                "800x1424",
+                "竖图 9:16 · 800x1424",
+                "9:16",
+                800,
+                1424,
+                "800x1424",
+            ),
+            (
+                "1248x832",
+                "横图 3:2 · 1248x832",
+                "3:2",
+                1248,
+                832,
+                "1248x832",
+            ),
+            (
+                "832x1248",
+                "竖图 2:3 · 832x1248",
+                "2:3",
+                832,
+                1248,
+                "832x1248",
+            ),
+            (
+                "1568x672",
+                "横图 21:9 · 1568x672",
+                "21:9",
+                1568,
+                672,
+                "1568x672",
+            ),
+            (
+                "2048x2048",
+                "正方形 1:1 · 2048x2048",
+                "1:1",
+                2048,
+                2048,
+                "2048x2048",
+            ),
+            (
+                "2368x1776",
+                "横图 4:3 · 2368x1776",
+                "4:3",
+                2368,
+                1776,
+                "2368x1776",
+            ),
+            (
+                "1776x2368",
+                "竖图 3:4 · 1776x2368",
+                "3:4",
+                1776,
+                2368,
+                "1776x2368",
+            ),
+            (
+                "2816x1584",
+                "横图 16:9 · 2816x1584",
+                "16:9",
+                2816,
+                1584,
+                "2816x1584",
+            ),
+            (
+                "1584x2816",
+                "竖图 9:16 · 1584x2816",
+                "9:16",
+                1584,
+                2816,
+                "1584x2816",
+            ),
+            (
+                "2496x1664",
+                "横图 3:2 · 2496x1664",
+                "3:2",
+                2496,
+                1664,
+                "2496x1664",
+            ),
+            (
+                "1664x2496",
+                "竖图 2:3 · 1664x2496",
+                "2:3",
+                1664,
+                2496,
+                "1664x2496",
+            ),
+            (
+                "3136x1344",
+                "横图 21:9 · 3136x1344",
+                "21:9",
+                3136,
+                1344,
+                "3136x1344",
+            ),
+        ],
+        (
+            "volcengine",
+            "doubao-seedream-5-0-260128"
+            | "doubao-seedream-5-0-lite-260128"
+            | "doubao-seedream-4-5-251128"
+            | "doubao-seedream-4-0-250828",
+        ) => &[
+            (
+                "2048x2048",
+                "正方形 1:1 · 2048x2048",
+                "1:1",
+                2048,
+                2048,
+                "2048x2048",
+            ),
+            (
+                "1536x2048",
+                "竖图 3:4 · 1536x2048",
+                "3:4",
+                1536,
+                2048,
+                "1536x2048",
+            ),
+            (
+                "1152x2048",
+                "竖图 9:16 · 1152x2048",
+                "9:16",
+                1152,
+                2048,
+                "1152x2048",
+            ),
+            (
+                "2048x1152",
+                "横图 16:9 · 2048x1152",
+                "16:9",
+                2048,
+                1152,
+                "2048x1152",
+            ),
+            (
+                "4096x4096",
+                "正方形 1:1 · 4096x4096",
+                "1:1",
+                4096,
+                4096,
+                "4096x4096",
+            ),
+            (
+                "3072x4096",
+                "竖图 3:4 · 3072x4096",
+                "3:4",
+                3072,
+                4096,
+                "3072x4096",
+            ),
+            (
+                "2304x4096",
+                "竖图 9:16 · 2304x4096",
+                "9:16",
+                2304,
+                4096,
+                "2304x4096",
+            ),
+            (
+                "4096x2304",
+                "横图 16:9 · 4096x2304",
+                "16:9",
+                4096,
+                2304,
+                "4096x2304",
+            ),
+        ],
+        _ => &[],
+    };
+
+    values
+        .iter()
+        .map(
+            |(id, label, ratio, width, height, provider_value)| ImageSizeOption {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                ratio: (*ratio).to_string(),
+                width: *width,
+                height: *height,
+                provider_value: (*provider_value).to_string(),
+            },
+        )
+        .collect()
+}
+
+pub fn validate_image_size(
+    provider: &str,
+    model: &str,
+    value: &str,
+) -> Result<(), ModelConfigError> {
+    image_size_options(provider, model)
+        .iter()
+        .any(|option| option.provider_value == value)
+        .then_some(())
+        .ok_or_else(|| ModelConfigError::Validation("当前模型不支持所选图片尺寸。".to_string()))
+}
+
 fn resolve_endpoint_path(
     profile: &ProviderProfile,
     category: &str,
@@ -1292,5 +1590,221 @@ impl From<DatabaseError> for ModelConfigError {
 impl From<rusqlite::Error> for ModelConfigError {
     fn from(source: rusqlite::Error) -> Self {
         Self::Database(DatabaseError::from(source).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::infrastructure::filesystem::WorkspaceFileSystem;
+    use crate::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
+
+    use super::{
+        image_size_options, validate_image_size, ModelConfigService, SaveLocalModelConfigInput,
+        SetDefaultModelConfigInput,
+    };
+
+    fn label_has_expected_direction(width: i64, height: i64, label: &str) -> bool {
+        match width.cmp(&height) {
+            std::cmp::Ordering::Equal => label.contains("正方形"),
+            std::cmp::Ordering::Less => label.contains("竖图"),
+            std::cmp::Ordering::Greater => label.contains("横图"),
+        }
+    }
+
+    #[test]
+    fn resolves_openai_sizes_with_unique_exact_ids_and_pixel_labels() {
+        let options = image_size_options("openai", "gpt-image-1");
+
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.provider_value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1024x1024", "1024x1536", "1536x1024"]
+        );
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            options.len()
+        );
+        assert!(options.iter().all(|option| {
+            option.id == option.provider_value
+                && option.label.contains(&option.ratio)
+                && option.label.contains(&option.provider_value)
+                && label_has_expected_direction(option.width, option.height, &option.label)
+        }));
+    }
+
+    #[test]
+    fn resolves_all_seedream_models_with_complete_2k_and_4k_sizes() {
+        let models = [
+            "doubao-seedream-5-0-260128",
+            "doubao-seedream-5-0-lite-260128",
+            "doubao-seedream-4-5-251128",
+            "doubao-seedream-4-0-250828",
+        ];
+        let expected_values = [
+            "2048x2048",
+            "1536x2048",
+            "1152x2048",
+            "2048x1152",
+            "4096x4096",
+            "3072x4096",
+            "2304x4096",
+            "4096x2304",
+        ];
+
+        for model in models {
+            let options = image_size_options("volcengine", model);
+            let ids = options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<HashSet<_>>();
+
+            assert_eq!(options.len(), expected_values.len(), "model={model}");
+            assert_eq!(ids.len(), options.len(), "model={model}");
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.provider_value.as_str())
+                    .collect::<Vec<_>>(),
+                expected_values,
+                "model={model}"
+            );
+            assert!(options.iter().all(|option| {
+                option.id == option.provider_value
+                    && option.label.contains(&option.ratio)
+                    && option.label.contains(&option.provider_value)
+                    && label_has_expected_direction(option.width, option.height, &option.label)
+            }));
+        }
+    }
+
+    #[test]
+    fn resolves_seedream_5_pro_with_only_official_1k_and_2k_sizes() {
+        let options = image_size_options("volcengine", "doubao-seedream-5-0-pro-260628");
+        let expected_values = [
+            "1024x1024",
+            "1152x864",
+            "864x1152",
+            "1424x800",
+            "800x1424",
+            "1248x832",
+            "832x1248",
+            "1568x672",
+            "2048x2048",
+            "2368x1776",
+            "1776x2368",
+            "2816x1584",
+            "1584x2816",
+            "2496x1664",
+            "1664x2496",
+            "3136x1344",
+        ];
+        let ids = options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(options.len(), expected_values.len());
+        assert_eq!(ids.len(), options.len());
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.provider_value.as_str())
+                .collect::<Vec<_>>(),
+            expected_values
+        );
+        assert!(options.iter().all(|option| {
+            option.id == option.provider_value
+                && option.label.contains(&option.ratio)
+                && option.label.contains(&option.provider_value)
+                && label_has_expected_direction(option.width, option.height, &option.label)
+        }));
+    }
+
+    #[test]
+    fn returns_no_sizes_for_unknown_provider_or_model() {
+        assert!(image_size_options("unknown-provider", "gpt-image-1").is_empty());
+        assert!(image_size_options("openai", "unknown-model").is_empty());
+        assert!(image_size_options("volcengine", "unknown-model").is_empty());
+    }
+
+    #[test]
+    fn lists_image_sizes_from_the_capability_default_config() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let workspace_directory =
+            std::env::temp_dir().join(format!("commerce-shoot-studio-image-sizes-{nanos}"));
+        WorkspaceService::new(WorkspaceFileSystem::new())
+            .initialize_workspace(InitializeWorkspaceInput {
+                workspace_directory: workspace_directory.clone(),
+            })
+            .expect("workspace should initialize");
+        let service = ModelConfigService::new();
+        let config = service
+            .save_config(
+                &workspace_directory,
+                SaveLocalModelConfigInput {
+                    id: Some("cfg-image-edit-openai".to_string()),
+                    capability_id: "image-edit".to_string(),
+                    provider_profile_id: "openai".to_string(),
+                    display_name: "OpenAI 图片编辑".to_string(),
+                    execution_mode: "sync".to_string(),
+                    model: "gpt-image-1".to_string(),
+                    base_url: None,
+                    endpoint_path: None,
+                    enabled: true,
+                },
+            )
+            .expect("image-edit config should save");
+        service
+            .set_default_config(
+                &workspace_directory,
+                SetDefaultModelConfigInput {
+                    capability_id: "image-edit".to_string(),
+                    config_id: config.id.clone(),
+                },
+            )
+            .expect("image-edit config should become default");
+
+        let result = service
+            .list_image_size_options(&workspace_directory, "image-edit")
+            .expect("default image-edit sizes should list");
+
+        assert_eq!(result.capability_id, "image-edit");
+        assert_eq!(result.config_id, config.id);
+        assert_eq!(result.provider_profile_id, "openai");
+        assert_eq!(result.model, "gpt-image-1");
+        assert_eq!(
+            result
+                .options
+                .iter()
+                .map(|option| option.provider_value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1024x1024", "1024x1536", "1536x1024"]
+        );
+
+        fs::remove_dir_all(workspace_directory).expect("temporary workspace should clean up");
+    }
+
+    #[test]
+    fn rejects_image_size_not_registered_for_model() {
+        let error = validate_image_size("openai", "gpt-image-1", "1152x2048")
+            .expect_err("OpenAI 模型不应接受火山引擎尺寸值");
+
+        assert_eq!(error.to_string(), "当前模型不支持所选图片尺寸。");
+        assert!(
+            validate_image_size("volcengine", "doubao-seedream-4-0-250828", "2304x4096").is_ok()
+        );
     }
 }

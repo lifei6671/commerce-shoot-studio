@@ -419,16 +419,16 @@ M7 真实场景生图闭环
 ### M3-T04 retry/cancel/delete 语义
 
 - 依赖：M3-T03。
-- 当前状态：部分完成。普通任务由 `retryTask` 创建新 task 并写 `retry_of_task_id` / `attempt_no`；服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中写 `parentTaskId`、目标 `imageId` 和 `imageNo`，不写 runtime 级 retry 关联。`cancelTask` 更新状态并写事件，`deleteTask` 写 `hidden_at` 做历史软隐藏；输入资产关系已落库，结果资产关系仍待 M7 联动。
+- 当前状态：部分完成。普通任务由 `retryTask` 创建新 task 并写 `retry_of_task_id` / `attempt_no`；商品与服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中写 `parentTaskId`、目标 `imageId` 和 `imageNo`，不写 runtime 级 retry 关联；成功后由 M7 结果事务把唯一 active output 归并父任务稳定槽位并隐藏子任务。`cancelTask` 更新状态并写事件，`deleteTask` 写 `hidden_at` 做历史软隐藏；输入和结果资产关系均已落库。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src/runtime/local/generation*`
 - 执行动作：
-  - 普通任务由 `retryTask` 创建新 task，写 `retry_of_task_id` 和 `attempt_no`；服饰单图重试用 `createTask` 创建只含目标项的子任务，并在冻结输入中写 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id` / `attempt_no`。
+  - 普通任务由 `retryTask` 创建新 task，写 `retry_of_task_id` 和 `attempt_no`；商品与服饰单图重试用 `createTask` 创建只含目标项的子任务，并在冻结输入中写 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id` / `attempt_no`；成功后唯一 active output 原子归并父任务稳定槽位并隐藏子任务。
   - `cancelTask` 更新状态和事件。
   - `deleteTask` 只写 `hidden_at`，不删除资产。
 - 验收标准：
-  - 普通 retry 新旧 task 的 `retry_of_task_id` / `attempt_no` 关联正确；服饰单图 retry 的冻结输入能关联父 task 与目标 `imageId` / `imageNo`。
+  - 普通 retry 新旧 task 的 `retry_of_task_id` / `attempt_no` 关联正确；商品与服饰单图 retry 的冻结输入能关联父 task 与目标 `imageId` / `imageNo`，成功后唯一 active output 在同一事务内归并父任务稳定槽位并隐藏子任务。
   - delete 后默认历史不显示，`includeDeleted` 可查。
   - delete 不物理删除输入资产或结果资产。
   - `make cargo-check` 通过。
@@ -572,6 +572,7 @@ M7 真实场景生图闭环
 - 执行动作：
   - mock-local 不触发网络请求，直接视为可用。
   - OpenAI / DeepSeek / 火山引擎使用已持久化的 Base URL；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。
+  - 火山引擎图片探测按精确 Seedream 模型能力构造请求：`doubao-seedream-5-0-pro-260628` 不发送组图与流式字段并使用 `1K`，Seedream 5.0 Lite、4.5、4.0 使用 `sequential_image_generation: "disabled"`、`stream: false` 的单图非流式探测且不发送组图 options；未登记模型使用不含这些可选字段的最小请求；单张参考图发送字符串。火山文生图/图生图探测总超时为 300 秒，图生文探测保持 60 秒。
   - 连接测试只读取 HTTP status，不保存 provider raw response。
   - 连接探测可在终端输出请求/响应脱敏摘要（provider profile、脱敏后的 Base URL origin、模型、Content-Type、字节数、状态码、耗时、响应长度和白名单错误码），不落库且不包含原始 body、secret、header 或用户配置的 Base URL / endpoint 原始路径。
   - 401 / 403 / 429 / 404 / timeout / network error 归一化为可展示文案。
@@ -711,7 +712,7 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
-- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸但不裁剪或转码输入图；保存配置、Provider 连接探测和历史配置执行都会强制解析该 endpoint，避免旧 `/v1/responses` 路径回写。`clothing-tryon-generation` 和 `image-edit` 的真实调用超时为 60 秒，其余普通能力为 90 秒，既有 `prompt-plan` 为 300 秒。诊断同时保留机器可读的 `elapsedMs` 与人类可读的 `elapsed` 总耗时；当前通用执行器分支在 HTTP 调用前失败时会输出不含原始输入、Prompt、图片或密钥的 `task_execution_error` 摘要，商品详情图逐项执行路径尚未统一接入该摘要。上述证据来自本地 HTTP/单元测试，未验证真实 OpenAI 外网调用。已实现 Provider 结果 URL 脱敏。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
+- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，`image-edit` 优先使用 runtime 按当前模型校验过的显式 `size`，旧任务仍按 1:1、横向、竖向映射目标尺寸；火山引擎图生图也会校验并透传当前模型支持的显式 `size`，`doubao-seedream-5-0-pro-260628` 使用独立的官方 1K/2K 精确尺寸表，且真实最小请求不发送该模型不支持的组图或流式字段。保存配置、Provider 连接探测和历史配置执行都会强制解析对应 endpoint。火山引擎文生图/图生图真实调用使用 300 秒总超时；OpenAI `clothing-tryon-generation` / `image-edit` 保持 60 秒，`clothing-scene-planning` 和其余普通能力为 90 秒，`prompt-plan` 为 300 秒；前端任务无进展窗口为 360 秒并长于最长 Provider timeout，queued 未启动窗口保持不变。诊断同时保留机器可读的 `elapsedMs` 与人类可读的 `elapsed` 总耗时；Debug 开关开启时会额外输出已剔除图片数据、URL、header、凭据和 secret 的归一化模型结果摘要。上述证据来自本地 HTTP/单元测试，尚未重新验证优化后的真实火山引擎外网调用。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
   - `desktop/src-tauri/src/infrastructure/providers/openai_images.rs`
@@ -726,7 +727,7 @@ M7 真实场景生图闭环
   - 编译通过。
   - 单测覆盖 URL 脱敏。
 - 本地调试诊断日志只记录状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 `providerErrorCode`；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header 或 API Key，且 raw response 不得进入 SQLite、`task_events`、导出包或前端 DTO。
-  - 真实模型调用默认不输出 raw Prompt；仅 Debug 构建且设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，可将 system、user 和 roleless Prompt 输出到终端 `stderr`。该例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，Release 构建编译期禁用。
+  - 真实模型调用默认不输出 raw Prompt；`make dev` 会在 Debug 构建中设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1`，将 system、user、roleless Prompt 和脱敏后的归一化模型结果摘要输出到终端 `stderr`。其它 Debug 启动方式需显式设置该变量。这些例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，Release 构建编译期禁用。
   - `make cargo-check` 通过。
 - 退出条件：真实 Provider 接入点稳定。
 
@@ -754,26 +755,28 @@ M7 真实场景生图闭环
 ### M7-T01 LocalTaskExecutor
 
 - 依赖：M3-T03、M6-T02。
-- 当前状态：部分完成。已新增 Rust `LocalTaskExecutor` 内部服务，支持 `maxConcurrentTasks = 1`，能领取最早 queued task，更新 running / completed / failed 状态，写入 `task.started`、`task.provider-called`、`task.succeeded`、`task.failed` 事件，并在模型能力不可用时写入 `MODEL_CAPABILITY_UNAVAILABLE` 标准错误；workspace 初始化已能恢复异常 `running` 任务为 `interrupted`。已支持服饰基准模特任务以独立的 `clothing-base-model-generation` 文生图 capability 渲染 Prompt，年龄可为婴儿、儿童、青少年、青年、中年或老年，未成年人必须按年龄呈现且不得成人化或性感化；该任务与服饰规划、试穿一样要求真实 Provider。已支持服饰场景规划任务保存结构化 `output_json`，规划 prompt 由 `clothing_scene_planning.toml` 配置；规划结果进入第二步场景选择时默认全部未选中，用户手动勾选、画幅和角度修改会保存在 App 层，生成完成或切换到其它菜单再返回后仍保留；已支持服饰试穿任务按 `items[]` 展开逐动作调用，并会把服装原图、参考图和模特图一并作为模型参考输入；第三步正式出图 prompt 由 `clothing_tryon_generation.toml` 配置，每个动作会拼接用户选择的图片比例、场景标题、场景描述、拍摄画幅、拍摄角度、拍摄位置和动作要求，并明确要求严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。服饰规划和试穿默认配置仍是 `mock-local` 时会失败提示配置真实模型，不再把 deterministic mock 结果展示成真实生成结果。尚未接 cancellation token、Tauri event emit、应用关闭主动取消。
+- 当前状态：部分完成。已新增 Rust `LocalTaskExecutor` 内部服务，后台执行支持 `maxConcurrentTasks = 4`（同步执行器和单元测试仍为 1），能领取最早 queued task，更新 running / completed / failed 状态，写入 `task.started`、`task.provider-called`、`task.succeeded`、`task.failed` 事件，并在模型能力不可用时写入 `MODEL_CAPABILITY_UNAVAILABLE` 标准错误；workspace 初始化已能恢复异常 `running` 任务为 `interrupted`。已支持服饰基准模特任务以独立的 `clothing-base-model-generation` 文生图 capability 渲染 Prompt，年龄可为婴儿、儿童、青少年、青年、中年或老年，未成年人必须按年龄呈现且不得成人化或性感化；该任务与服饰规划、试穿一样要求真实 Provider。已支持服饰场景规划任务保存结构化 `output_json`，规划 prompt 由 `clothing_scene_planning.toml` 配置；规划结果进入第二步场景选择时默认全部未选中，用户手动勾选、画幅和角度修改会保存在 App 层，生成完成或切换到其它菜单再返回后仍保留；已支持服饰试穿任务按 `items[]` 展开逐动作调用，并会把服装原图、参考图和模特图一并作为模型参考输入；第三步正式出图 prompt 由 `clothing_tryon_generation.toml` 配置，每个动作会拼接用户选择的图片比例、场景标题、场景描述、拍摄画幅、拍摄角度、拍摄位置和动作要求，并明确要求严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。服饰规划和试穿默认配置仍是 `mock-local` 时会失败提示配置真实模型，不再把 deterministic mock 结果展示成真实生成结果。尚未接 cancellation token、Tauri event emit、应用关闭主动取消。
 - 体型映射：UI 使用纤细、苗条、精瘦、匀称、健美、运动型、肌肉型、壮硕、结实、丰满、微胖、大码，默认匀称，不提供肥胖。任务输入仅保存短标签，Prompt 渲染时注入对应完整描述；大码映射丰满，历史 `标准`、`肌肉` 映射匀称、肌肉型，未知值原样保留。
 - 性别发型映射：UI 使用男、女短标签，Prompt 渲染时分别注入自然短发/中短发和自然中长发/长发的完整默认描述；用户外貌细节与内置发型冲突时，以用户输入为主，未知性别值原样保留。
 - 基准模特画幅约束：Prompt 的 system、user 和 `rolelessPrompt` 均严格要求输出为 2:3 纵向比例（宽:高=2:3），禁止输出其它比例。
 - 年龄映射：UI 使用婴儿、儿童、青少年、青年、中年、老年短标签。任务输入仅保存短标签，Prompt 渲染时注入对应完整年龄描述，并同步写入 user message 与 `rolelessPrompt`；未知历史年龄值原样保留。
 - 人群映射：UI 使用欧美白人、中国人、东亚人、东南亚人、非裔、中东人、拉丁裔短标签。任务输入仅保存短标签，Prompt 渲染时注入对应完整族裔描述，并同步写入 user message 与 `rolelessPrompt`；未知历史人群值原样保留。
-- 服饰规划与试穿参考图映射：1–5 张服装图 + 恰好 1 张模特图按真实 `userImages` 顺序映射为 A-F，两阶段 Prompt 都不再固定假设 B 是模特；缺失服装图、缺失模特或多张模特图时快速失败。试穿 `negative_prompt` 作为负向约束进入 system 和 `rolelessPrompt`。
+- 服饰规划与试穿参考图映射：runtime 先把恰好 1 张模特图规范化为第 1 张参考图 A，再把 1–5 张服装图依次映射为 B-F；缺失服装图、缺失模特或多张模特图时快速失败。试穿 `negative_prompt` 作为负向约束进入 system 和 `rolelessPrompt`。
+- 服饰 model-first 输入：唯一模特图固定为第 1 张参考图（A），其后的 1–5 张才是服装参考图；该顺序由 runtime 校验，规划 Prompt 不再要求模型回传冗余参考图索引。规划阶段不携带出图比例，只输出完整 `modelFeatures`（性别外观、年龄感、族裔外观、面部、体态、发型、肤色、整体气质和身份锚点）、场景与动作；用户已选择场景时，Prompt 按编号要求逐字复制并保持顺序，runtime 仅接受唯一的标题扩写匹配并整体重排场景对象，无法唯一匹配时拒绝结果。规划结果通过校验后，持久化 `output_json` 只保留顶层 `modelFeatures` 与 `scenes`，不保留 Provider 附带的内部分析、校验或比例字段。`modelFeatures` 会与冻结输入资产一起传入正式试穿任务，并在第三步与图片比例一并注入试穿 Prompt。
+- 服饰试穿执行：真实 Provider 使用 Tokio + async reqwest + JoinSet，单个 `clothing-tryon-generation` 任务内按最多 4 个动作一批并发调用；后台容量检查和 task claim 在同一个 SQLite `BEGIN IMMEDIATE` 事务内完成，async supervisor 负责把异常退出安全回写为 failed 且不覆盖 cancelled。ModelGateway 的 async、stream 和 blocking 真实调用共享进程级 Provider 并发限流池，统一限制 OpenAI / 火山引擎 3 路、DeepSeek 4 路；localhost、IPv4/IPv6 loopback 按规范化 origin 共用 1 路，不同本地 origin 分池，Provider 连接测试不属于该调用链。服饰单项持有的 Provider permit 覆盖 HTTP 提交、响应读取、结果 URL 下载、暂存资产记录和文件落盘，成功、失败、取消或异常退出均通过 RAII 释放；结果下载和暂存写入在 blocking worker 中执行。同批调用结束后，runtime 按 `item_index` 排序，在一个事务内为单项多图分配全局唯一、稳定递增的 `sort_order`，写入输出关系并把 `staged` 资产激活；任务已取消/隐藏或事务失败时，只清理无任何输入、输出引用的暂存资产。单项 Provider 调用、结果保存和失败彼此隔离，Provider 失败保留 typed `TaskModelInvocationError`，对应 item 事件只记录脱敏字段且不阻断同批其他动作；取消会中止仍在 JoinSet 中的 Provider 子任务，已进入下载和落盘的结果完成后会在关联前再次校验任务状态。至少有一张结果保存成功时父任务成功并记录 `failed_item_count`；全部单项未保存时，父任务按最低 `item_index` 在 Provider 与持久化失败中确定代表错误，再规范化为安全任务错误。
 - 主要文件：
   - `desktop/src-tauri/src/services/local_task_executor*`
   - `desktop/src-tauri/tests/local_task_executor.rs`
 - 执行动作：
   - 从 queued task 取任务执行。
-  - `maxConcurrentTasks = 1`。
+  - 后台执行器使用 `maxConcurrentTasks = 4`；同步执行器和单元测试保持 1。
   - 管理 cancellation token。
   - 更新 status / stage / events。
   - 关闭应用时取消 running task。
 - 验收标准：
   - queued task 能变 running / succeeded / failed。
   - stage 变化写 events 并 emit。
-  - 同时只跑一个任务。
+  - 后台同时最多运行 4 个任务，且所有 ModelGateway 真实调用仍受进程级 Provider 并发限流池约束。
   - `make cargo-check` 通过。
 - 退出条件：本地任务队列可运行。
 
@@ -817,6 +820,7 @@ M7 真实场景生图闭环
 ### M7-T04 场景 UI 接真实 GenerationPort
 
 - 依赖：M7-T03、M3-T06。
+- 当前状态：部分完成。商品与服饰生成结果卡已接真实单图修改尺寸、下载和删除：尺寸浮层从当前 `image-edit` 配置按 provider + model 读取精确选项，默认选择最接近当前宽高比的尺寸；异步读取和提交都按操作归属隔离，关闭、切换图片或前一个修改完成时不能覆盖新目标或提前解除 loading。修改尺寸或 AI 改图时把当前展示图作为参考图，并携带原 Prompt 与 provider 原始 `size` 或微调指令创建真实 `image-edit` 任务，成功后在事务内校验目标图片身份与槽位并替换父任务原槽位，失败保留原图。商品与服饰单图重试的唯一 active output 同样在事务内更新或补齐父任务稳定槽位并隐藏子任务，使空槽重试结果可继续改尺寸、删除和恢复；商品/服饰单图重试、修改尺寸或 AI 改图子任务已经成功但归并失败时，前端会隐藏未归并子任务，避免重启后被历史恢复误当成有效结果。归并或删除旧派生结果时，展示资产只用于校验当前操作，事务会把同一 `parentTaskId + imageId + imageNo` 下仍处于 `queued` / `running` 的旧派生任务原子转为 `cancelled` 并隐藏，清理其无可见引用输出；执行器的 stage、结果持久化和终态回写均拒绝隐藏任务。下载保存当前资产的原始字节和扩展名，不经 Canvas 重编码。单图删除需二次确认；普通、失败结果卡和批量删除统一执行持久化命令，仅隐藏成功项，失败项保持可见和选中并提示错误；失败槽位即使没有 output asset，也会按稳定 `imageId` / `imageNo` 写删除 tombstone，事务会拒绝后续晚到重试结果重新占用该槽位。删除事务移除对应结果关系并仅软删除无可见引用的资产；若当前展示图来自旧单图重试或 AI 改图，同一事务会隐藏对应派生任务并清理其无可见引用的旧输出，避免 active 孤儿资产。历史恢复读取删除事件，不再恢复已成功删除的卡片。已覆盖前端交互、Runtime adapter、Rust 事务和 Provider request 单测；真实 OpenAI/火山引擎外网、macOS/Windows 系统保存对话框仍待手工验收。
 - 主要文件：
   - `desktop/src/features/scenes/*`
   - `desktop/src/features/generation/*`
@@ -830,6 +834,7 @@ M7 真实场景生图闭环
   - UI 不再用 `setTimeout` 判定成功。
   - 成功结果来自真实 asset。
   - failed task 显示错误码和阶段。
+  - 历史展示状态按当前结果槽派生且不回写父 `generation_task` 的原始审计终态：结果槽全为 `complete` 时显示“已完成”，`complete` 与 `failed` 并存时显示“部分失败”，全为 `failed` 时显示“失败”，非 stale 的 `queued` / `running` 任务仍显示“生成中”。
   - `make test`、`make frontend-build` 通过。
 - 退出条件：场景生图 UI 完整走真实 runtime。
 

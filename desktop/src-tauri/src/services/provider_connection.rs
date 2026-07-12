@@ -7,6 +7,17 @@ use serde_json::{json, Value};
 
 use crate::infrastructure::providers::openai_images::build_openai_image_edit_multipart;
 
+pub(crate) const VOLCENGINE_SEEDREAM_5_PRO_MODEL: &str = "doubao-seedream-5-0-pro-260628";
+
+fn supports_seedream_single_image_probe_options(model: &str) -> bool {
+    matches!(
+        model,
+        "doubao-seedream-5-0-lite-260128"
+            | "doubao-seedream-4-5-251128"
+            | "doubao-seedream-4-0-250828"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConnectionProbe {
     pub provider_profile_id: String,
@@ -169,21 +180,25 @@ fn provider_probe_body(probe: &ProviderConnectionProbe) -> Value {
     if probe.provider_profile_id == "volcengine"
         && matches!(probe.category.as_str(), "text-to-image" | "image-to-image")
     {
+        let size = if probe.model == VOLCENGINE_SEEDREAM_5_PRO_MODEL {
+            "1K"
+        } else {
+            "2K"
+        };
         let mut body = json!({
             "model": probe.model,
             "prompt": "hello",
-            "sequential_image_generation": "disabled",
             "response_format": "url",
-            "size": "2K",
-            "stream": true,
+            "size": size,
             "watermark": true,
         });
+        if supports_seedream_single_image_probe_options(&probe.model) {
+            body["sequential_image_generation"] = Value::String("disabled".to_string());
+            body["stream"] = Value::Bool(false);
+        }
         if probe.category == "image-to-image" {
-            // 火山 Seedream 图生图接口要求 image 使用数组；探测使用 32x32 PNG data url，
-            // 避免依赖本地文件路径或外部测试图片，也不会把图片内容持久化。
-            body["image"] = json!([probe_png_data_url()]);
-            body["sequential_image_generation"] = Value::String("auto".to_string());
-            body["sequential_image_generation_options"] = json!({ "max_images": 1 });
+            // 单图探测使用字符串 data URL；避免依赖本地文件或外部测试图片。
+            body["image"] = Value::String(probe_png_data_url().to_string());
         }
         return body;
     }
@@ -243,6 +258,12 @@ fn openai_compatible_content(probe: &ProviderConnectionProbe) -> Value {
 }
 
 fn provider_probe_timeout(probe: &ProviderConnectionProbe) -> Duration {
+    if probe.provider_profile_id == "volcengine"
+        && matches!(probe.category.as_str(), "text-to-image" | "image-to-image")
+    {
+        return Duration::from_secs(300);
+    }
+
     if matches!(
         probe.category.as_str(),
         "text-to-image" | "image-to-image" | "image-to-text"
@@ -574,16 +595,17 @@ mod tests {
     }
 
     #[test]
-    fn builds_volcengine_text_to_image_probe() {
+    fn unknown_volcengine_image_model_probe_uses_minimal_request() {
         let body =
             provider_probe_body(&probe("text-to-image", "/images/generations", "volcengine"));
 
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["prompt"], "hello");
-        assert_eq!(body["sequential_image_generation"], "disabled");
+        assert!(body.get("sequential_image_generation").is_none());
+        assert!(body.get("sequential_image_generation_options").is_none());
         assert_eq!(body["response_format"], "url");
         assert_eq!(body["size"], "2K");
-        assert_eq!(body["stream"], true);
+        assert!(body.get("stream").is_none());
         assert_eq!(body["watermark"], true);
     }
 
@@ -591,6 +613,10 @@ mod tests {
     fn uses_longer_timeout_for_image_probe() {
         assert_eq!(
             provider_probe_timeout(&probe("text-to-image", "/images/generations", "volcengine")),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            provider_probe_timeout(&probe("image-to-image", "/v1/images/edits", "openai")),
             Duration::from_secs(60)
         );
         assert_eq!(
@@ -639,26 +665,37 @@ mod tests {
     }
 
     #[test]
-    fn builds_volcengine_image_to_image_probe_with_base64_image_array() {
-        let body = provider_probe_body(&probe(
-            "image-to-image",
-            "/images/generations",
-            "volcengine",
-        ));
+    fn seedream_5_pro_probe_omits_unsupported_group_and_stream_fields() {
+        let mut probe = probe("image-to-image", "/images/generations", "volcengine");
+        probe.model = "doubao-seedream-5-0-pro-260628".to_string();
+        let body = provider_probe_body(&probe);
 
-        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["model"], "doubao-seedream-5-0-pro-260628");
         assert_eq!(body["prompt"], "hello");
-        let image = body["image"].as_array().expect("image should be array");
-        assert_eq!(image.len(), 1);
-        assert!(image[0]
+        assert!(body["image"]
             .as_str()
             .unwrap()
             .starts_with("data:image/png;base64,"));
-        assert_eq!(body["sequential_image_generation"], "auto");
-        assert_eq!(body["sequential_image_generation_options"]["max_images"], 1);
+        assert!(body.get("sequential_image_generation").is_none());
+        assert!(body.get("sequential_image_generation_options").is_none());
+        assert!(body.get("stream").is_none());
         assert_eq!(body["response_format"], "url");
-        assert_eq!(body["size"], "2K");
-        assert_eq!(body["stream"], true);
+        assert_eq!(body["size"], "1K");
+    }
+
+    #[test]
+    fn seedream_lite_probe_uses_single_image_non_streaming_mode() {
+        let mut probe = probe("image-to-image", "/images/generations", "volcengine");
+        probe.model = "doubao-seedream-5-0-lite-260128".to_string();
+        let body = provider_probe_body(&probe);
+
+        assert!(body["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(body["sequential_image_generation"], "disabled");
+        assert!(body.get("sequential_image_generation_options").is_none());
+        assert_eq!(body["stream"], false);
     }
 
     #[test]

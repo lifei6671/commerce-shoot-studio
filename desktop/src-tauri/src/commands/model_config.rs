@@ -1,7 +1,7 @@
 use crate::infrastructure::filesystem::default_workspace_directory;
 use crate::services::model_config::{
-    LocalModelConfigView, ModelConfigService, ProviderProfileView, ProviderTestResult,
-    SaveLocalModelConfigInput, SetDefaultModelConfigInput,
+    LocalModelConfigView, ModelConfigService, ModelImageSizeOptions, ProviderProfileView,
+    ProviderTestResult, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
 };
 
 #[tauri::command]
@@ -15,6 +15,15 @@ pub fn model_config_list_configs() -> Result<Vec<LocalModelConfigView>, String> 
 pub fn model_config_get_config(config_id: String) -> Result<LocalModelConfigView, String> {
     ModelConfigService::new()
         .get_config(&default_workspace_directory(), &config_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn model_config_list_image_size_options(
+    capability_id: String,
+) -> Result<ModelImageSizeOptions, String> {
+    ModelConfigService::new()
+        .list_image_size_options(&default_workspace_directory(), &capability_id)
         .map_err(|error| error.to_string())
 }
 

@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::services::model_config::validate_image_size;
 use crate::services::model_gateway::ModelGatewayError;
 
 const MULTIPART_BOUNDARY: &str = "commerce-shoot-studio-openai-images-edit";
@@ -31,6 +32,18 @@ pub fn build_openai_image_edit_multipart(
                 "OpenAI 图生图至少需要一张参考图。".to_string(),
             )
         })?;
+    if let Some(size) = input
+        .get("size")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        validate_image_size("openai", model, size).map_err(|_| {
+            ModelGatewayError::ProviderRequestInvalid(
+                "当前 OpenAI 模型不支持所选图片尺寸。".to_string(),
+            )
+        })?;
+    }
 
     let decoded_images = images
         .iter()
@@ -49,7 +62,8 @@ pub fn build_openai_image_edit_multipart(
     write_text_part(&mut body, &boundary, "model", model);
     write_text_part(&mut body, &boundary, "prompt", prompt);
     write_text_part(&mut body, &boundary, "output_format", "png");
-    write_text_part(&mut body, &boundary, "size", openai_image_size(input));
+    let size = openai_image_size(input);
+    write_text_part(&mut body, &boundary, "size", &size);
 
     for (index, image) in decoded_images.iter().enumerate() {
         write_image_part(&mut body, &boundary, index + 1, image);
@@ -138,21 +152,30 @@ fn base64_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn openai_image_size(input: &Value) -> &'static str {
+fn openai_image_size(input: &Value) -> String {
+    if let Some(size) = input
+        .get("size")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return size.to_string();
+    }
+
     let Some((width, height)) = input
         .get("ratio")
         .and_then(Value::as_str)
         .and_then(parse_ratio)
     else {
-        return "1024x1024";
+        return "1024x1024".to_string();
     };
 
     if width < height {
-        "1024x1536"
+        "1024x1536".to_string()
     } else if width > height {
-        "1536x1024"
+        "1536x1024".to_string()
     } else {
-        "1024x1024"
+        "1024x1024".to_string()
     }
 }
 

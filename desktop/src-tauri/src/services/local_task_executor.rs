@@ -10,19 +10,21 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
+use tokio::task::JoinSet;
 
+use crate::domain::assets::Asset;
 use crate::domain::errors::{normalize_provider_http_error, normalize_provider_transport_error};
 use crate::domain::generation::{
     GenerationError, GenerationTaskKind, GenerationTaskStage, NormalizedTaskError, WorkspaceKind,
 };
 use crate::infrastructure::database::WorkspaceDatabase;
 use crate::services::assets::AssetService;
-use crate::services::generation::insert_task_event;
+use crate::services::generation::{insert_task_event, insert_task_event_on_connection};
 use crate::services::model_config::{
     capability_requires_real_provider, default_config_for_capability, ModelConfigError,
 };
 use crate::services::model_gateway::{
-    ModelGatewayRequest, ModelGatewayResult, ModelGatewayService,
+    LeasedModelGatewayResult, ModelGatewayRequest, ModelGatewayResult, ModelGatewayService,
 };
 use crate::services::prompt_registry::{
     render_prompt_for_roles, render_roleless_prompt, PromptTemplateId,
@@ -31,6 +33,7 @@ use crate::services::prompt_registry::{
 const PROVIDER_RESULT_TIMEOUT_SECONDS: u64 = 30;
 const BACKGROUND_TASK_CONCURRENCY: usize = 4;
 const PRODUCT_DETAIL_ITEM_CONCURRENCY: usize = 4;
+const CLOTHING_TRYON_ITEM_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +52,11 @@ enum ProductDetailItemExecution {
         index: usize,
         gateway_result: ModelGatewayResult,
     },
+    Staged {
+        index: usize,
+        gateway_result: ModelGatewayResult,
+        assets: Vec<Asset>,
+    },
     Failed {
         index: usize,
         error: GenerationError,
@@ -56,11 +64,68 @@ enum ProductDetailItemExecution {
     Skipped,
 }
 
-#[derive(Debug)]
+enum PersistableGatewayResult {
+    Plain(ModelGatewayResult),
+    Leased(LeasedModelGatewayResult),
+}
+
+impl PersistableGatewayResult {
+    fn result(&self) -> &ModelGatewayResult {
+        match self {
+            Self::Plain(result) => result,
+            Self::Leased(result) => result.result(),
+        }
+    }
+}
+
+enum ClothingTryonItemExecution {
+    Succeeded {
+        index: usize,
+        gateway_result: ModelGatewayResult,
+    },
+    Failed {
+        index: usize,
+        error: TaskModelInvocationError,
+    },
+    Skipped,
+}
+
+enum AsyncClothingTryonItemExecution {
+    Staged {
+        gateway_result: ModelGatewayResult,
+        assets: Vec<Asset>,
+    },
+    Failed {
+        index: usize,
+        error: TaskModelInvocationError,
+    },
+    Skipped,
+}
+
+struct ClothingTryonInvocationResults {
+    results: Vec<ModelGatewayResult>,
+    saved_image_count: usize,
+    failed_item_count: usize,
+}
+
+#[derive(Debug, Clone)]
 enum TaskModelInvocationError {
     Input(GenerationError),
     Local(GenerationError),
     Gateway(ModelConfigError),
+}
+
+fn remember_lowest_index_item_error(
+    selected: &mut Option<(usize, TaskModelInvocationError)>,
+    index: usize,
+    error: TaskModelInvocationError,
+) {
+    if selected
+        .as_ref()
+        .is_none_or(|(selected_index, _)| index < *selected_index)
+    {
+        *selected = Some((index, error));
+    }
 }
 
 impl std::fmt::Display for TaskModelInvocationError {
@@ -89,11 +154,8 @@ impl LocalTaskExecutor {
         &self,
         workspace_directory: &Path,
     ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
-        if self.running_task_count(workspace_directory)? >= self.max_concurrent_tasks {
-            return Ok(None);
-        }
-
-        let Some(task) = claim_next_queued_task(workspace_directory)? else {
+        let Some(task) = claim_next_queued_task(workspace_directory, self.max_concurrent_tasks)?
+        else {
             return Ok(None);
         };
 
@@ -134,11 +196,9 @@ impl LocalTaskExecutor {
         workspace_directory: &Path,
         task_id: &str,
     ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
-        if self.running_task_count(workspace_directory)? >= self.max_concurrent_tasks {
-            return Ok(None);
-        }
-
-        let Some(task) = claim_queued_task_by_id(workspace_directory, task_id)? else {
+        let Some(task) =
+            claim_queued_task_by_id(workspace_directory, task_id, self.max_concurrent_tasks)?
+        else {
             return Ok(None);
         };
 
@@ -174,15 +234,42 @@ impl LocalTaskExecutor {
         }))
     }
 
+    pub fn start_next_async(
+        &self,
+        workspace_directory: &Path,
+    ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
+        let Some(task) = claim_next_queued_task(workspace_directory, self.max_concurrent_tasks)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(spawn_async_claimed_task(
+            workspace_directory.to_path_buf(),
+            task,
+        )))
+    }
+
+    pub fn start_task_async(
+        &self,
+        workspace_directory: &Path,
+        task_id: &str,
+    ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
+        let Some(task) =
+            claim_queued_task_by_id(workspace_directory, task_id, self.max_concurrent_tasks)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(spawn_async_claimed_task(
+            workspace_directory.to_path_buf(),
+            task,
+        )))
+    }
+
     pub fn run_next(
         &self,
         workspace_directory: &Path,
     ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
-        if self.running_task_count(workspace_directory)? >= self.max_concurrent_tasks {
-            return Ok(None);
-        }
-
-        let Some(task) = claim_next_queued_task(workspace_directory)? else {
+        let Some(task) = claim_next_queued_task(workspace_directory, self.max_concurrent_tasks)?
+        else {
             return Ok(None);
         };
 
@@ -194,26 +281,59 @@ impl LocalTaskExecutor {
         workspace_directory: &Path,
         task_id: &str,
     ) -> Result<Option<LocalTaskExecutionResult>, GenerationError> {
-        if self.running_task_count(workspace_directory)? >= self.max_concurrent_tasks {
-            return Ok(None);
-        }
-
-        let Some(task) = claim_queued_task_by_id(workspace_directory, task_id)? else {
+        let Some(task) =
+            claim_queued_task_by_id(workspace_directory, task_id, self.max_concurrent_tasks)?
+        else {
             return Ok(None);
         };
 
         execute_claimed_task(workspace_directory, task).map(Some)
     }
+}
 
-    fn running_task_count(&self, workspace_directory: &Path) -> Result<usize, GenerationError> {
-        let database = WorkspaceDatabase::open(workspace_directory)?;
-        let count: i64 = database.connection().query_row(
-            "SELECT COUNT(*) FROM generation_tasks WHERE status = 'running'",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(count.max(0) as usize)
+fn spawn_async_claimed_task(
+    workspace_directory: std::path::PathBuf,
+    task: ClaimedTask,
+) -> LocalTaskExecutionResult {
+    let task_id = task.id.clone();
+    let background_task_id = task_id.clone();
+    let execution_workspace_directory = workspace_directory.clone();
+    let execution =
+        async move { execute_claimed_task_async(&execution_workspace_directory, task).await };
+    tauri::async_runtime::spawn(supervise_async_task_execution(
+        workspace_directory,
+        background_task_id,
+        execution,
+    ));
+    LocalTaskExecutionResult {
+        task_id,
+        invocation_id: None,
     }
+}
+
+async fn supervise_async_task_execution<F>(
+    workspace_directory: std::path::PathBuf,
+    task_id: String,
+    execution: F,
+) where
+    F: std::future::Future<Output = Result<LocalTaskExecutionResult, GenerationError>>
+        + Send
+        + 'static,
+{
+    let error_message = match tauri::async_runtime::spawn(execution).await {
+        Ok(Ok(_)) => return,
+        Ok(Err(source)) => source.to_string(),
+        Err(_) => "后台任务异常退出。".to_string(),
+    };
+    let error = NormalizedTaskError {
+        code: "LOCAL_TASK_EXECUTION_FAILED".to_string(),
+        message: error_message,
+        retryable: true,
+        stage: Some(GenerationTaskStage::Failed),
+        provider_status_code: None,
+        provider_error_code: None,
+    };
+    let _ = mark_task_failed(&workspace_directory, &task_id, &error);
 }
 
 fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
@@ -244,118 +364,117 @@ struct ClaimedTaskInputAsset {
 
 fn claim_next_queued_task(
     workspace_directory: &Path,
+    max_concurrent_tasks: usize,
 ) -> Result<Option<ClaimedTask>, GenerationError> {
-    let database = WorkspaceDatabase::open(workspace_directory)?;
-    let task = database
-        .connection()
-        .query_row(
-            "
-            SELECT id, workspace, kind, input_json
-            FROM generation_tasks
-            WHERE status = 'queued' AND hidden_at IS NULL
-            ORDER BY datetime(created_at) ASC, id ASC
-            LIMIT 1
-            ",
-            [],
-            |row| {
-                let workspace: String = row.get(1)?;
-                let kind: String = row.get(2)?;
-                let input_json: Option<String> = row.get(3)?;
-                Ok(ClaimedTask {
-                    id: row.get(0)?,
-                    workspace: parse_generation_value(1, &workspace)?,
-                    kind: parse_generation_value(2, &kind)?,
-                    input: deserialize_input_json(3, input_json)?,
-                    input_assets: Vec::new(),
-                })
-            },
-        )
-        .optional()?;
-
-    let Some(mut task) = task else {
-        return Ok(None);
-    };
-    task.input_assets = claimed_task_input_assets(&database, &task.id)?;
-    let updated = database.connection().execute(
-        "
-        UPDATE generation_tasks
-        SET status = 'running',
-            stage = 'validating',
-            updated_at = datetime('now')
-        WHERE id = ?1 AND status = 'queued'
-        ",
-        params![task.id],
-    )?;
-    if updated == 0 {
-        return Ok(None);
-    }
-    insert_task_event(
-        &database,
-        &task.id,
-        "task.started",
-        Some(GenerationTaskStage::Validating),
-        Some(json!({ "max_concurrent_tasks": 1 })),
-    )?;
-
-    Ok(Some(task))
+    claim_queued_task(workspace_directory, None, max_concurrent_tasks)
 }
 
 fn claim_queued_task_by_id(
     workspace_directory: &Path,
     task_id: &str,
+    max_concurrent_tasks: usize,
+) -> Result<Option<ClaimedTask>, GenerationError> {
+    claim_queued_task(workspace_directory, Some(task_id), max_concurrent_tasks)
+}
+
+fn claim_queued_task(
+    workspace_directory: &Path,
+    task_id: Option<&str>,
+    max_concurrent_tasks: usize,
 ) -> Result<Option<ClaimedTask>, GenerationError> {
     let database = WorkspaceDatabase::open(workspace_directory)?;
-    let task = database
-        .connection()
-        .query_row(
+    database.connection().execute_batch("BEGIN IMMEDIATE")?;
+    let claim_result = (|| -> Result<Option<ClaimedTask>, GenerationError> {
+        let running_count: i64 = database.connection().query_row(
+            "SELECT COUNT(*) FROM generation_tasks WHERE status = 'running' AND hidden_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if running_count.max(0) as usize >= max_concurrent_tasks {
+            return Ok(None);
+        }
+
+        let read_task = |row: &rusqlite::Row<'_>| {
+            let workspace: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let input_json: Option<String> = row.get(3)?;
+            Ok(ClaimedTask {
+                id: row.get(0)?,
+                workspace: parse_generation_value(1, &workspace)?,
+                kind: parse_generation_value(2, &kind)?,
+                input: deserialize_input_json(3, input_json)?,
+                input_assets: Vec::new(),
+            })
+        };
+        let task = if let Some(task_id) = task_id {
+            database
+                .connection()
+                .query_row(
+                    "
+                    SELECT id, workspace, kind, input_json
+                    FROM generation_tasks
+                    WHERE id = ?1 AND status = 'queued' AND hidden_at IS NULL
+                    LIMIT 1
+                    ",
+                    params![task_id],
+                    read_task,
+                )
+                .optional()?
+        } else {
+            database
+                .connection()
+                .query_row(
+                    "
+                    SELECT id, workspace, kind, input_json
+                    FROM generation_tasks
+                    WHERE status = 'queued' AND hidden_at IS NULL
+                    ORDER BY datetime(created_at) ASC, id ASC
+                    LIMIT 1
+                    ",
+                    [],
+                    read_task,
+                )
+                .optional()?
+        };
+
+        let Some(mut task) = task else {
+            return Ok(None);
+        };
+        task.input_assets = claimed_task_input_assets(&database, &task.id)?;
+        let updated = database.connection().execute(
             "
-            SELECT id, workspace, kind, input_json
-            FROM generation_tasks
+            UPDATE generation_tasks
+            SET status = 'running',
+                stage = 'validating',
+                updated_at = datetime('now')
             WHERE id = ?1 AND status = 'queued' AND hidden_at IS NULL
-            LIMIT 1
             ",
-            params![task_id],
-            |row| {
-                let workspace: String = row.get(1)?;
-                let kind: String = row.get(2)?;
-                let input_json: Option<String> = row.get(3)?;
-                Ok(ClaimedTask {
-                    id: row.get(0)?,
-                    workspace: parse_generation_value(1, &workspace)?,
-                    kind: parse_generation_value(2, &kind)?,
-                    input: deserialize_input_json(3, input_json)?,
-                    input_assets: Vec::new(),
-                })
-            },
-        )
-        .optional()?;
+            params![task.id],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        insert_task_event(
+            &database,
+            &task.id,
+            "task.started",
+            Some(GenerationTaskStage::Validating),
+            Some(json!({ "max_concurrent_tasks": max_concurrent_tasks })),
+        )?;
 
-    let Some(mut task) = task else {
-        return Ok(None);
-    };
-    task.input_assets = claimed_task_input_assets(&database, &task.id)?;
-    let updated = database.connection().execute(
-        "
-        UPDATE generation_tasks
-        SET status = 'running',
-            stage = 'validating',
-            updated_at = datetime('now')
-        WHERE id = ?1 AND status = 'queued'
-        ",
-        params![task.id],
-    )?;
-    if updated == 0 {
-        return Ok(None);
+        Ok(Some(task))
+    })();
+
+    match claim_result {
+        Ok(task) => {
+            database.connection().execute_batch("COMMIT")?;
+            Ok(task)
+        }
+        Err(source) => {
+            let _ = database.connection().execute_batch("ROLLBACK");
+            Err(source)
+        }
     }
-    insert_task_event(
-        &database,
-        &task.id,
-        "task.started",
-        Some(GenerationTaskStage::Validating),
-        Some(json!({ "max_concurrent_tasks": 1 })),
-    )?;
-
-    Ok(Some(task))
 }
 
 fn claimed_task_input_assets(
@@ -403,21 +522,48 @@ fn execute_claimed_task(
     if is_product_detail_image_task(&task) {
         return execute_product_detail_image_task(workspace_directory, task);
     }
+    if is_clothing_tryon_generation_task(&task) {
+        return execute_clothing_tryon_generation_task(workspace_directory, task);
+    }
 
-    let gateway_results = match invoke_model_for_task(workspace_directory, &task) {
-        Ok(results) => results,
-        Err(source) => {
-            let error = normalize_model_gateway_task_error(source);
-            write_task_execution_diagnostic(task_execution_error_diagnostic(
-                &task.id,
-                capability_for_claimed_task(&task),
-                &error,
-            ));
-            mark_task_failed(workspace_directory, &task.id, &error)?;
-            return Ok(LocalTaskExecutionResult {
-                task_id: task.id,
-                invocation_id: None,
-            });
+    let leased_gateway_result = if task_requires_generated_asset(task.kind) {
+        match invoke_single_real_image_model_for_task_leased(workspace_directory, &task) {
+            Ok(result) => result,
+            Err(source) => {
+                let error = normalize_model_gateway_task_error(source);
+                write_task_execution_diagnostic(task_execution_error_diagnostic(
+                    &task.id,
+                    capability_for_claimed_task(&task),
+                    &error,
+                ));
+                mark_task_failed(workspace_directory, &task.id, &error)?;
+                return Ok(LocalTaskExecutionResult {
+                    task_id: task.id,
+                    invocation_id: None,
+                });
+            }
+        }
+    } else {
+        None
+    };
+    let gateway_results = if let Some(leased_result) = leased_gateway_result.as_ref() {
+        vec![leased_result.result().clone()]
+    } else {
+        match invoke_model_for_task(workspace_directory, &task) {
+            Ok(results) => results,
+            Err(source) => {
+                let error = normalize_model_gateway_task_error(source);
+                write_task_execution_diagnostic(task_execution_error_diagnostic(
+                    &task.id,
+                    capability_for_claimed_task(&task),
+                    &error,
+                ));
+                mark_task_failed(workspace_directory, &task.id, &error)?;
+                return Ok(LocalTaskExecutionResult {
+                    task_id: task.id,
+                    invocation_id: None,
+                });
+            }
         }
     };
     let first_invocation_id = gateway_results
@@ -432,8 +578,8 @@ fn execute_claimed_task(
     } else {
         persist_generated_outputs(workspace_directory, &task, &gateway_results)
     };
-    if let Err(_source) = persist_result {
-        let error = normalized_persist_error(&task);
+    if let Err(source) = persist_result {
+        let error = normalized_persist_error_with_source(&task, &source);
         write_task_execution_diagnostic(task_execution_error_diagnostic(
             &task.id,
             capability_for_claimed_task(&task),
@@ -445,12 +591,238 @@ fn execute_claimed_task(
             invocation_id: first_invocation_id,
         });
     }
+    drop(leased_gateway_result);
     let invocation_ids = gateway_results
         .iter()
         .map(|result| result.invocation_id.clone())
         .collect::<Vec<_>>();
     mark_task_succeeded(workspace_directory, &task, &invocation_ids, None)?;
 
+    Ok(LocalTaskExecutionResult {
+        task_id: task.id,
+        invocation_id: first_invocation_id,
+    })
+}
+
+async fn execute_claimed_task_async(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+) -> Result<LocalTaskExecutionResult, GenerationError> {
+    if !is_clothing_tryon_generation_task(&task) {
+        return execute_claimed_task_in_blocking_worker(workspace_directory, task).await;
+    }
+    let capability_id = capability_for_claimed_task(&task);
+    let config = match default_config_for_capability(workspace_directory, capability_id) {
+        Ok(config) => config,
+        Err(source) => {
+            let error =
+                normalize_model_gateway_task_error(TaskModelInvocationError::Gateway(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    if config.provider_profile_id == "mock-local" {
+        return execute_claimed_task_in_blocking_worker(workspace_directory, task).await;
+    }
+    if !update_stage(
+        workspace_directory,
+        &task.id,
+        GenerationTaskStage::CallingProvider,
+        "task.provider-called",
+        None,
+    )? {
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: None,
+        });
+    }
+    execute_clothing_tryon_generation_task_async(workspace_directory, task).await
+}
+
+async fn execute_claimed_task_in_blocking_worker(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+) -> Result<LocalTaskExecutionResult, GenerationError> {
+    let workspace_directory = workspace_directory.to_path_buf();
+    tokio::task::spawn_blocking(move || execute_claimed_task(&workspace_directory, task))
+        .await
+        .map_err(|_| GenerationError::Validation("后台任务执行器异常退出。".to_string()))?
+}
+
+fn execute_clothing_tryon_generation_task(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+) -> Result<LocalTaskExecutionResult, GenerationError> {
+    let capability_id = capability_for_claimed_task(&task);
+    let config = match default_config_for_capability(workspace_directory, capability_id) {
+        Ok(config) => config,
+        Err(source) => {
+            let error =
+                normalize_model_gateway_task_error(TaskModelInvocationError::Gateway(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    if config.provider_profile_id == "mock-local"
+        && capability_requires_real_provider(capability_id)
+    {
+        let error = normalize_model_gateway_task_error(TaskModelInvocationError::Gateway(
+            ModelConfigError::Validation(
+                "没有可用模型，请先在模型配置中为该能力配置并测试真实模型。".to_string(),
+            ),
+        ));
+        write_task_execution_diagnostic(task_execution_error_diagnostic(
+            &task.id,
+            capability_id,
+            &error,
+        ));
+        mark_task_failed(workspace_directory, &task.id, &error)?;
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: None,
+        });
+    }
+    let inputs = match task_gateway_inputs(workspace_directory, &task) {
+        Ok(inputs) => inputs,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(TaskModelInvocationError::Input(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let invocation = invoke_clothing_tryon_inputs_for_task(
+        workspace_directory,
+        &task,
+        capability_id,
+        inputs,
+        &|capability_id, input| invoke_model_gateway(workspace_directory, capability_id, input),
+    );
+    let invocation = match invocation {
+        Ok(invocation) => invocation,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(source);
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let first_invocation_id = invocation
+        .results
+        .first()
+        .map(|result| result.invocation_id.clone());
+    let invocation_ids = invocation
+        .results
+        .iter()
+        .map(|result| result.invocation_id.clone())
+        .collect::<Vec<_>>();
+    mark_task_succeeded(
+        workspace_directory,
+        &task,
+        &invocation_ids,
+        Some(json!({
+            "image_count": invocation.saved_image_count,
+            "failed_item_count": invocation.failed_item_count,
+        })),
+    )?;
+    Ok(LocalTaskExecutionResult {
+        task_id: task.id,
+        invocation_id: first_invocation_id,
+    })
+}
+
+async fn execute_clothing_tryon_generation_task_async(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+) -> Result<LocalTaskExecutionResult, GenerationError> {
+    let capability_id = capability_for_claimed_task(&task);
+    let inputs = match task_gateway_inputs(workspace_directory, &task) {
+        Ok(inputs) => inputs,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(TaskModelInvocationError::Input(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let invocation = match invoke_clothing_tryon_inputs_for_task_async(
+        workspace_directory,
+        &task,
+        capability_id,
+        inputs,
+    )
+    .await
+    {
+        Ok(invocation) => invocation,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(source);
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let first_invocation_id = invocation
+        .results
+        .first()
+        .map(|result| result.invocation_id.clone());
+    let invocation_ids = invocation
+        .results
+        .iter()
+        .map(|result| result.invocation_id.clone())
+        .collect::<Vec<_>>();
+    mark_task_succeeded(
+        workspace_directory,
+        &task,
+        &invocation_ids,
+        Some(json!({
+            "image_count": invocation.saved_image_count,
+            "failed_item_count": invocation.failed_item_count,
+        })),
+    )?;
     Ok(LocalTaskExecutionResult {
         task_id: task.id,
         invocation_id: first_invocation_id,
@@ -569,9 +941,9 @@ fn execute_product_detail_image_task(
     let mut first_invocation_id = None;
     let mut invocation_ids = Vec::new();
     let mut successful_results = Vec::new();
-    let mut next_sort_order = 0usize;
-    let mut saved_image_count = 0usize;
+    let mut staged_results = Vec::new();
     let mut failed_item_count = 0usize;
+    let mut stopped = false;
 
     for batch in product_detail_input_batches(items.len(), PRODUCT_DETAIL_ITEM_CONCURRENCY) {
         let handles = batch
@@ -619,6 +991,17 @@ fn execute_product_detail_image_task(
                     invocation_ids.push(gateway_result.invocation_id.clone());
                     successful_results.push((index, gateway_result));
                 }
+                ProductDetailItemExecution::Staged {
+                    index,
+                    gateway_result,
+                    assets,
+                } => {
+                    if first_invocation_id.is_none() {
+                        first_invocation_id = Some(gateway_result.invocation_id.clone());
+                    }
+                    invocation_ids.push(gateway_result.invocation_id.clone());
+                    staged_results.push((index, gateway_result, assets));
+                }
                 ProductDetailItemExecution::Failed { index, error } => {
                     eprintln!(
                         "[local-task-executor] product detail item failed task_id={} item_index={} error={}",
@@ -628,36 +1011,47 @@ fn execute_product_detail_image_task(
                     insert_task_item_failed_event(workspace_directory, &task.id, index, error)?;
                 }
                 ProductDetailItemExecution::Skipped => {
-                    return Ok(LocalTaskExecutionResult {
-                        task_id: task.id.clone(),
-                        invocation_id: first_invocation_id,
-                    });
+                    stopped = true;
+                }
+            }
+        }
+        if stopped {
+            break;
+        }
+    }
+    if !stopped {
+        successful_results.sort_by_key(|(index, _)| *index);
+        for (index, gateway_result) in successful_results {
+            match stage_generated_gateway_result_outputs(
+                workspace_directory,
+                &task.id,
+                &gateway_result,
+                index,
+            ) {
+                Ok(Some(assets)) => staged_results.push((index, gateway_result, assets)),
+                Ok(None) => {
+                    stopped = true;
+                    break;
+                }
+                Err(source) => {
+                    eprintln!(
+                        "[local-task-executor] product detail item persist failed task_id={} item_index={} error={}",
+                        task.id, index, source
+                    );
+                    failed_item_count += 1;
+                    insert_task_item_failed_event(workspace_directory, &task.id, index, source)?;
                 }
             }
         }
     }
-    successful_results.sort_by_key(|(index, _)| *index);
-    for (index, gateway_result) in successful_results {
-        let sort_order_start = product_detail_output_sort_order_start(next_sort_order, index);
-        match persist_generated_gateway_result_outputs(
-            workspace_directory,
-            &task.id,
-            &gateway_result,
-            sort_order_start,
-        ) {
-            Ok(count) => {
-                saved_image_count += count;
-                next_sort_order = sort_order_start + count;
-            }
-            Err(source) => {
-                eprintln!(
-                    "[local-task-executor] product detail item persist failed task_id={} item_index={} error={}",
-                    task.id, index, source
-                );
-                failed_item_count += 1;
-                insert_task_item_failed_event(workspace_directory, &task.id, index, source)?;
-            }
-        }
+    let (_, saved_image_count) =
+        persist_product_detail_staged_results(workspace_directory, &task.id, staged_results)?;
+
+    if stopped {
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: first_invocation_id,
+        });
     }
 
     if saved_image_count == 0 {
@@ -730,15 +1124,17 @@ fn execute_product_detail_item_provider_call(
         Err(error) => return ProductDetailItemExecution::Failed { index, error },
     }
 
-    let gateway_result = match invoke_model_gateway(workspace_directory, capability_id, input) {
-        Ok(gateway_result) => gateway_result,
-        Err(error) => {
-            return ProductDetailItemExecution::Failed {
-                index,
-                error: GenerationError::Validation(error.to_string()),
-            };
-        }
-    };
+    let gateway_result =
+        match invoke_image_model_gateway_for_persistence(workspace_directory, capability_id, input)
+        {
+            Ok(gateway_result) => gateway_result,
+            Err(error) => {
+                return ProductDetailItemExecution::Failed {
+                    index,
+                    error: GenerationError::Validation(error.to_string()),
+                };
+            }
+        };
 
     match update_stage(
         workspace_directory,
@@ -748,15 +1144,41 @@ fn execute_product_detail_item_provider_call(
         Some(json!({
             "item_index": index,
             "item_count": item_count,
-            "invocation_id": gateway_result.invocation_id.clone(),
+            "invocation_id": gateway_result.result().invocation_id.clone(),
         })),
     ) {
-        Ok(true) => ProductDetailItemExecution::Succeeded {
+        Ok(true) => {}
+        Ok(false) => return ProductDetailItemExecution::Skipped,
+        Err(error) => return ProductDetailItemExecution::Failed { index, error },
+    }
+
+    match gateway_result {
+        PersistableGatewayResult::Plain(gateway_result) => ProductDetailItemExecution::Succeeded {
             index,
             gateway_result,
         },
-        Ok(false) => ProductDetailItemExecution::Skipped,
-        Err(error) => ProductDetailItemExecution::Failed { index, error },
+        PersistableGatewayResult::Leased(leased_gateway_result) => {
+            match stage_generated_gateway_result_outputs(
+                workspace_directory,
+                task_id,
+                leased_gateway_result.result(),
+                index,
+            ) {
+                Ok(Some(assets)) if !assets.is_empty() => ProductDetailItemExecution::Staged {
+                    index,
+                    gateway_result: leased_gateway_result.into_result(),
+                    assets,
+                },
+                Ok(None) => ProductDetailItemExecution::Skipped,
+                Ok(Some(_)) => ProductDetailItemExecution::Failed {
+                    index,
+                    error: GenerationError::Validation(
+                        "商品详情图未返回可保存的图片。".to_string(),
+                    ),
+                },
+                Err(error) => ProductDetailItemExecution::Failed { index, error },
+            }
+        }
     }
 }
 
@@ -782,6 +1204,35 @@ fn product_detail_output_sort_order_start(next_sort_order: usize, item_index: us
     next_sort_order.max(item_index)
 }
 
+fn invoke_single_real_image_model_for_task_leased(
+    workspace_directory: &Path,
+    task: &ClaimedTask,
+) -> Result<Option<LeasedModelGatewayResult>, TaskModelInvocationError> {
+    let capability_id = capability_for_claimed_task(task);
+    let config = default_config_for_capability(workspace_directory, capability_id)
+        .map_err(TaskModelInvocationError::Gateway)?;
+    if config.provider_profile_id == "mock-local" {
+        return Ok(None);
+    }
+    let mut inputs =
+        task_gateway_inputs(workspace_directory, task).map_err(TaskModelInvocationError::Input)?;
+    if inputs.len() != 1 {
+        return Err(TaskModelInvocationError::Input(
+            GenerationError::Validation("单图任务必须且只能生成一个模型输入。".to_string()),
+        ));
+    }
+    ModelGatewayService::new()
+        .invoke_real_provider_leased(
+            workspace_directory,
+            ModelGatewayRequest {
+                capability_id: capability_id.to_string(),
+                input: inputs.remove(0),
+            },
+        )
+        .map(Some)
+        .map_err(TaskModelInvocationError::Gateway)
+}
+
 fn invoke_model_for_task(
     workspace_directory: &Path,
     task: &ClaimedTask,
@@ -803,70 +1254,503 @@ fn invoke_gateway_inputs_for_task<F>(
     task: &ClaimedTask,
     capability_id: &str,
     inputs: Vec<serde_json::Value>,
-    mut invoke: F,
+    invoke: F,
 ) -> Result<Vec<ModelGatewayResult>, TaskModelInvocationError>
 where
-    F: FnMut(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError>,
+    F: Fn(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError> + Sync,
 {
+    if is_clothing_tryon_generation_task(task) {
+        return invoke_clothing_tryon_inputs_for_task(
+            workspace_directory,
+            task,
+            capability_id,
+            inputs,
+            &invoke,
+        )
+        .map(|invocation| invocation.results);
+    }
+
     let mut results = Vec::with_capacity(inputs.len());
-    let clothing_tryon = is_clothing_tryon_generation_task(task);
+    for input in inputs {
+        results.push(invoke(capability_id, input).map_err(TaskModelInvocationError::Gateway)?);
+    }
+    Ok(results)
+}
+
+fn invoke_clothing_tryon_inputs_for_task<F>(
+    workspace_directory: &Path,
+    task: &ClaimedTask,
+    capability_id: &str,
+    inputs: Vec<serde_json::Value>,
+    invoke: &F,
+) -> Result<ClothingTryonInvocationResults, TaskModelInvocationError>
+where
+    F: Fn(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError> + Sync,
+{
     let item_count = inputs.len();
-    let mut next_sort_order = 0usize;
-    for (index, input) in inputs.into_iter().enumerate() {
-        if clothing_tryon
-            && !task_is_running(workspace_directory, &task.id)
-                .map_err(TaskModelInvocationError::Local)?
-        {
-            break;
-        }
-        if clothing_tryon
-            && !update_stage(
-                workspace_directory,
-                &task.id,
-                GenerationTaskStage::CallingProvider,
-                "task.item-provider-called",
-                Some(json!({
-                    "item_index": index,
-                    "item_count": item_count,
-                })),
-            )
+    let mut successful_results = Vec::new();
+    let mut stopped = false;
+    let mut failed_item_count = 0usize;
+    let mut first_item_error: Option<(usize, TaskModelInvocationError)> = None;
+
+    for batch in product_detail_input_batches(item_count, CLOTHING_TRYON_ITEM_CONCURRENCY) {
+        if !task_is_running(workspace_directory, &task.id)
             .map_err(TaskModelInvocationError::Local)?
         {
+            stopped = true;
             break;
         }
 
-        let gateway_result =
-            invoke(capability_id, input).map_err(TaskModelInvocationError::Gateway)?;
-        if clothing_tryon {
-            if !update_stage(
-                workspace_directory,
-                &task.id,
-                GenerationTaskStage::PollingProvider,
-                "task.item-provider-succeeded",
-                Some(json!({
-                    "item_index": index,
-                    "item_count": item_count,
-                    "invocation_id": gateway_result.invocation_id.clone(),
-                })),
-            )
-            .map_err(TaskModelInvocationError::Local)?
-            {
-                results.push(gateway_result);
-                break;
+        let item_results = thread::scope(|scope| {
+            let handles = batch
+                .clone()
+                .map(|index| {
+                    let workspace_directory = workspace_directory.to_path_buf();
+                    let task_id = task.id.clone();
+                    let input = inputs[index].clone();
+                    (
+                        index,
+                        scope.spawn(move || {
+                            execute_clothing_tryon_item_provider_call(
+                                &workspace_directory,
+                                capability_id,
+                                &task_id,
+                                input,
+                                index,
+                                item_count,
+                                invoke,
+                            )
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|(index, handle)| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| ClothingTryonItemExecution::Failed {
+                            index,
+                            error: TaskModelInvocationError::Local(GenerationError::Validation(
+                                "服饰出图子任务执行失败。".to_string(),
+                            )),
+                        })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for item_result in item_results {
+            match item_result {
+                ClothingTryonItemExecution::Succeeded {
+                    index,
+                    gateway_result,
+                    ..
+                } => successful_results.push((index, gateway_result)),
+                ClothingTryonItemExecution::Failed { index, error } => {
+                    let normalized = normalize_model_gateway_task_error(error.clone());
+                    eprintln!(
+                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
+                        task.id, index, normalized.message
+                    );
+                    insert_task_item_model_failed_event(
+                        workspace_directory,
+                        &task.id,
+                        index,
+                        &normalized,
+                    )
+                    .map_err(TaskModelInvocationError::Local)?;
+                    remember_lowest_index_item_error(&mut first_item_error, index, error);
+                    failed_item_count += 1;
+                }
+                ClothingTryonItemExecution::Skipped => stopped = true,
             }
-            let sort_order_start = product_detail_output_sort_order_start(next_sort_order, index);
-            let saved_count = persist_generated_gateway_result_outputs(
-                workspace_directory,
-                &task.id,
-                &gateway_result,
-                sort_order_start,
-            )
-            .map_err(TaskModelInvocationError::Local)?;
-            next_sort_order = sort_order_start + saved_count;
         }
-        results.push(gateway_result);
+        if stopped {
+            break;
+        }
     }
-    Ok(results)
+
+    successful_results.sort_by_key(|(index, _)| *index);
+    let mut next_sort_order = 0usize;
+    let mut results = Vec::new();
+    let mut saved_image_count = 0usize;
+    for (index, gateway_result) in successful_results {
+        let sort_order_start = product_detail_output_sort_order_start(next_sort_order, index);
+        match persist_generated_gateway_result_outputs(
+            workspace_directory,
+            &task.id,
+            &gateway_result,
+            sort_order_start,
+        ) {
+            Ok(saved_count) if saved_count > 0 => {
+                next_sort_order = sort_order_start + saved_count;
+                saved_image_count += saved_count;
+                results.push(gateway_result);
+            }
+            Ok(_) => {
+                let error = GenerationError::Validation("服饰出图未返回可保存的图片。".to_string());
+                insert_task_item_failed_event(workspace_directory, &task.id, index, error.clone())
+                    .map_err(TaskModelInvocationError::Local)?;
+                remember_lowest_index_item_error(
+                    &mut first_item_error,
+                    index,
+                    TaskModelInvocationError::Local(error),
+                );
+                failed_item_count += 1;
+            }
+            Err(error) => {
+                insert_task_item_failed_event(workspace_directory, &task.id, index, error.clone())
+                    .map_err(TaskModelInvocationError::Local)?;
+                remember_lowest_index_item_error(
+                    &mut first_item_error,
+                    index,
+                    TaskModelInvocationError::Local(error),
+                );
+                failed_item_count += 1;
+            }
+        }
+    }
+
+    if results.is_empty()
+        && !stopped
+        && task_is_running(workspace_directory, &task.id)
+            .map_err(TaskModelInvocationError::Local)?
+    {
+        return Err(first_item_error.map(|(_, error)| error).unwrap_or_else(|| {
+            TaskModelInvocationError::Local(GenerationError::Validation(
+                "服饰出图任务没有成功保存任何图片。".to_string(),
+            ))
+        }));
+    }
+    Ok(ClothingTryonInvocationResults {
+        results,
+        saved_image_count,
+        failed_item_count,
+    })
+}
+
+async fn invoke_clothing_tryon_inputs_for_task_async(
+    workspace_directory: &Path,
+    task: &ClaimedTask,
+    capability_id: &str,
+    inputs: Vec<serde_json::Value>,
+) -> Result<ClothingTryonInvocationResults, TaskModelInvocationError> {
+    let item_count = inputs.len();
+    let mut successful_results = Vec::new();
+    let mut stopped = false;
+    let mut failed_item_count = 0usize;
+    let mut first_item_error: Option<(usize, TaskModelInvocationError)> = None;
+
+    for batch in product_detail_input_batches(item_count, CLOTHING_TRYON_ITEM_CONCURRENCY) {
+        if !task_is_running(workspace_directory, &task.id)
+            .map_err(TaskModelInvocationError::Local)?
+        {
+            stopped = true;
+            break;
+        }
+        let mut join_set = JoinSet::new();
+        let mut worker_indexes = std::collections::HashMap::new();
+        for index in batch {
+            let workspace_directory = workspace_directory.to_path_buf();
+            let task_id = task.id.clone();
+            let capability_id = capability_id.to_string();
+            let input = inputs[index].clone();
+            let abort_handle = join_set.spawn(async move {
+                (
+                    index,
+                    execute_clothing_tryon_item_provider_call_async(
+                        &workspace_directory,
+                        &capability_id,
+                        &task_id,
+                        input,
+                        index,
+                        item_count,
+                    )
+                    .await,
+                )
+            });
+            worker_indexes.insert(abort_handle.id(), index);
+        }
+
+        while !join_set.is_empty() {
+            let joined = tokio::select! {
+                joined = join_set.join_next() => joined,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if !task_is_running(workspace_directory, &task.id)
+                        .map_err(TaskModelInvocationError::Local)?
+                    {
+                        join_set.abort_all();
+                        stopped = true;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let Some(joined) = joined else {
+                break;
+            };
+            let (index, item_result) = match joined {
+                Ok(item_result) => item_result,
+                Err(error) => {
+                    let index = worker_indexes.remove(&error.id()).ok_or_else(|| {
+                        TaskModelInvocationError::Local(GenerationError::Validation(
+                            "服饰出图子任务异常退出且无法定位子项。".to_string(),
+                        ))
+                    })?;
+                    let item_error = TaskModelInvocationError::Local(GenerationError::Validation(
+                        "服饰出图子任务异常退出。".to_string(),
+                    ));
+                    let normalized = normalize_model_gateway_task_error(item_error.clone());
+                    eprintln!(
+                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
+                        task.id, index, normalized.message
+                    );
+                    insert_task_item_model_failed_event(
+                        workspace_directory,
+                        &task.id,
+                        index,
+                        &normalized,
+                    )
+                    .map_err(TaskModelInvocationError::Local)?;
+                    remember_lowest_index_item_error(&mut first_item_error, index, item_error);
+                    failed_item_count += 1;
+                    continue;
+                }
+            };
+            match item_result {
+                AsyncClothingTryonItemExecution::Staged {
+                    gateway_result,
+                    assets,
+                    ..
+                } => {
+                    successful_results.push((index, gateway_result, assets));
+                }
+                AsyncClothingTryonItemExecution::Failed { index, error } => {
+                    let normalized = normalize_model_gateway_task_error(error.clone());
+                    eprintln!(
+                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
+                        task.id, index, normalized.message
+                    );
+                    insert_task_item_model_failed_event(
+                        workspace_directory,
+                        &task.id,
+                        index,
+                        &normalized,
+                    )
+                    .map_err(TaskModelInvocationError::Local)?;
+                    remember_lowest_index_item_error(&mut first_item_error, index, error);
+                    failed_item_count += 1;
+                }
+                AsyncClothingTryonItemExecution::Skipped => stopped = true,
+            }
+        }
+        if stopped {
+            break;
+        }
+    }
+
+    let (results, saved_image_count) =
+        persist_staged_generation_results(workspace_directory, &task.id, successful_results)
+            .map_err(TaskModelInvocationError::Local)?;
+
+    if results.is_empty()
+        && !stopped
+        && task_is_running(workspace_directory, &task.id)
+            .map_err(TaskModelInvocationError::Local)?
+    {
+        return Err(first_item_error.map(|(_, error)| error).unwrap_or_else(|| {
+            TaskModelInvocationError::Local(GenerationError::Validation(
+                "服饰出图任务没有成功保存任何图片。".to_string(),
+            ))
+        }));
+    }
+    Ok(ClothingTryonInvocationResults {
+        results,
+        saved_image_count,
+        failed_item_count,
+    })
+}
+
+fn execute_clothing_tryon_item_provider_call<F>(
+    workspace_directory: &Path,
+    capability_id: &str,
+    task_id: &str,
+    input: serde_json::Value,
+    index: usize,
+    item_count: usize,
+    invoke: &F,
+) -> ClothingTryonItemExecution
+where
+    F: Fn(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError> + Sync,
+{
+    match task_is_running(workspace_directory, task_id) {
+        Ok(true) => {}
+        Ok(false) => return ClothingTryonItemExecution::Skipped,
+        Err(error) => {
+            return ClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Local(error),
+            }
+        }
+    }
+    match update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::CallingProvider,
+        "task.item-provider-called",
+        Some(json!({ "item_index": index, "item_count": item_count })),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return ClothingTryonItemExecution::Skipped,
+        Err(error) => {
+            return ClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Local(error),
+            }
+        }
+    }
+    let gateway_result = match invoke(capability_id, input) {
+        Ok(gateway_result) => gateway_result,
+        Err(error) => {
+            return ClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Gateway(error),
+            };
+        }
+    };
+    match update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::PollingProvider,
+        "task.item-provider-succeeded",
+        Some(json!({
+            "item_index": index,
+            "item_count": item_count,
+            "invocation_id": gateway_result.invocation_id.clone(),
+        })),
+    ) {
+        Ok(true) => ClothingTryonItemExecution::Succeeded {
+            index,
+            gateway_result,
+        },
+        Ok(false) => ClothingTryonItemExecution::Skipped,
+        Err(error) => ClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(error),
+        },
+    }
+}
+
+async fn execute_clothing_tryon_item_provider_call_async(
+    workspace_directory: &Path,
+    capability_id: &str,
+    task_id: &str,
+    input: serde_json::Value,
+    index: usize,
+    item_count: usize,
+) -> AsyncClothingTryonItemExecution {
+    match task_is_running(workspace_directory, task_id) {
+        Ok(true) => {}
+        Ok(false) => return AsyncClothingTryonItemExecution::Skipped,
+        Err(error) => {
+            return AsyncClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Local(error),
+            }
+        }
+    }
+    match update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::CallingProvider,
+        "task.item-provider-called",
+        Some(json!({ "item_index": index, "item_count": item_count })),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return AsyncClothingTryonItemExecution::Skipped,
+        Err(error) => {
+            return AsyncClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Local(error),
+            }
+        }
+    }
+    let leased_gateway_result = match ModelGatewayService::new()
+        .invoke_real_provider_async(
+            workspace_directory,
+            ModelGatewayRequest {
+                capability_id: capability_id.to_string(),
+                input,
+            },
+        )
+        .await
+    {
+        Ok(gateway_result) => gateway_result,
+        Err(error) => {
+            return AsyncClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Gateway(error),
+            };
+        }
+    };
+    match update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::PollingProvider,
+        "task.item-provider-succeeded",
+        Some(json!({
+            "item_index": index,
+            "item_count": item_count,
+            "invocation_id": leased_gateway_result.result().invocation_id.clone(),
+        })),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return AsyncClothingTryonItemExecution::Skipped,
+        Err(error) => {
+            return AsyncClothingTryonItemExecution::Failed {
+                index,
+                error: TaskModelInvocationError::Local(error),
+            }
+        }
+    }
+
+    let persist_workspace_directory = workspace_directory.to_path_buf();
+    let persist_task_id = task_id.to_string();
+    let persist_result = tokio::task::spawn_blocking(move || {
+        let result = stage_generated_gateway_result_outputs(
+            &persist_workspace_directory,
+            &persist_task_id,
+            leased_gateway_result.result(),
+            index,
+        );
+        (result, leased_gateway_result)
+    })
+    .await;
+    match persist_result {
+        Ok((Ok(Some(assets)), leased_gateway_result)) if !assets.is_empty() => {
+            AsyncClothingTryonItemExecution::Staged {
+                gateway_result: leased_gateway_result.into_result(),
+                assets,
+            }
+        }
+        Ok((Ok(None), _)) => AsyncClothingTryonItemExecution::Skipped,
+        Ok((Ok(Some(_)), _)) => AsyncClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(GenerationError::Validation(
+                "服饰出图未返回可保存的图片。".to_string(),
+            )),
+        },
+        Ok((Err(error), _)) => AsyncClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(error),
+        },
+        Err(_) => AsyncClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(GenerationError::Validation(
+                "服饰出图结果持久化子任务异常退出。".to_string(),
+            )),
+        },
+    }
 }
 
 fn invoke_model_gateway(
@@ -888,6 +1772,27 @@ fn invoke_model_gateway(
         ModelGatewayService::new().invoke(workspace_directory, request)
     } else {
         ModelGatewayService::new().invoke_real_provider(workspace_directory, request)
+    }
+}
+
+fn invoke_image_model_gateway_for_persistence(
+    workspace_directory: &Path,
+    capability_id: &str,
+    input: serde_json::Value,
+) -> Result<PersistableGatewayResult, ModelConfigError> {
+    let request = ModelGatewayRequest {
+        capability_id: capability_id.to_string(),
+        input,
+    };
+    let config = default_config_for_capability(workspace_directory, capability_id)?;
+    if config.provider_profile_id == "mock-local" {
+        ModelGatewayService::new()
+            .invoke(workspace_directory, request)
+            .map(PersistableGatewayResult::Plain)
+    } else {
+        ModelGatewayService::new()
+            .invoke_real_provider_leased(workspace_directory, request)
+            .map(PersistableGatewayResult::Leased)
     }
 }
 
@@ -954,8 +1859,10 @@ fn clothing_scene_planning_gateway_input(
                 .filter_map(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .enumerate()
+                .map(|(index, scene)| format!("场景 {}：{}", index + 1, scene))
                 .collect::<Vec<_>>()
-                .join("、")
+                .join("\n")
         })
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "未选择，需由 AI 根据服装特点规划 4 个场景".to_string());
@@ -965,7 +1872,6 @@ fn clothing_scene_planning_gateway_input(
         .and_then(serde_json::Value::as_bool)
         .map(|value| if value { "是" } else { "否" })
         .unwrap_or("否");
-    let ratio = read_prompt_field(task_input, "ratio", "3:4");
     let replacement_pairs = [
         ("{{referenceImageRoles}}", reference_image_roles.as_str()),
         (
@@ -976,7 +1882,6 @@ fn clothing_scene_planning_gateway_input(
         ("{{selectedScenes}}", selected_scenes.as_str()),
         ("{{customScene}}", custom_scene.as_str()),
         ("{{aiRecommended}}", ai_recommended),
-        ("{{ratio}}", ratio.as_str()),
     ];
 
     let messages = render_prompt_for_roles(PromptTemplateId::ClothingScenePlanning)
@@ -1133,12 +2038,20 @@ fn clothing_reference_prompt_values(
             "服饰出图最多支持 6 张参考图。".to_string(),
         ));
     }
+    if images
+        .first()
+        .and_then(|image| image.get("role"))
+        .and_then(serde_json::Value::as_str)
+        != Some("model")
+    {
+        return Err(GenerationError::Validation(
+            "服饰任务第 1 张参考图必须是唯一模特参考图。".to_string(),
+        ));
+    }
 
-    let mut role_lines = Vec::with_capacity(images.len());
+    let mut role_lines = vec!["参考图 A：模特参考图。用于锁定人物身份。".to_string()];
     let mut clothing_labels = Vec::new();
-    let mut model_label = None;
-    let mut model_count = 0usize;
-    for (index, image) in images.iter().enumerate() {
+    for (index, image) in images.iter().enumerate().skip(1) {
         let label = IMAGE_LABELS[index];
         match image.get("role").and_then(serde_json::Value::as_str) {
             Some("source") | Some("reference") => {
@@ -1148,30 +2061,79 @@ fn clothing_reference_prompt_values(
                     clothing_labels.len()
                 ));
             }
-            Some("model") => {
-                model_count += 1;
-                model_label = Some(label);
-                role_lines.push(format!("参考图 {label}：模特参考图。用于锁定人物身份。"));
+            _ => {
+                return Err(GenerationError::Validation(format!(
+                    "服饰任务第 {} 张参考图必须是服装参考图。",
+                    index + 1
+                )));
             }
-            _ => role_lines.push(format!("参考图 {label}：辅助参考图。")),
         }
     }
-    let Some(model_label) = model_label.filter(|_| model_count == 1) else {
-        return Err(GenerationError::Validation(
-            "服饰任务必须至少包含 1 张服装参考图，并且恰好 1 张模特参考图。".to_string(),
-        ));
-    };
     if clothing_labels.is_empty() {
         return Err(GenerationError::Validation(
-            "服饰任务必须至少包含 1 张服装参考图，并且恰好 1 张模特参考图。".to_string(),
+            "服饰任务至少需要 1 张位于模特图之后的服装参考图。".to_string(),
         ));
     }
 
     Ok((
         role_lines.join("\n"),
         format!("参考图 {}", clothing_labels.join("、")),
-        format!("参考图 {model_label}"),
+        "参考图 A".to_string(),
     ))
+}
+
+fn clothing_model_features_prompt_value(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<String, GenerationError> {
+    let features = value
+        .get("modelFeatures")
+        .ok_or_else(|| GenerationError::Validation(format!("{context} 缺少 modelFeatures。")))?;
+    let feature_labels = [
+        ("gender", "性别外观"),
+        ("ageRange", "年龄感"),
+        ("ethnicityAppearance", "族裔外观"),
+        ("face", "面部与五官气质"),
+        ("body", "体态与身体比例"),
+        ("hair", "发型与发色"),
+        ("skinTone", "肤色"),
+        ("overallStyle", "整体气质"),
+    ];
+    let mut lines = Vec::with_capacity(feature_labels.len() + 1);
+    for (field, label) in feature_labels {
+        let feature = required_string(
+            features,
+            field,
+            &format!("{context}.modelFeatures 缺少非空 {field}。"),
+        )?;
+        lines.push(format!("{label}：{feature}"));
+    }
+    let identity_anchor = features
+        .get("identityAnchor")
+        .and_then(serde_json::Value::as_array)
+        .filter(|anchors| !anchors.is_empty())
+        .ok_or_else(|| {
+            GenerationError::Validation(format!(
+                "{context}.modelFeatures 缺少非空 identityAnchor。"
+            ))
+        })?;
+    let identity_anchor = identity_anchor
+        .iter()
+        .enumerate()
+        .map(|(index, anchor)| {
+            anchor
+                .as_str()
+                .map(str::trim)
+                .filter(|anchor| !anchor.is_empty())
+                .ok_or_else(|| {
+                    GenerationError::Validation(format!(
+                        "{context}.modelFeatures.identityAnchor[{index}] 必须是非空字符串。"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    lines.push(format!("稳定身份锚点：{}", identity_anchor.join("；")));
+    Ok(lines.join("\n"))
 }
 
 fn clothing_tryon_item_gateway_input(
@@ -1241,6 +2203,7 @@ fn clothing_tryon_item_gateway_input(
         .unwrap_or_else(|| format!("pose-{}", index + 1));
     let (reference_image_roles, clothing_reference_labels, model_reference_label) =
         clothing_reference_prompt_values(task_input)?;
+    let model_features = clothing_model_features_prompt_value(task_input, "服饰出图任务")?;
     let replacement_pairs = [
         ("{{referenceImageRoles}}", reference_image_roles.as_str()),
         (
@@ -1248,6 +2211,7 @@ fn clothing_tryon_item_gateway_input(
             clothing_reference_labels.as_str(),
         ),
         ("{{modelReferenceLabel}}", model_reference_label.as_str()),
+        ("{{modelFeatures}}", model_features.as_str()),
         ("{{scene}}", scene),
         ("{{sceneVisualAnchor}}", scene_visual_anchor),
         ("{{scenePromptSegment}}", scene_prompt_segment),
@@ -1322,7 +2286,7 @@ fn task_input_with_asset_reference_images(
     workspace_directory: &Path,
     task: &ClaimedTask,
 ) -> Result<serde_json::Value, GenerationError> {
-    let reference_assets = task
+    let mut reference_assets = task
         .input_assets
         .iter()
         .filter(|asset| {
@@ -1333,9 +2297,16 @@ fn task_input_with_asset_reference_images(
         return Ok(task.input.clone());
     }
 
+    let clothing_task =
+        is_clothing_scene_planning_task(task) || is_clothing_tryon_generation_task(task);
+    if clothing_task {
+        // 旧任务或跨端创建任务即使 sortOrder 错误，也必须按模型优先的合同发送参考图。
+        reference_assets.sort_by_key(|asset| (asset.role != "model", asset.sort_order));
+    }
+
     let asset_service = AssetService::new();
     let mut user_images = Vec::new();
-    for input_asset in reference_assets {
+    for (index, input_asset) in reference_assets.into_iter().enumerate() {
         let asset = asset_service
             .get_asset(workspace_directory, &input_asset.asset_id)
             .map_err(|source| GenerationError::Validation(source.to_string()))?;
@@ -1350,7 +2321,7 @@ fn task_input_with_asset_reference_images(
             "mimeType": asset.mime_type,
             "originalName": asset.original_name,
             "role": input_asset.role,
-            "sortOrder": input_asset.sort_order,
+            "sortOrder": if clothing_task { index as i64 } else { input_asset.sort_order },
         }));
     }
 
@@ -1568,17 +2539,18 @@ fn persist_generated_outputs(
         return Ok(0);
     }
 
-    save_generated_images(workspace_directory, &task.id, &images, 0)?;
-    let database = WorkspaceDatabase::open(workspace_directory)?;
-    insert_task_event(
-        &database,
+    let representative_result = gateway_results
+        .first()
+        .cloned()
+        .ok_or_else(|| GenerationError::Validation("模型结果不包含可保存图片。".to_string()))?;
+    persist_collected_generated_images_with_before_link(
+        workspace_directory,
         &task.id,
-        "task.result-saved",
-        Some(GenerationTaskStage::SavingResult),
-        Some(json!({ "image_count": images.len() })),
-    )?;
-
-    Ok(images.len())
+        &images,
+        0,
+        representative_result,
+        || {},
+    )
 }
 
 fn persist_generated_gateway_result_outputs(
@@ -1587,6 +2559,25 @@ fn persist_generated_gateway_result_outputs(
     gateway_result: &ModelGatewayResult,
     sort_order_start: usize,
 ) -> Result<usize, GenerationError> {
+    persist_generated_gateway_result_outputs_with_before_link(
+        workspace_directory,
+        task_id,
+        gateway_result,
+        sort_order_start,
+        || {},
+    )
+}
+
+fn persist_generated_gateway_result_outputs_with_before_link<F>(
+    workspace_directory: &Path,
+    task_id: &str,
+    gateway_result: &ModelGatewayResult,
+    sort_order_start: usize,
+    before_link: F,
+) -> Result<usize, GenerationError>
+where
+    F: FnOnce(),
+{
     if !update_stage(
         workspace_directory,
         task_id,
@@ -1615,49 +2606,256 @@ fn persist_generated_gateway_result_outputs(
     )? {
         return Ok(0);
     }
-    save_generated_images(workspace_directory, task_id, &images, sort_order_start)?;
-    let database = WorkspaceDatabase::open(workspace_directory)?;
-    insert_task_event(
-        &database,
+    persist_collected_generated_images_with_before_link(
+        workspace_directory,
         task_id,
-        "task.result-saved",
-        Some(GenerationTaskStage::SavingResult),
-        Some(json!({
-            "image_count": images.len(),
-            "sort_order_start": sort_order_start,
-        })),
-    )?;
-    Ok(images.len())
+        &images,
+        sort_order_start,
+        gateway_result.clone(),
+        before_link,
+    )
 }
 
-fn save_generated_images(
+fn persist_collected_generated_images_with_before_link<F>(
     workspace_directory: &Path,
     task_id: &str,
     images: &[GeneratedImage],
     sort_order_start: usize,
-) -> Result<(), GenerationError> {
+    gateway_result: ModelGatewayResult,
+    before_link: F,
+) -> Result<usize, GenerationError>
+where
+    F: FnOnce(),
+{
+    let assets = stage_generated_images(workspace_directory, images, sort_order_start)?;
+    before_link();
+    let (_, saved_image_count) = persist_staged_generation_results(
+        workspace_directory,
+        task_id,
+        vec![(sort_order_start, gateway_result, assets)],
+    )?;
+    Ok(saved_image_count)
+}
+
+fn stage_generated_gateway_result_outputs(
+    workspace_directory: &Path,
+    task_id: &str,
+    gateway_result: &ModelGatewayResult,
+    item_index: usize,
+) -> Result<Option<Vec<Asset>>, GenerationError> {
+    if !update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::DownloadingResult,
+        "task.result-downloading",
+        Some(json!({ "invocation_id": gateway_result.invocation_id })),
+    )? {
+        return Ok(None);
+    }
+    let images = collect_generated_images(&gateway_result.output_json)?;
+    if images.is_empty() {
+        return Err(GenerationError::Validation(
+            "模型结果不包含可保存图片。".to_string(),
+        ));
+    }
+    if !update_stage(
+        workspace_directory,
+        task_id,
+        GenerationTaskStage::SavingResult,
+        "task.result-saving",
+        Some(json!({
+            "image_count": images.len(),
+            "item_index": item_index,
+        })),
+    )? {
+        return Ok(None);
+    }
+
+    let assets = stage_generated_images(workspace_directory, &images, item_index)?;
+
+    if !task_is_running(workspace_directory, task_id)? {
+        cleanup_unlinked_generated_assets(workspace_directory, &assets)?;
+        return Ok(None);
+    }
+    Ok(Some(assets))
+}
+
+fn stage_generated_images(
+    workspace_directory: &Path,
+    images: &[GeneratedImage],
+    item_index: usize,
+) -> Result<Vec<Asset>, GenerationError> {
     let asset_service = AssetService::new();
-    let database = WorkspaceDatabase::open(workspace_directory)?;
+    let mut assets = Vec::with_capacity(images.len());
     for (offset, image) in images.iter().enumerate() {
-        let sort_order = sort_order_start + offset;
-        let asset = asset_service
-            .save_generated_image(
-                workspace_directory,
-                &format!(
-                    "generated-{}.{}",
-                    sort_order + 1,
-                    extension_for_mime_type(&image.mime_type)?
-                ),
-                &image.mime_type,
-                &image.bytes,
-            )
-            .map_err(|_| GenerationError::Validation("生成结果保存失败。".to_string()))?;
+        let original_name = format!(
+            "generated-{}-{}.{}",
+            item_index + 1,
+            offset + 1,
+            extension_for_mime_type(&image.mime_type)?
+        );
+        let asset = match asset_service.save_generated_image(
+            workspace_directory,
+            &original_name,
+            &image.mime_type,
+            &image.bytes,
+        ) {
+            Ok(asset) => asset,
+            Err(_) => {
+                cleanup_unlinked_generated_assets(workspace_directory, &assets)?;
+                return Err(GenerationError::Validation(
+                    "生成结果保存失败。".to_string(),
+                ));
+            }
+        };
+        let staged_asset = asset.clone();
+        assets.push(asset);
+        if let Err(source) =
+            mark_unlinked_generated_asset_staged(workspace_directory, &staged_asset)
+        {
+            cleanup_unlinked_generated_assets(workspace_directory, &assets)?;
+            return Err(source);
+        }
+    }
+    Ok(assets)
+}
+
+fn persist_staged_generation_results(
+    workspace_directory: &Path,
+    task_id: &str,
+    mut staged_results: Vec<(usize, ModelGatewayResult, Vec<Asset>)>,
+) -> Result<(Vec<ModelGatewayResult>, usize), GenerationError> {
+    if staged_results.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    staged_results.sort_by_key(|(index, _, _)| *index);
+    let staged_assets = staged_results
+        .iter()
+        .flat_map(|(_, _, assets)| assets.iter().cloned())
+        .collect::<Vec<_>>();
+    let link_result = (|| -> Result<Option<usize>, GenerationError> {
+        let database = WorkspaceDatabase::open(workspace_directory)?;
+        let transaction = database.connection().unchecked_transaction()?;
+        let can_link: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM generation_tasks WHERE id = ?1 AND status = 'running' AND hidden_at IS NULL)",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        if can_link == 0 {
+            return Ok(None);
+        }
+
+        let mut next_sort_order = 0usize;
+        let mut saved_image_count = 0usize;
+        for (index, _, assets) in &staged_results {
+            let sort_order_start = product_detail_output_sort_order_start(next_sort_order, *index);
+            for (offset, asset) in assets.iter().enumerate() {
+                let available: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM assets WHERE id = ?1 AND kind = 'generated' AND lifecycle IN ('staged', 'active') AND deleted_at IS NULL",
+                    [&asset.id],
+                    |row| row.get(0),
+                )?;
+                if available != 1 {
+                    return Err(GenerationError::Validation(
+                        "服饰出图暂存资产不可用。".to_string(),
+                    ));
+                }
+                transaction.execute(
+                    "UPDATE assets SET lifecycle = 'active', updated_at = datetime('now') WHERE id = ?1 AND deleted_at IS NULL",
+                    [&asset.id],
+                )?;
+                transaction.execute(
+                    "INSERT INTO generation_assets (task_id, asset_id, role, sort_order) VALUES (?1, ?2, 'output', ?3)",
+                    params![task_id, asset.id, (sort_order_start + offset) as i64],
+                )?;
+            }
+            next_sort_order = sort_order_start + assets.len();
+            saved_image_count += assets.len();
+        }
+        insert_task_event_on_connection(
+            &transaction,
+            task_id,
+            "task.result-saved",
+            Some(GenerationTaskStage::SavingResult),
+            Some(json!({ "image_count": saved_image_count })),
+        )?;
+        transaction.commit()?;
+        Ok(Some(saved_image_count))
+    })();
+
+    match link_result {
+        Ok(Some(saved_image_count)) => Ok((
+            staged_results
+                .into_iter()
+                .map(|(_, gateway_result, _)| gateway_result)
+                .collect(),
+            saved_image_count,
+        )),
+        Ok(None) => {
+            cleanup_unlinked_generated_assets(workspace_directory, &staged_assets)?;
+            Ok((Vec::new(), 0))
+        }
+        Err(source) => {
+            cleanup_unlinked_generated_assets(workspace_directory, &staged_assets)?;
+            Err(source)
+        }
+    }
+}
+
+fn persist_product_detail_staged_results(
+    workspace_directory: &Path,
+    task_id: &str,
+    staged_results: Vec<(usize, ModelGatewayResult, Vec<Asset>)>,
+) -> Result<(Vec<ModelGatewayResult>, usize), GenerationError> {
+    persist_staged_generation_results(workspace_directory, task_id, staged_results)
+}
+
+fn mark_unlinked_generated_asset_staged(
+    workspace_directory: &Path,
+    asset: &Asset,
+) -> Result<(), GenerationError> {
+    let database = WorkspaceDatabase::open(workspace_directory)?;
+    database.connection().execute(
+        "
+        UPDATE assets
+        SET lifecycle = 'staged',
+            updated_at = datetime('now')
+        WHERE id = ?1
+          AND kind = 'generated'
+          AND NOT EXISTS (
+              SELECT 1 FROM generation_assets rel WHERE rel.asset_id = assets.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM generation_task_input_assets rel WHERE rel.asset_id = assets.id
+          )
+        ",
+        [&asset.id],
+    )?;
+    Ok(())
+}
+
+fn cleanup_unlinked_generated_assets(
+    workspace_directory: &Path,
+    assets: &[Asset],
+) -> Result<(), GenerationError> {
+    let database = WorkspaceDatabase::open(workspace_directory)?;
+    for asset in assets {
         database.connection().execute(
             "
-            INSERT INTO generation_assets (task_id, asset_id, role, sort_order)
-            VALUES (?1, ?2, 'output', ?3)
+            UPDATE assets
+            SET lifecycle = 'deleted',
+                deleted_at = COALESCE(deleted_at, datetime('now')),
+                updated_at = datetime('now')
+            WHERE id = ?1
+              AND kind = 'generated'
+              AND NOT EXISTS (
+                  SELECT 1 FROM generation_assets rel WHERE rel.asset_id = assets.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM generation_task_input_assets rel WHERE rel.asset_id = assets.id
+              )
             ",
-            params![task_id, asset.id, sort_order as i64],
+            [&asset.id],
         )?;
     }
     Ok(())
@@ -1704,9 +2902,14 @@ fn persist_structured_model_output(
     task: &ClaimedTask,
     gateway_result: &ModelGatewayResult,
 ) -> Result<(), GenerationError> {
-    let output = parse_structured_model_output(gateway_result)?;
+    let mut output = parse_structured_model_output(gateway_result)?;
     if is_clothing_scene_planning_task(task) {
+        normalize_selected_clothing_scene_names(task, &mut output);
         validate_clothing_scene_plan_output(task, &output)?;
+        output = json!({
+            "modelFeatures": output["modelFeatures"].clone(),
+            "scenes": output["scenes"].clone(),
+        });
     }
     if !update_stage(
         workspace_directory,
@@ -1762,6 +2965,7 @@ fn validate_clothing_scene_plan_output(
     task: &ClaimedTask,
     output: &serde_json::Value,
 ) -> Result<(), GenerationError> {
+    clothing_model_features_prompt_value(output, "服饰场景规划结果")?;
     let scenes = output
         .get("scenes")
         .and_then(serde_json::Value::as_array)
@@ -1870,6 +3074,113 @@ fn validate_clothing_scene_plan_output(
         }
     }
     Ok(())
+}
+
+fn normalize_selected_clothing_scene_names(task: &ClaimedTask, output: &mut serde_json::Value) {
+    let ai_recommended = task
+        .input
+        .get("aiRecommended")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if ai_recommended {
+        return;
+    }
+    let selected_scenes = task
+        .input
+        .get("selectedScenes")
+        .and_then(serde_json::Value::as_array)
+        .map(|scenes| {
+            scenes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|scene| !scene.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let Some(scenes) = output
+        .get_mut("scenes")
+        .and_then(serde_json::Value::as_array_mut)
+        .filter(|scenes| scenes.len() == selected_scenes.len())
+    else {
+        return;
+    };
+    let source_scenes = scenes.clone();
+    let mut used_indexes = vec![false; source_scenes.len()];
+    let mut matched_indexes = Vec::with_capacity(selected_scenes.len());
+    for selected_scene in &selected_scenes {
+        let exact_matches = source_scenes
+            .iter()
+            .enumerate()
+            .filter(|(index, scene)| {
+                !used_indexes[*index]
+                    && scene
+                        .get("scene")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        == Some(*selected_scene)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let matched_index = if exact_matches.len() == 1 {
+            exact_matches[0]
+        } else {
+            let selected_key = clothing_scene_title_key(selected_scene);
+            let normalized_matches = source_scenes
+                .iter()
+                .enumerate()
+                .filter(|(index, scene)| {
+                    !used_indexes[*index]
+                        && scene
+                            .get("scene")
+                            .and_then(serde_json::Value::as_str)
+                            .map(clothing_scene_title_key)
+                            .is_some_and(|key| {
+                                !key.is_empty()
+                                    && !selected_key.is_empty()
+                                    && (key == selected_key
+                                        || key.contains(&selected_key)
+                                        || selected_key.contains(&key))
+                            })
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if normalized_matches.len() != 1 {
+                return;
+            }
+            normalized_matches[0]
+        };
+        used_indexes[matched_index] = true;
+        matched_indexes.push(matched_index);
+    }
+
+    let mut ordered_scenes = Vec::with_capacity(selected_scenes.len());
+    for (matched_index, selected_scene) in matched_indexes.into_iter().zip(selected_scenes) {
+        let mut scene = source_scenes[matched_index].clone();
+        if let Some(scene) = scene.as_object_mut() {
+            scene.insert(
+                "scene".to_string(),
+                serde_json::Value::String(selected_scene.to_string()),
+            );
+        }
+        ordered_scenes.push(scene);
+    }
+    *scenes = ordered_scenes;
+}
+
+fn clothing_scene_title_key(title: &str) -> String {
+    let mut key = title
+        .trim()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    for suffix in ["场景", "空间", "地点", "环境", "馆", "店", "厅"] {
+        if key.ends_with(suffix) && key.len() > suffix.len() {
+            key.truncate(key.len() - suffix.len());
+            break;
+        }
+    }
+    key
 }
 
 fn parse_listing_copy_output(
@@ -2237,6 +3548,19 @@ fn normalized_persist_error(task: &ClaimedTask) -> NormalizedTaskError {
     }
 }
 
+fn normalized_persist_error_with_source(
+    task: &ClaimedTask,
+    source: &GenerationError,
+) -> NormalizedTaskError {
+    let mut error = normalized_persist_error(task);
+    if is_clothing_scene_planning_task(task) {
+        if let GenerationError::Validation(message) = source {
+            error.message = format!("服饰场景规划结果校验失败：{message}");
+        }
+    }
+    error
+}
+
 fn ensure_supported_image_mime(mime_type: &str) -> Result<(), GenerationError> {
     extension_for_mime_type(mime_type).map(|_| ())
 }
@@ -2267,7 +3591,7 @@ fn mark_task_succeeded(
             stage = 'completed',
             completed_at = COALESCE(completed_at, datetime('now')),
             updated_at = datetime('now')
-        WHERE id = ?1 AND status = 'running'
+        WHERE id = ?1 AND status = 'running' AND hidden_at IS NULL
         ",
         params![task.id],
     )?;
@@ -2314,6 +3638,29 @@ fn insert_task_item_failed_event(
     Ok(())
 }
 
+fn insert_task_item_model_failed_event(
+    workspace_directory: &Path,
+    task_id: &str,
+    item_index: usize,
+    error: &NormalizedTaskError,
+) -> Result<(), GenerationError> {
+    let database = WorkspaceDatabase::open(workspace_directory)?;
+    insert_task_event(
+        &database,
+        task_id,
+        "task.item-failed",
+        Some(GenerationTaskStage::CallingProvider),
+        Some(json!({
+            "item_index": item_index,
+            "error_code": error.code,
+            "retryable": error.retryable,
+            "provider_status_code": error.provider_status_code,
+            "provider_error_code": error.provider_error_code,
+        })),
+    )?;
+    Ok(())
+}
+
 fn mark_task_failed(
     workspace_directory: &Path,
     task_id: &str,
@@ -2328,7 +3675,7 @@ fn mark_task_failed(
             error_json = ?1,
             completed_at = COALESCE(completed_at, datetime('now')),
             updated_at = datetime('now')
-        WHERE id = ?2 AND status = 'running'
+        WHERE id = ?2 AND status = 'running' AND hidden_at IS NULL
         ",
         params![serde_json::to_string(error)?, task_id],
     )?;
@@ -2362,7 +3709,7 @@ fn update_stage(
         UPDATE generation_tasks
         SET stage = ?1,
             updated_at = datetime('now')
-        WHERE id = ?2 AND status = 'running'
+        WHERE id = ?2 AND status = 'running' AND hidden_at IS NULL
         ",
         params![stage.as_str(), task_id],
     )?;
@@ -2432,22 +3779,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        capability_for_claimed_task, claim_next_queued_task, clothing_base_model_gateway_input,
-        clothing_scene_planning_gateway_input, clothing_tryon_item_gateway_input,
-        downloaded_image_mime_type, execute_claimed_task, invoke_gateway_inputs_for_task,
-        mark_task_failed, mark_task_succeeded, normalize_model_gateway_task_error,
-        normalized_persist_error, parse_listing_copy_output, persist_structured_model_output,
-        product_detail_input_batches, product_detail_item_gateway_input,
-        product_detail_output_sort_order_start, task_execution_error_diagnostic,
-        task_gateway_inputs, task_input_with_asset_reference_images, task_is_running, update_stage,
-        validate_clothing_scene_plan_output, ClaimedTask, TaskModelInvocationError,
-        BACKGROUND_TASK_CONCURRENCY, PRODUCT_DETAIL_ITEM_CONCURRENCY,
+        capability_for_claimed_task, claim_next_queued_task, claim_queued_task_by_id,
+        clothing_base_model_gateway_input, clothing_scene_planning_gateway_input,
+        clothing_tryon_item_gateway_input, downloaded_image_mime_type, execute_claimed_task,
+        invoke_gateway_inputs_for_task, mark_task_failed, mark_task_succeeded,
+        normalize_model_gateway_task_error, normalize_selected_clothing_scene_names,
+        normalized_persist_error, normalized_persist_error_with_source, parse_listing_copy_output,
+        persist_generated_gateway_result_outputs,
+        persist_generated_gateway_result_outputs_with_before_link,
+        persist_product_detail_staged_results, persist_staged_generation_results,
+        persist_structured_model_output, product_detail_input_batches,
+        product_detail_item_gateway_input, product_detail_output_sort_order_start,
+        remember_lowest_index_item_error, supervise_async_task_execution,
+        task_execution_error_diagnostic, task_gateway_inputs,
+        task_input_with_asset_reference_images, task_is_running, update_stage,
+        validate_clothing_scene_plan_output, ClaimedTask, LocalTaskExecutionResult,
+        TaskModelInvocationError, BACKGROUND_TASK_CONCURRENCY, CLOTHING_TRYON_ITEM_CONCURRENCY,
+        PRODUCT_DETAIL_ITEM_CONCURRENCY,
     };
     use crate::domain::assets::AssetKind;
     use crate::domain::errors::ProviderTransportErrorKind;
     use crate::domain::generation::{
-        GenerationTaskKind, GenerationTaskStage, GenerationTaskStatus, NormalizedTaskError,
-        WorkspaceKind,
+        GenerationError, GenerationTaskKind, GenerationTaskStage, GenerationTaskStatus,
+        NormalizedTaskError, WorkspaceKind,
     };
     use crate::infrastructure::database::WorkspaceDatabase;
     use crate::infrastructure::filesystem::WorkspaceFileSystem;
@@ -2462,9 +3816,510 @@ mod tests {
     use std::fs;
     use std::ops::Range;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
+
+    #[tokio::test]
+    async fn async_task_supervisor_marks_panics_failed_without_persisting_panic_payload() {
+        let workspace_dir = initialized_workspace("local-executor-async-panic");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("async-panic".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "异步 panic 任务".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({ "prompt": "白色摄影棚，柔光" })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let claimed = claim_queued_task_by_id(&workspace_dir, &task.id, 1)
+            .expect("task claim should finish")
+            .expect("task should claim");
+        let execution_task_id = claimed.id.clone();
+        let execution = async move {
+            if std::hint::black_box(true) {
+                panic!("panic-secret-marker");
+            }
+            Ok(LocalTaskExecutionResult {
+                task_id: execution_task_id,
+                invocation_id: None,
+            })
+        };
+
+        supervise_async_task_execution(workspace_dir.clone(), claimed.id.clone(), execution).await;
+
+        let failed = generation_service
+            .get_task(&workspace_dir, &task.id)
+            .expect("failed task should reload");
+        let error = failed
+            .error
+            .expect("panic should persist a normalized error");
+        assert_eq!(failed.status, GenerationTaskStatus::Failed);
+        assert_eq!(error.code, "LOCAL_TASK_EXECUTION_FAILED");
+        assert_eq!(error.message, "后台任务异常退出。");
+        assert!(!error.message.contains("panic-secret-marker"));
+
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn hidden_running_task_cannot_persist_or_reach_a_terminal_success() {
+        let workspace_dir = initialized_workspace("local-executor-hidden-running-guard");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("hidden-running-guard".to_string()),
+                    workspace: WorkspaceKind::Clothing,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "隐藏中的服饰任务".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({ "kind": "clothing-tryon-generation" })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider', hidden_at = datetime('now') WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("seed hidden running task");
+        drop(database);
+        let claimed = ClaimedTask {
+            id: task.id.clone(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({ "kind": "clothing-tryon-generation" }),
+            input_assets: Vec::new(),
+        };
+        let gateway_result = ModelGatewayResult {
+            invocation_id: "hidden-late-invocation".to_string(),
+            capability_id: "clothing-tryon-generation".to_string(),
+            provider_profile_id: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            output_text: None,
+            output_json: json!({
+                "type": "image",
+                "images": [{
+                    "mimeType": "image/png",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+                }]
+            }),
+        };
+
+        let saved =
+            persist_generated_gateway_result_outputs(&workspace_dir, &task.id, &gateway_result, 0)
+                .expect("hidden persistence should be a clean no-op");
+        mark_task_succeeded(
+            &workspace_dir,
+            &claimed,
+            &[gateway_result.invocation_id],
+            None,
+        )
+        .expect("hidden terminal update should be a clean no-op");
+
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        let status: String = database
+            .connection()
+            .query_row(
+                "SELECT status FROM generation_tasks WHERE id = ?1",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .expect("status should load");
+        let output_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM generation_assets WHERE task_id = ?1",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .expect("output count should query");
+        assert_eq!(saved, 0);
+        assert_eq!(status, "running");
+        assert_eq!(output_count, 0);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn synchronous_persistence_rechecks_visibility_after_staging_before_linking() {
+        let workspace_dir = initialized_workspace("sync-persist-hidden-after-staging");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("sync-persist-hidden-after-staging".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "同步落盘竞态".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({ "prompt": "白色摄影棚" })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("mark task running");
+        drop(database);
+        let gateway_result = ModelGatewayResult {
+            invocation_id: "sync-race-invocation".to_string(),
+            capability_id: "scene-image-generation".to_string(),
+            provider_profile_id: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            output_text: None,
+            output_json: json!({
+                "type": "image",
+                "images": [{
+                    "mimeType": "image/png",
+                    "dataUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+                }]
+            }),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = barrier.clone();
+        let worker_workspace = workspace_dir.clone();
+        let worker_task_id = task.id.clone();
+        let worker = std::thread::spawn(move || {
+            persist_generated_gateway_result_outputs_with_before_link(
+                &worker_workspace,
+                &worker_task_id,
+                &gateway_result,
+                0,
+                || {
+                    worker_barrier.wait();
+                    worker_barrier.wait();
+                },
+            )
+        });
+        barrier.wait();
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET hidden_at = datetime('now') WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("hide task after staging");
+        drop(database);
+        barrier.wait();
+        let saved = worker
+            .join()
+            .expect("persistence worker should finish")
+            .expect("late persistence should be a clean no-op");
+
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        let output_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM generation_assets WHERE task_id = ?1",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .expect("output count should query");
+        let saved_event_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ?1 AND event_type = 'task.result-saved'",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .expect("saved event count should query");
+        let active_orphan_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM assets asset WHERE asset.kind = 'generated' AND asset.lifecycle = 'active' AND NOT EXISTS (SELECT 1 FROM generation_assets rel WHERE rel.asset_id = asset.id)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active orphan count should query");
+        assert_eq!(saved, 0);
+        assert_eq!(output_count, 0);
+        assert_eq!(saved_event_count, 0);
+        assert_eq!(active_orphan_count, 0);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn staged_async_clothing_multi_image_results_get_stable_unique_sort_orders() {
+        let workspace_dir = initialized_workspace("async-clothing-multi-image-order");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("async-clothing-multi-image-order".to_string()),
+                    workspace: WorkspaceKind::Clothing,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "服饰多图结果".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({ "kind": "clothing-tryon-generation" })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'saving-result' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("mark task running");
+        drop(database);
+        let asset_service = AssetService::new();
+        let first_assets = vec![
+            asset_service
+                .save_generated_image(&workspace_dir, "first-1.png", "image/png", &[1])
+                .expect("stage first asset"),
+            asset_service
+                .save_generated_image(&workspace_dir, "first-2.png", "image/png", &[2])
+                .expect("stage second asset"),
+        ];
+        let second_assets = vec![
+            asset_service
+                .save_generated_image(&workspace_dir, "second-1.png", "image/png", &[3])
+                .expect("stage third asset"),
+            asset_service
+                .save_generated_image(&workspace_dir, "second-2.png", "image/png", &[4])
+                .expect("stage fourth asset"),
+        ];
+        let expected_asset_ids = first_assets
+            .iter()
+            .chain(second_assets.iter())
+            .map(|asset| asset.id.clone())
+            .collect::<Vec<_>>();
+        let result = |index: usize| ModelGatewayResult {
+            invocation_id: format!("async-multi-{index}"),
+            capability_id: "clothing-tryon-generation".to_string(),
+            provider_profile_id: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            output_text: None,
+            output_json: json!({ "type": "image" }),
+        };
+
+        let (results, saved_image_count) = persist_staged_generation_results(
+            &workspace_dir,
+            &task.id,
+            vec![(1, result(1), second_assets), (0, result(0), first_assets)],
+        )
+        .expect("staged results should link in item order");
+
+        let detail = generation_service
+            .get_task_detail(&workspace_dir, &task.id)
+            .expect("task detail should load");
+        let actual_asset_ids = detail
+            .output_assets
+            .iter()
+            .map(|output| output.asset.id.clone())
+            .collect::<Vec<_>>();
+        let sort_orders = detail
+            .output_assets
+            .iter()
+            .map(|output| output.sort_order)
+            .collect::<Vec<_>>();
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        let active_orphan_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM assets asset WHERE asset.kind = 'generated' AND asset.lifecycle = 'active' AND NOT EXISTS (SELECT 1 FROM generation_assets rel WHERE rel.asset_id = asset.id)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active orphan count should query");
+        assert_eq!(saved_image_count, 4);
+        assert_eq!(results.len(), 2);
+        assert_eq!(sort_orders, vec![0, 1, 2, 3]);
+        assert_eq!(actual_asset_ids, expected_asset_ids);
+        assert_eq!(active_orphan_count, 0);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn staged_product_detail_multi_image_results_do_not_occupy_sibling_slots() {
+        let workspace_dir = initialized_workspace("product-detail-staged-multi-image-order");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("product-detail-staged-multi-image-order".to_string()),
+                    workspace: WorkspaceKind::Product,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "商品详情多图结果".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({ "kind": "product-detail-generation" })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'saving-result' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("mark task running");
+        drop(database);
+        let asset_service = AssetService::new();
+        let first_assets = vec![
+            asset_service
+                .save_generated_image(&workspace_dir, "item-1-a.png", "image/png", &[11])
+                .expect("stage item 1 first image"),
+            asset_service
+                .save_generated_image(&workspace_dir, "item-1-b.png", "image/png", &[12])
+                .expect("stage item 1 second image"),
+        ];
+        let second_assets = vec![asset_service
+            .save_generated_image(&workspace_dir, "item-2.png", "image/png", &[21])
+            .expect("stage item 2 image")];
+        let expected_ids = first_assets
+            .iter()
+            .chain(second_assets.iter())
+            .map(|asset| asset.id.clone())
+            .collect::<Vec<_>>();
+        let result = |index: usize| ModelGatewayResult {
+            invocation_id: format!("product-detail-multi-{index}"),
+            capability_id: "product-detail-generation".to_string(),
+            provider_profile_id: "openai".to_string(),
+            model: "gpt-image-1".to_string(),
+            output_text: None,
+            output_json: json!({ "type": "image" }),
+        };
+
+        let (_, saved_count) = persist_product_detail_staged_results(
+            &workspace_dir,
+            &task.id,
+            vec![(1, result(1), second_assets), (0, result(0), first_assets)],
+        )
+        .expect("product detail results should link in item order");
+
+        let detail = generation_service
+            .get_task_detail(&workspace_dir, &task.id)
+            .expect("task detail should load");
+        let actual_ids = detail
+            .output_assets
+            .iter()
+            .map(|output| output.asset.id.clone())
+            .collect::<Vec<_>>();
+        let sort_orders = detail
+            .output_assets
+            .iter()
+            .map(|output| output.sort_order)
+            .collect::<Vec<_>>();
+        assert_eq!(saved_count, 3);
+        assert_eq!(sort_orders, vec![0, 1, 2]);
+        assert_eq!(actual_ids, expected_ids);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn concurrent_targeted_claims_do_not_exceed_background_capacity() {
+        let workspace_dir = initialized_workspace("local-executor-atomic-capacity");
+        let generation_service = GenerationService::new();
+        let tasks = (0..5)
+            .map(|index| {
+                generation_service
+                    .create_task(
+                        &workspace_dir,
+                        CreateGenerationTaskInput {
+                            idempotency_key: Some(format!("atomic-capacity-{index}")),
+                            workspace: WorkspaceKind::Scene,
+                            kind: GenerationTaskKind::ImageGeneration,
+                            title: format!("并发任务 {index}"),
+                            prompt_plan_id: None,
+                            input: Some(json!({ "prompt": "白色摄影棚，柔光" })),
+                            prompt_plan_snapshot: None,
+                            input_assets: Vec::new(),
+                        },
+                    )
+                    .expect("task should create")
+            })
+            .collect::<Vec<_>>();
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        for task in &tasks[..3] {
+            database
+                .connection()
+                .execute(
+                    "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                    [&task.id],
+                )
+                .expect("seed running task");
+        }
+        drop(database);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let workers = tasks[3..]
+            .iter()
+            .map(|task| {
+                let workspace_dir = workspace_dir.clone();
+                let task_id = task.id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let database =
+                        WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+                    let running_count: i64 = database
+                        .connection()
+                        .query_row(
+                            "SELECT COUNT(*) FROM generation_tasks WHERE status = 'running'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("running count should query");
+                    assert_eq!(running_count, 3);
+                    drop(database);
+                    barrier.wait();
+                    claim_queued_task_by_id(&workspace_dir, &task_id, BACKGROUND_TASK_CONCURRENCY)
+                        .expect("targeted claim should finish")
+                        .is_some()
+                })
+            })
+            .collect::<Vec<_>>();
+        let claimed_count = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("claim worker should finish"))
+            .filter(|claimed| *claimed)
+            .count();
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        let running_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM generation_tasks WHERE status = 'running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("running count should query");
+
+        assert_eq!(claimed_count, 1);
+        assert_eq!(running_count, BACKGROUND_TASK_CONCURRENCY as i64);
+
+        drop(database);
+        remove_workspace(&workspace_dir);
+    }
 
     #[test]
     fn clothing_base_model_task_uses_text_to_image_capability() {
@@ -2517,6 +4372,199 @@ mod tests {
             assert_eq!(error.provider_error_code, None);
             assert_eq!(error.stage, Some(GenerationTaskStage::Failed));
         }
+    }
+
+    #[test]
+    fn clothing_tryon_all_provider_failures_preserve_typed_parent_error() {
+        let cases = [
+            (
+                "rate-limit",
+                ModelConfigError::ProviderHttp {
+                    status_code: 429,
+                    provider_error_code: Some("rate_limit_exceeded".to_string()),
+                },
+                "PROVIDER_RATE_LIMITED",
+                true,
+                Some(429),
+            ),
+            (
+                "timeout",
+                ModelConfigError::ProviderTransport(ProviderTransportErrorKind::Timeout),
+                "PROVIDER_TIMEOUT",
+                true,
+                None,
+            ),
+            (
+                "unauthorized",
+                ModelConfigError::ProviderHttp {
+                    status_code: 401,
+                    provider_error_code: Some("invalid_api_key".to_string()),
+                },
+                "API_KEY_INVALID",
+                false,
+                Some(401),
+            ),
+        ];
+
+        for (label, provider_error, expected_code, expected_retryable, expected_status) in cases {
+            let workspace_dir = initialized_workspace(&format!("clothing-provider-{label}"));
+            let generation_service = GenerationService::new();
+            let task = generation_service
+                .create_task(
+                    &workspace_dir,
+                    CreateGenerationTaskInput {
+                        idempotency_key: Some(format!("clothing-provider-{label}")),
+                        workspace: WorkspaceKind::Clothing,
+                        kind: GenerationTaskKind::ImageGeneration,
+                        title: "服饰出图".to_string(),
+                        prompt_plan_id: None,
+                        input: Some(json!({
+                            "kind": "clothing-tryon-generation",
+                            "items": [{ "id": "pose-1" }],
+                        })),
+                        prompt_plan_snapshot: None,
+                        input_assets: Vec::new(),
+                    },
+                )
+                .expect("task should create");
+            let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+            database
+                .connection()
+                .execute(
+                    "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                    [&task.id],
+                )
+                .expect("mark running");
+            let claimed_task = ClaimedTask {
+                id: task.id.clone(),
+                workspace: WorkspaceKind::Clothing,
+                kind: GenerationTaskKind::ImageGeneration,
+                input: json!({ "kind": "clothing-tryon-generation" }),
+                input_assets: Vec::new(),
+            };
+
+            let source = invoke_gateway_inputs_for_task(
+                &workspace_dir,
+                &claimed_task,
+                "clothing-tryon-generation",
+                vec![json!({ "itemId": "pose-1" })],
+                |_capability_id, _input| Err(provider_error.clone()),
+            )
+            .expect_err("all failed items should preserve the Provider failure");
+            let normalized = normalize_model_gateway_task_error(source);
+
+            assert_eq!(normalized.code, expected_code, "case={label}");
+            assert_eq!(normalized.retryable, expected_retryable, "case={label}");
+            assert_eq!(
+                normalized.provider_status_code, expected_status,
+                "case={label}"
+            );
+            remove_workspace(&workspace_dir);
+        }
+    }
+
+    #[test]
+    fn clothing_tryon_parent_error_uses_the_lowest_item_index() {
+        let mut selected = None;
+        remember_lowest_index_item_error(
+            &mut selected,
+            2,
+            TaskModelInvocationError::Gateway(ModelConfigError::ProviderTransport(
+                ProviderTransportErrorKind::Timeout,
+            )),
+        );
+        remember_lowest_index_item_error(
+            &mut selected,
+            0,
+            TaskModelInvocationError::Gateway(ModelConfigError::ProviderHttp {
+                status_code: 401,
+                provider_error_code: Some("invalid_api_key".to_string()),
+            }),
+        );
+        remember_lowest_index_item_error(
+            &mut selected,
+            1,
+            TaskModelInvocationError::Gateway(ModelConfigError::ProviderHttp {
+                status_code: 429,
+                provider_error_code: Some("rate_limit_exceeded".to_string()),
+            }),
+        );
+
+        let (index, error) = selected.expect("最低序号错误应被保留");
+        assert_eq!(index, 0);
+        let normalized = normalize_model_gateway_task_error(error);
+        assert_eq!(normalized.code, "API_KEY_INVALID");
+        assert!(!normalized.retryable);
+        assert_eq!(normalized.provider_status_code, Some(401));
+    }
+
+    #[test]
+    fn clothing_tryon_parent_error_includes_lower_index_persist_failures() {
+        let workspace_dir = initialized_workspace("clothing-mixed-provider-persist-failure");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("clothing-mixed-provider-persist-failure".to_string()),
+                    workspace: WorkspaceKind::Clothing,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "服饰出图".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({
+                        "kind": "clothing-tryon-generation",
+                        "items": [{ "id": "pose-1" }, { "id": "pose-2" }],
+                    })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("mark running");
+        let claimed_task = ClaimedTask {
+            id: task.id,
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({ "kind": "clothing-tryon-generation" }),
+            input_assets: Vec::new(),
+        };
+
+        let source = invoke_gateway_inputs_for_task(
+            &workspace_dir,
+            &claimed_task,
+            "clothing-tryon-generation",
+            vec![json!({ "itemId": "pose-1" }), json!({ "itemId": "pose-2" })],
+            |_capability_id, input| {
+                if input.get("itemId").and_then(serde_json::Value::as_str) == Some("pose-1") {
+                    return Ok(ModelGatewayResult {
+                        invocation_id: "invocation-persist-failure".to_string(),
+                        capability_id: "clothing-tryon-generation".to_string(),
+                        provider_profile_id: "openai".to_string(),
+                        model: "gpt-image-1".to_string(),
+                        output_text: None,
+                        output_json: json!({ "type": "image", "images": [] }),
+                    });
+                }
+                Err(ModelConfigError::ProviderHttp {
+                    status_code: 401,
+                    provider_error_code: Some("invalid_api_key".to_string()),
+                })
+            },
+        )
+        .expect_err("lower-index persist failure should determine the parent error");
+        let normalized = normalize_model_gateway_task_error(source);
+
+        assert_eq!(normalized.code, "TASK_EXECUTION_ERROR");
+        assert!(normalized.retryable);
+        assert_eq!(normalized.provider_status_code, None);
+        remove_workspace(&workspace_dir);
     }
 
     #[test]
@@ -2641,6 +4689,27 @@ mod tests {
         );
 
         remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn clothing_scene_planning_persist_failure_includes_safe_validation_reason() {
+        let task = ClaimedTask {
+            id: "task_scene_validation_reason".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({ "kind": "clothing-scene-planning" }),
+            input_assets: Vec::new(),
+        };
+
+        let error = normalized_persist_error_with_source(
+            &task,
+            &GenerationError::Validation(
+                "服饰场景规划结果 scenes[0] 缺少 sceneVisualAnchor。".to_string(),
+            ),
+        );
+
+        assert_eq!(error.code, "CLOTHING_SCENE_PLAN_OUTPUT_INVALID");
+        assert!(error.message.contains("缺少 sceneVisualAnchor"));
     }
 
     #[test]
@@ -3007,8 +5076,8 @@ mod tests {
                 "aiRecommended": false,
                 "ratio": "3:4",
                 "userImages": [
-                    { "role": "source", "dataUrl": "data:image/png;base64,garment-a" },
-                    { "role": "model", "dataUrl": "data:image/png;base64,model-b" }
+                    { "role": "model", "dataUrl": "data:image/png;base64,model-a" },
+                    { "role": "source", "dataUrl": "data:image/png;base64,garment-b" }
                 ],
             }),
             input_assets: Vec::new(),
@@ -3025,18 +5094,17 @@ mod tests {
         let user_prompt = prompt["messages"][1]["content"]
             .as_str()
             .expect("user prompt should render");
-        assert!(system_prompt.contains("专业服饰商拍场景与动作规划师"));
-        assert!(system_prompt.contains("场景与动作规划阶段"));
-        assert!(user_prompt.contains("用户已选择场景：都市街头"));
-        assert!(user_prompt.contains("自定义场景描述：午后暖调阳光，轻奢门店橱窗背景"));
-        assert!(user_prompt.contains("服装参考：用户上传的服装原图"));
-        assert!(user_prompt.contains("模特参考：用户选择的模特全身图"));
-        assert!(user_prompt.contains("出图比例/尺寸：3:4"));
-        assert!(user_prompt.contains("不得规划会遮挡、扭曲或覆盖服装文字、Logo、花纹的动作"));
-        assert!(user_prompt.contains("每个场景必须输出 4 个动作"));
+        assert!(system_prompt.contains("电商服饰场景与动作规划师"));
+        assert!(system_prompt.contains("图片合同：第 1 张是唯一模特全身参考图"));
+        assert!(user_prompt.contains("用户场景（scene 字段必须逐字复制，并保持以下顺序）："));
+        assert!(user_prompt.contains("场景 1：都市街头"));
+        assert!(user_prompt.contains("自定义场景补充：午后暖调阳光，轻奢门店橱窗背景"));
+        assert!(user_prompt.contains("服装参考：参考图 B"));
+        assert!(user_prompt.contains("模特参考：参考图 A"));
+        assert!(!user_prompt.contains("出图比例：3:4"));
         assert!(!user_prompt.contains("{{selectedScenes}}"));
-        assert!(!user_prompt.contains("{{clothingReference}}"));
-        assert!(!user_prompt.contains("{{modelReference}}"));
+        assert!(!user_prompt.contains("{{clothingReferenceLabels}}"));
+        assert!(!user_prompt.contains("{{modelReferenceLabel}}"));
         assert_eq!(inputs[0]["maxOutputTokens"], 3000);
     }
 
@@ -3048,10 +5116,10 @@ mod tests {
             "aiRecommended": false,
             "ratio": "3:4",
             "userImages": [
-                { "role": "source", "dataUrl": "data:image/png;base64,garment-a" },
-                { "role": "reference", "dataUrl": "data:image/png;base64,garment-b" },
-                { "role": "source", "dataUrl": "data:image/png;base64,garment-c" },
-                { "role": "model", "dataUrl": "data:image/png;base64,model-d" }
+                { "role": "model", "dataUrl": "data:image/png;base64,model-a" },
+                { "role": "source", "dataUrl": "data:image/png;base64,garment-b" },
+                { "role": "reference", "dataUrl": "data:image/png;base64,garment-c" },
+                { "role": "source", "dataUrl": "data:image/png;base64,garment-d" }
             ]
         }))
         .expect("planning prompt should accept multiple garment references and one model");
@@ -3071,12 +5139,12 @@ mod tests {
         );
 
         for expected in [
-            "参考图 A：服装参考图 1。用于锁定服装设计。",
-            "参考图 B：服装参考图 2。用于锁定服装设计。",
-            "参考图 C：服装参考图 3。用于锁定服装设计。",
-            "参考图 D：模特参考图。用于锁定人物身份。",
-            "参考图 A、B、C",
-            "参考图 D",
+            "参考图 A：模特参考图。用于锁定人物身份。",
+            "参考图 B：服装参考图 1。用于锁定服装设计。",
+            "参考图 C：服装参考图 2。用于锁定服装设计。",
+            "参考图 D：服装参考图 3。用于锁定服装设计。",
+            "参考图 B、C、D",
+            "参考图 A",
         ] {
             assert!(
                 combined_prompt.contains(expected),
@@ -3093,14 +5161,29 @@ mod tests {
             "kind": "clothing-scene-planning",
             "selectedScenes": ["都市街头"],
             "userImages": [
-                { "role": "source", "dataUrl": "data:image/png;base64,garment-a" },
-                { "role": "model", "dataUrl": "data:image/png;base64,model-b" },
+                { "role": "model", "dataUrl": "data:image/png;base64,model-a" },
                 { "role": "model", "dataUrl": "data:image/png;base64,model-c" }
             ]
         }))
         .expect_err("planning should require exactly one model reference");
 
-        assert!(error.to_string().contains("恰好 1 张模特参考图"));
+        assert!(error.to_string().contains("第 2 张参考图必须是服装参考图"));
+    }
+
+    #[test]
+    fn clothing_scene_planning_rejects_a_model_that_is_not_the_first_reference_image() {
+        let error = clothing_scene_planning_gateway_input(&json!({
+            "kind": "clothing-scene-planning",
+            "userImages": [
+                { "role": "source", "dataUrl": "data:image/png;base64,garment" },
+                { "role": "model", "dataUrl": "data:image/png;base64,model" }
+            ]
+        }))
+        .expect_err("the first reference image must be the model");
+
+        assert!(error
+            .to_string()
+            .contains("第 1 张参考图必须是唯一模特参考图"));
     }
 
     #[test]
@@ -3130,6 +5213,64 @@ mod tests {
     }
 
     #[test]
+    fn clothing_tryon_generation_rejects_missing_model_features() {
+        let task_input = json!({
+            "kind": "clothing-tryon-generation",
+            "userImages": [
+                { "role": "model", "dataUrl": "data:image/png;base64,model" },
+                { "role": "source", "dataUrl": "data:image/png;base64,garment" }
+            ]
+        });
+        let item = json!({
+            "scene": "都市街头",
+            "sceneVisualAnchor": "城市人行道",
+            "scenePromptSegment": "自然光商业摄影",
+            "cameraSetup": {
+                "framing": "全身",
+                "perspective": "正面",
+                "shootingPosition": "平视"
+            },
+            "poseAction": "自然站立"
+        });
+
+        let error = clothing_tryon_item_gateway_input(&task_input, &item, 0)
+            .expect_err("tryon input must carry planning model features");
+
+        assert!(error.to_string().contains("modelFeatures"));
+    }
+
+    #[test]
+    fn clothing_tryon_generation_renders_model_features_into_prompt() {
+        let task_input = json!({
+            "kind": "clothing-tryon-generation",
+            "modelFeatures": complete_clothing_model_features(),
+            "userImages": [
+                { "role": "model", "dataUrl": "data:image/png;base64,model" },
+                { "role": "source", "dataUrl": "data:image/png;base64,garment" }
+            ]
+        });
+        let item = json!({
+            "scene": "都市街头",
+            "sceneVisualAnchor": "城市人行道",
+            "scenePromptSegment": "自然光商业摄影",
+            "cameraSetup": {
+                "framing": "全身",
+                "perspective": "正面",
+                "shootingPosition": "平视"
+            },
+            "poseAction": "自然站立"
+        });
+
+        let input = clothing_tryon_item_gateway_input(&task_input, &item, 0)
+            .expect("valid model features should render");
+        let prompt = input["prompt"]["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt should render");
+
+        assert!(prompt.contains("稳定身份锚点"));
+    }
+
+    #[test]
     fn clothing_tryon_generation_items_expand_to_per_pose_gateway_inputs() {
         let task = ClaimedTask {
             id: "task_clothing_tryon".to_string(),
@@ -3138,9 +5279,10 @@ mod tests {
             input: json!({
                 "kind": "clothing-tryon-generation",
                 "ratio": "9:16",
+                "modelFeatures": complete_clothing_model_features(),
                 "userImages": [
-                    { "role": "source", "dataUrl": "data:image/png;base64,garment-a" },
-                    { "role": "model", "dataUrl": "data:image/png;base64,model-b" }
+                    { "role": "model", "dataUrl": "data:image/png;base64,model-a" },
+                    { "role": "source", "dataUrl": "data:image/png;base64,garment-b" }
                 ],
                 "items": [
                     {
@@ -3200,10 +5342,11 @@ mod tests {
         assert!(user_prompt.contains("拍摄角度：正面"));
         assert!(user_prompt.contains("拍摄位置：平视机位"));
         assert!(user_prompt.contains("动作要求：站立于街头"));
-        assert!(user_prompt.contains("参考图 A：服装参考图 1。用于锁定服装设计。"));
-        assert!(user_prompt.contains("参考图 B：模特参考图。用于锁定人物身份。"));
+        assert!(user_prompt.contains("参考图 A：模特参考图。用于锁定人物身份。"));
+        assert!(user_prompt.contains("参考图 B：服装参考图 1。用于锁定服装设计。"));
         assert!(user_prompt
-            .contains("服装的颜色、版型、图案、Logo、文字、关键结构必须与参考图 A 保持一致"));
+            .contains("服装的颜色、版型、图案、Logo、文字、关键结构必须与参考图 B 保持一致"));
+        assert!(user_prompt.contains("稳定身份锚点"));
         assert!(roleless_prompt.contains("【用户选择的场景】"));
         assert!(roleless_prompt.contains("图片尺寸 / 比例：9:16"));
         assert!(!user_prompt.contains("{{scene}}"));
@@ -3218,13 +5361,14 @@ mod tests {
         let task_input = json!({
             "kind": "clothing-tryon-generation",
             "ratio": "3:4",
+            "modelFeatures": complete_clothing_model_features(),
             "userImages": [
-                { "role": "source", "dataUrl": "data:image/png;base64,garment-a" },
+                { "role": "model", "dataUrl": "data:image/png;base64,model-a" },
                 { "role": "source", "dataUrl": "data:image/png;base64,garment-b" },
                 { "role": "source", "dataUrl": "data:image/png;base64,garment-c" },
                 { "role": "source", "dataUrl": "data:image/png;base64,garment-d" },
                 { "role": "source", "dataUrl": "data:image/png;base64,garment-e" },
-                { "role": "model", "dataUrl": "data:image/png;base64,model-f" }
+                { "role": "source", "dataUrl": "data:image/png;base64,garment-f" }
             ]
         });
         let item = json!({
@@ -3252,18 +5396,17 @@ mod tests {
             .expect("roleless prompt should render");
 
         for prompt in [system_prompt, user_prompt, roleless_prompt] {
-            assert!(prompt.contains("参考图 A：服装参考图 1"));
-            assert!(prompt.contains("参考图 E：服装参考图 5"));
-            assert!(prompt.contains("参考图 F：模特参考图"));
-            assert!(prompt.contains("参考图 A、B、C、D、E"));
-            assert!(prompt.contains("参考图 F 中的同一位模特"));
-            assert!(!prompt.contains("参考图 B：模特参考图"));
+            assert!(prompt.contains("参考图 A：模特参考图"));
+            assert!(prompt.contains("参考图 B：服装参考图 1"));
+            assert!(prompt.contains("参考图 F：服装参考图 5"));
+            assert!(prompt.contains("参考图 B、C、D、E、F"));
+            assert!(prompt.contains("参考图 A 中的同一位模特"));
             assert!(!prompt.contains("{{referenceImageRoles}}"));
         }
     }
 
     #[test]
-    fn clothing_tryon_stops_invoking_after_task_is_cancelled_between_items() {
+    fn clothing_tryon_does_not_start_a_new_batch_after_task_is_cancelled() {
         let workspace_dir = initialized_workspace("local-executor-clothing-cancel-between-items");
         let generation_service = GenerationService::new();
         let task = generation_service
@@ -3277,7 +5420,13 @@ mod tests {
                     prompt_plan_id: None,
                     input: Some(json!({
                         "kind": "clothing-tryon-generation",
-                        "items": [{ "id": "pose-1" }, { "id": "pose-2" }],
+                        "items": [
+                            { "id": "pose-1" },
+                            { "id": "pose-2" },
+                            { "id": "pose-3" },
+                            { "id": "pose-4" },
+                            { "id": "pose-5" }
+                        ],
                     })),
                     prompt_plan_snapshot: None,
                     input_assets: Vec::new(),
@@ -3299,20 +5448,25 @@ mod tests {
             input: json!({ "kind": "clothing-tryon-generation" }),
             input_assets: Vec::new(),
         };
-        let mut invocation_count = 0usize;
+        let invocation_count = AtomicUsize::new(0);
+        let cancellation_requested = AtomicBool::new(false);
 
         let results = invoke_gateway_inputs_for_task(
             &workspace_dir,
             &claimed_task,
             "clothing-tryon-generation",
-            vec![json!({ "itemId": "pose-1" }), json!({ "itemId": "pose-2" })],
+            (0..5)
+                .map(|index| json!({ "itemId": format!("pose-{}", index + 1) }))
+                .collect(),
             |_capability_id, _input| {
-                invocation_count += 1;
-                generation_service
-                    .cancel_task(&workspace_dir, &task.id)
-                    .expect("first invocation should cancel task");
+                let invocation_index = invocation_count.fetch_add(1, Ordering::SeqCst);
+                if !cancellation_requested.swap(true, Ordering::SeqCst) {
+                    generation_service
+                        .cancel_task(&workspace_dir, &task.id)
+                        .expect("first invocation should cancel task");
+                }
                 Ok(ModelGatewayResult {
-                    invocation_id: format!("model_invocation_{invocation_count}"),
+                    invocation_id: format!("model_invocation_{invocation_index}"),
                     capability_id: "clothing-tryon-generation".to_string(),
                     provider_profile_id: "volcengine".to_string(),
                     model: "image-model".to_string(),
@@ -3323,29 +5477,35 @@ mod tests {
         )
         .expect("cancelled task should stop without failing completed invocation");
 
-        assert_eq!(invocation_count, 1);
-        assert_eq!(results.len(), 1);
+        assert!(invocation_count.load(Ordering::SeqCst) <= CLOTHING_TRYON_ITEM_CONCURRENCY);
+        assert!(results.len() <= CLOTHING_TRYON_ITEM_CONCURRENCY);
         assert!(!task_is_running(&workspace_dir, &task.id).expect("task should be cancelled"));
 
         remove_workspace(&workspace_dir);
     }
 
     #[test]
-    fn clothing_tryon_persists_successful_item_before_later_provider_failure() {
+    fn clothing_tryon_invokes_items_in_batches_and_isolates_provider_failures() {
         let workspace_dir = initialized_workspace("local-executor-clothing-persist-before-failure");
         let generation_service = GenerationService::new();
         let task = generation_service
             .create_task(
                 &workspace_dir,
                 CreateGenerationTaskInput {
-                    idempotency_key: Some("clothing-persist-before-failure".to_string()),
+                    idempotency_key: Some("clothing-batched-provider-failure".to_string()),
                     workspace: WorkspaceKind::Clothing,
                     kind: GenerationTaskKind::ImageGeneration,
                     title: "服饰出图".to_string(),
                     prompt_plan_id: None,
                     input: Some(json!({
                         "kind": "clothing-tryon-generation",
-                        "items": [{ "id": "pose-1" }, { "id": "pose-2" }],
+                        "items": [
+                            { "id": "pose-1" },
+                            { "id": "pose-2" },
+                            { "id": "pose-3" },
+                            { "id": "pose-4" },
+                            { "id": "pose-5" }
+                        ],
                     })),
                     prompt_plan_snapshot: None,
                     input_assets: Vec::new(),
@@ -3367,22 +5527,30 @@ mod tests {
             input: json!({ "kind": "clothing-tryon-generation" }),
             input_assets: Vec::new(),
         };
-        let mut invocation_count = 0usize;
+        let invocation_count = AtomicUsize::new(0);
+        let active_count = AtomicUsize::new(0);
+        let max_active_count = AtomicUsize::new(0);
 
-        let error = invoke_gateway_inputs_for_task(
+        let results = invoke_gateway_inputs_for_task(
             &workspace_dir,
             &claimed_task,
             "clothing-tryon-generation",
-            vec![json!({ "itemId": "pose-1" }), json!({ "itemId": "pose-2" })],
-            |_capability_id, _input| {
-                invocation_count += 1;
-                if invocation_count == 2 {
+            (0..5)
+                .map(|index| json!({ "itemId": format!("pose-{}", index + 1), "itemIndex": index }))
+                .collect(),
+            |_capability_id, input| {
+                let current_active = active_count.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active_count.fetch_max(current_active, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                active_count.fetch_sub(1, Ordering::SeqCst);
+                let invocation_index = invocation_count.fetch_add(1, Ordering::SeqCst);
+                if input["itemIndex"] == 1 {
                     return Err(crate::services::model_config::ModelConfigError::Validation(
                         "second item provider failed".to_string(),
                     ));
                 }
                 Ok(ModelGatewayResult {
-                    invocation_id: "model_invocation_first_item".to_string(),
+                    invocation_id: format!("model_invocation_{invocation_index}"),
                     capability_id: "clothing-tryon-generation".to_string(),
                     provider_profile_id: "volcengine".to_string(),
                     model: "image-model".to_string(),
@@ -3397,22 +5565,122 @@ mod tests {
                 })
             },
         )
-        .expect_err("later provider failure should still surface");
+        .expect("one item failure should not prevent the remaining items");
 
-        assert!(error.to_string().contains("second item provider failed"));
-        assert_eq!(invocation_count, 2);
+        assert_eq!(invocation_count.load(Ordering::SeqCst), 5);
+        assert_eq!(max_active_count.load(Ordering::SeqCst), 4);
+        assert_eq!(results.len(), 4);
         let detail = generation_service
             .get_task_detail(&workspace_dir, &task.id)
             .expect("task detail should load");
-        assert_eq!(detail.output_assets.len(), 1);
+        assert_eq!(detail.output_assets.len(), 4);
         assert_eq!(detail.output_assets[0].sort_order, 0);
         assert_eq!(
             task_event_count(&workspace_dir, &task.id, "task.item-provider-called"),
-            2
+            5
         );
         assert_eq!(
             task_event_count(&workspace_dir, &task.id, "task.item-provider-succeeded"),
+            4
+        );
+        assert_eq!(
+            task_event_count(&workspace_dir, &task.id, "task.item-failed"),
             1
+        );
+
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn clothing_scene_plan_persists_only_the_public_output_contract() {
+        let workspace_dir = initialized_workspace("clothing-plan-output-contract");
+        let generation_service = GenerationService::new();
+        let task = generation_service
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("clothing-plan-output-contract".to_string()),
+                    workspace: WorkspaceKind::Clothing,
+                    kind: GenerationTaskKind::ImageGeneration,
+                    title: "服饰场景动作规划".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({
+                        "kind": "clothing-scene-planning",
+                        "selectedScenes": ["都市街头"],
+                        "aiRecommended": false,
+                    })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("mark running");
+        let claimed_task = ClaimedTask {
+            id: task.id.clone(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let model_features = complete_clothing_model_features();
+        let scenes = json!([{
+            "scene": "都市街头",
+            "sceneVisualAnchor": "城市核心商圈人行道",
+            "scenePromptSegment": "街头时尚摄影",
+            "recommendedPoses": complete_clothing_scene_poses(),
+        }]);
+
+        persist_structured_model_output(
+            &workspace_dir,
+            &claimed_task,
+            &ModelGatewayResult {
+                invocation_id: "model_invocation_output_contract".to_string(),
+                capability_id: "clothing-scene-planning".to_string(),
+                provider_profile_id: "openai".to_string(),
+                model: "vision-model".to_string(),
+                output_text: Some(
+                    json!({
+                        "modelFeatures": model_features,
+                        "scenes": scenes,
+                        "inputValidation": { "valid": true },
+                        "analysis": "internal reasoning",
+                        "ratio": "2:3",
+                    })
+                    .to_string(),
+                ),
+                output_json: json!({ "type": "text" }),
+            },
+        )
+        .expect("valid clothing scene plan should persist");
+
+        let persisted_raw: String = database
+            .connection()
+            .query_row(
+                "SELECT output_json FROM generation_tasks WHERE id = ?1",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .expect("persisted output should load");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&persisted_raw).expect("persisted output should be JSON");
+
+        assert_eq!(
+            persisted,
+            json!({
+                "modelFeatures": model_features,
+                "scenes": scenes,
+            })
         );
 
         remove_workspace(&workspace_dir);
@@ -3567,6 +5835,7 @@ mod tests {
             input_assets: Vec::new(),
         };
         let output = json!({
+            "modelFeatures": complete_clothing_model_features(),
             "scenes": [{
                 "scene": "都市街头",
                 "sceneVisualAnchor": "城市核心商圈人行道",
@@ -3607,6 +5876,7 @@ mod tests {
             input_assets: Vec::new(),
         };
         let output = json!({
+            "modelFeatures": complete_clothing_model_features(),
             "scenes": [{
                 "scene": "都市街头",
                 "sceneVisualAnchor": "城市核心商圈人行道",
@@ -3617,6 +5887,194 @@ mod tests {
 
         validate_clothing_scene_plan_output(&claimed_task, &output)
             .expect("one user-selected scene with four complete poses should be valid");
+    }
+
+    #[test]
+    fn clothing_scene_plan_uses_exact_user_scene_titles_when_model_rephrases_them() {
+        let claimed_task = ClaimedTask {
+            id: "task_selected_clothing_scene_titles".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头", "街角咖啡"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let mut output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [
+                {
+                    "scene": "都市街头场景",
+                    "sceneVisualAnchor": "城市核心商圈人行道",
+                    "scenePromptSegment": "街头时尚摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+                {
+                    "scene": "街角咖啡馆",
+                    "sceneVisualAnchor": "临街咖啡馆外摆区",
+                    "scenePromptSegment": "生活方式商业摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+            ],
+        });
+
+        normalize_selected_clothing_scene_names(&claimed_task, &mut output);
+
+        assert_eq!(output["scenes"][0]["scene"], "都市街头");
+        assert_eq!(output["scenes"][1]["scene"], "街角咖啡");
+        validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect("user-selected scene titles should remain the source of truth");
+    }
+
+    #[test]
+    fn clothing_scene_plan_accepts_unique_expansions_of_user_scene_titles() {
+        let claimed_task = ClaimedTask {
+            id: "task_expanded_clothing_scene_titles".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头", "街角咖啡"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let mut output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [
+                {
+                    "scene": "都市街头商业街拍",
+                    "sceneVisualAnchor": "城市核心商圈人行道",
+                    "scenePromptSegment": "街头时尚摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+                {
+                    "scene": "街角咖啡馆外摆区",
+                    "sceneVisualAnchor": "临街咖啡馆外摆区",
+                    "scenePromptSegment": "生活方式商业摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+            ],
+        });
+
+        normalize_selected_clothing_scene_names(&claimed_task, &mut output);
+
+        assert_eq!(output["scenes"][0]["scene"], "都市街头");
+        assert_eq!(output["scenes"][1]["scene"], "街角咖啡");
+        validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect("unique scene title expansions should retain the user's scene contract");
+    }
+
+    #[test]
+    fn clothing_scene_plan_reorders_exact_model_scenes_without_mismatching_descriptions() {
+        let claimed_task = ClaimedTask {
+            id: "task_selected_clothing_scene_order".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头", "街角咖啡"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let mut output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [
+                {
+                    "scene": "街角咖啡",
+                    "sceneVisualAnchor": "咖啡馆锚点",
+                    "scenePromptSegment": "咖啡馆摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+                {
+                    "scene": "都市街头",
+                    "sceneVisualAnchor": "街头锚点",
+                    "scenePromptSegment": "街头摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+            ],
+        });
+
+        normalize_selected_clothing_scene_names(&claimed_task, &mut output);
+
+        assert_eq!(output["scenes"][0]["scene"], "都市街头");
+        assert_eq!(output["scenes"][0]["sceneVisualAnchor"], "街头锚点");
+        assert_eq!(output["scenes"][1]["scene"], "街角咖啡");
+        assert_eq!(output["scenes"][1]["sceneVisualAnchor"], "咖啡馆锚点");
+    }
+
+    #[test]
+    fn clothing_scene_plan_rejects_unmatched_model_scenes_instead_of_relabeling_them() {
+        let claimed_task = ClaimedTask {
+            id: "task_unmatched_clothing_scenes".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头", "街角咖啡"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let mut output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [
+                {
+                    "scene": "海边度假",
+                    "sceneVisualAnchor": "沙滩与海浪",
+                    "scenePromptSegment": "度假摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+                {
+                    "scene": "纯色影棚",
+                    "sceneVisualAnchor": "白色无影墙",
+                    "scenePromptSegment": "棚拍摄影",
+                    "recommendedPoses": complete_clothing_scene_poses(),
+                },
+            ],
+        });
+
+        normalize_selected_clothing_scene_names(&claimed_task, &mut output);
+
+        let error = validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect_err("unmatched model scenes must not be relabeled by position");
+        assert!(error
+            .to_string()
+            .contains("scenes 必须与用户 selectedScenes 完全一致"));
+    }
+
+    #[test]
+    fn clothing_scene_plan_rejects_blank_model_scene_title() {
+        let claimed_task = ClaimedTask {
+            id: "task_blank_clothing_scene".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let mut output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [{
+                "scene": "   ",
+                "sceneVisualAnchor": "与用户场景无关的描述",
+                "scenePromptSegment": "未知摄影风格",
+                "recommendedPoses": complete_clothing_scene_poses(),
+            }],
+        });
+
+        normalize_selected_clothing_scene_names(&claimed_task, &mut output);
+
+        assert_eq!(output["scenes"][0]["scene"], "   ");
+        let error = validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect_err("blank model scene titles must not match by containment");
+        assert!(error.to_string().contains("缺少 scene"));
     }
 
     #[test]
@@ -3633,6 +6091,7 @@ mod tests {
             input_assets: Vec::new(),
         };
         let output = json!({
+            "modelFeatures": complete_clothing_model_features(),
             "scenes": [
                 {
                     "scene": "都市街头",
@@ -3655,6 +6114,75 @@ mod tests {
         assert!(error
             .to_string()
             .contains("scenes 必须与用户 selectedScenes 完全一致"));
+    }
+
+    #[test]
+    fn clothing_scene_plan_output_rejects_missing_model_features() {
+        let claimed_task = ClaimedTask {
+            id: "task_clothing_scene_missing_model_features".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let output = json!({
+            "scenes": [{
+                "scene": "都市街头",
+                "sceneVisualAnchor": "城市核心商圈人行道",
+                "scenePromptSegment": "街头时尚摄影",
+                "recommendedPoses": complete_clothing_scene_poses(),
+            }],
+        });
+
+        let error = validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect_err("planning output must include complete model features");
+
+        assert!(error.to_string().contains("modelFeatures"));
+    }
+
+    #[test]
+    fn clothing_scene_plan_output_accepts_output_without_internal_input_validation() {
+        let claimed_task = ClaimedTask {
+            id: "task_scene_missing_input_validation".to_string(),
+            workspace: WorkspaceKind::Clothing,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({
+                "kind": "clothing-scene-planning",
+                "selectedScenes": ["都市街头"],
+                "aiRecommended": false,
+            }),
+            input_assets: Vec::new(),
+        };
+        let output = json!({
+            "modelFeatures": complete_clothing_model_features(),
+            "scenes": [{
+                "scene": "都市街头",
+                "sceneVisualAnchor": "城市核心商圈人行道",
+                "scenePromptSegment": "街头时尚摄影",
+                "recommendedPoses": complete_clothing_scene_poses(),
+            }],
+        });
+
+        validate_clothing_scene_plan_output(&claimed_task, &output)
+            .expect("runtime already validates the model-first reference image contract");
+    }
+
+    fn complete_clothing_model_features() -> serde_json::Value {
+        json!({
+            "gender": "女",
+            "ageRange": "青年",
+            "ethnicityAppearance": "东亚面孔",
+            "face": "柔和鹅蛋脸，五官清晰",
+            "body": "匀称身材，肩颈自然",
+            "hair": "黑色中长直发",
+            "skinTone": "自然暖白肤色",
+            "overallStyle": "简约都市气质",
+            "identityAnchor": ["保持脸部身份", "保持自然身材比例"]
+        })
     }
 
     fn complete_clothing_scene_poses() -> Vec<serde_json::Value> {
@@ -3745,7 +6273,7 @@ mod tests {
     }
 
     #[test]
-    fn task_input_with_asset_reference_images_loads_images_without_persisting_data_urls() {
+    fn clothing_task_input_normalizes_model_reference_before_garment_images() {
         let workspace_dir = initialized_workspace("local-executor-input-assets");
         let source_path = workspace_dir.join("source.png");
         let model_path = workspace_dir.join("model.png");
@@ -3776,19 +6304,14 @@ mod tests {
                 &workspace_dir,
                 CreateGenerationTaskInput {
                     idempotency_key: Some("input-assets".to_string()),
-                    workspace: WorkspaceKind::Product,
+                    workspace: WorkspaceKind::Clothing,
                     kind: GenerationTaskKind::ImageGeneration,
-                    title: "商品详情图".to_string(),
+                    title: "服饰场景动作规划".to_string(),
                     prompt_plan_id: None,
                     input: Some(json!({
-                        "kind": "product-detail-generation",
-                        "items": [
-                            {
-                                "imagePrompt": "展示商品细节",
-                                "sceneDescription": "展示商品细节",
-                                "title": "细节图",
-                            }
-                        ],
+                        "kind": "clothing-scene-planning",
+                        "selectedScenes": [],
+                        "aiRecommended": true,
                     })),
                     prompt_plan_snapshot: None,
                     input_assets: vec![
@@ -3807,7 +6330,7 @@ mod tests {
             )
             .expect("task should create");
 
-        let claimed = claim_next_queued_task(&workspace_dir)
+        let claimed = claim_next_queued_task(&workspace_dir, 1)
             .expect("claim should query")
             .expect("task should claim");
         assert_eq!(claimed.id, task.id);
@@ -3819,20 +6342,20 @@ mod tests {
             .expect("provider input should include user images");
 
         assert_eq!(user_images.len(), 2);
-        assert_eq!(user_images[0]["assetId"], imported_source_assets[0].id);
-        assert_eq!(user_images[0]["role"], "source");
+        assert_eq!(user_images[0]["assetId"], imported_model_assets[0].id);
+        assert_eq!(user_images[0]["role"], "model");
         assert_eq!(user_images[0]["sortOrder"], 0);
         assert_eq!(user_images[0]["mimeType"], "image/png");
         assert!(user_images[0]["dataUrl"]
             .as_str()
             .expect("data url should be string")
             .starts_with("data:image/png;base64,"));
-        assert_eq!(user_images[1]["assetId"], imported_model_assets[0].id);
-        assert_eq!(user_images[1]["role"], "model");
+        assert_eq!(user_images[1]["assetId"], imported_source_assets[0].id);
+        assert_eq!(user_images[1]["role"], "source");
         assert_eq!(user_images[1]["sortOrder"], 1);
         assert!(user_images[1]["dataUrl"]
             .as_str()
-            .expect("model data url should be string")
+            .expect("source data url should be string")
             .starts_with("data:image/png;base64,"));
         let detail = generation_service
             .get_task_detail(&workspace_dir, &task.id)

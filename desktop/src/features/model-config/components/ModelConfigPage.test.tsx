@@ -10,7 +10,12 @@ import type {
   SecretScope,
 } from "../../../runtime";
 import { ToastProvider } from "../../../shared/ui/toast";
-import { ModelConfigPage } from "./ModelConfigPage";
+import { ModelConfigPage, modelCatalog } from "./ModelConfigPage";
+
+it("lists Seedream 5.0 Pro for both text-to-image and image-to-image", () => {
+  expect(modelCatalog.volcengine.textToImage).toContain("doubao-seedream-5-0-pro-260628");
+  expect(modelCatalog.volcengine.imageToImage).toContain("doubao-seedream-5-0-pro-260628");
+});
 
 const deepseekProfile: ProviderProfileView = {
   id: "deepseek",
@@ -98,6 +103,7 @@ function providerSwitchModelConfigPort(): ModelConfigPort {
   return {
     deleteConfig: vi.fn(),
     getConfig: vi.fn(),
+    listImageSizeOptions: vi.fn(),
     listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
     listProviderProfiles: vi.fn(() =>
       Promise.resolve([deepseekProfile, openaiProfile, mockLocalProfile]),
@@ -113,6 +119,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.reject(new Error("runtime unavailable"))),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile, openaiProfile])),
       saveConfig: vi.fn(),
@@ -147,6 +154,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile, openaiProfile])),
       saveConfig: vi.fn(),
@@ -198,6 +206,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
@@ -251,6 +260,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([])),
       listProviderProfiles: vi.fn(() => Promise.resolve([mockLocalProfile, openaiProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
@@ -347,6 +357,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi
         .fn()
         .mockResolvedValueOnce([])
@@ -438,6 +449,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([])),
       listProviderProfiles: vi.fn(() => Promise.resolve([mockLocalProfile, openaiProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
@@ -485,6 +497,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile, openaiProfile])),
       saveConfig: vi.fn(),
@@ -805,6 +818,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => {
@@ -849,6 +863,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn((input) => Promise.resolve(deepseekConfig(input.capabilityId))),
@@ -901,6 +916,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() =>
         Promise.resolve([
           mockTextConfig("listing-copy"),
@@ -936,6 +952,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy", "untested"), deepseekConfig("prompt-plan", "untested")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn(),
@@ -977,6 +994,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
@@ -1046,6 +1064,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() =>
         Promise.resolve([
           imageToTextConfig("product-selling-points"),
@@ -1107,6 +1126,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile])),
       saveConfig: vi.fn((input: SaveLocalModelConfigInput) => Promise.resolve(savedConfigFromInput(input))),
@@ -1144,6 +1164,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile, mockLocalProfile])),
       saveConfig: vi.fn(),
@@ -1180,6 +1201,7 @@ describe("ModelConfigPage", () => {
     const modelConfigPort: ModelConfigPort = {
       deleteConfig: vi.fn(),
       getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
       listConfigs: vi.fn(() => Promise.resolve([deepseekConfig("listing-copy"), deepseekConfig("prompt-plan")])),
       listProviderProfiles: vi.fn(() => Promise.resolve([deepseekProfile, mockLocalProfile])),
       saveConfig: vi.fn(),

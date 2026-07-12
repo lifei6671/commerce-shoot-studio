@@ -61,6 +61,23 @@ export type LocalModelConfigView = {
   isDefault: boolean;
 };
 
+export type ImageSizeOption = {
+  id: string;
+  label: string;
+  ratio: string;
+  width: number;
+  height: number;
+  providerValue: string;
+};
+
+export type ModelImageSizeOptions = {
+  capabilityId: ModelCapability["id"];
+  configId: string;
+  providerProfileId: string;
+  model: string;
+  options: ImageSizeOption[];
+};
+
 export type SaveLocalModelConfigInput = {
   id?: string;
   capabilityId: ModelCapability["id"];

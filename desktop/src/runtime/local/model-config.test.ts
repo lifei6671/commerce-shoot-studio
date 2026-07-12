@@ -13,6 +13,22 @@ describe("localModelConfigPort", () => {
     invokeMock.mockReset();
   });
 
+  it("delegates image size capability query to Tauri", async () => {
+    invokeMock.mockResolvedValueOnce({
+      capabilityId: "image-edit",
+      configId: "cfg_image_edit",
+      model: "gpt-image-1",
+      options: [],
+      providerProfileId: "openai",
+    });
+
+    await localModelConfigPort.listImageSizeOptions("image-edit");
+
+    expect(invokeMock).toHaveBeenCalledWith("model_config_list_image_size_options", {
+      capabilityId: "image-edit",
+    });
+  });
+
   it("delegates config commands to Tauri", async () => {
     invokeMock.mockResolvedValueOnce([]);
     invokeMock.mockResolvedValueOnce([{ id: "mock-local" }]);

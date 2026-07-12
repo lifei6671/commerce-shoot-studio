@@ -490,6 +490,8 @@ export interface GenerationPort {
   cancelTask(taskId: string): Promise<GenerationTask>;
   retryTask(taskId: string): Promise<GenerationTask>;
   deleteTask(taskId: string): Promise<void>;
+  replaceResultImage(input: ReplaceGenerationResultImageInput): Promise<void>;
+  deleteResultImage(input: DeleteGenerationResultImageInput): Promise<void>;
 }
 ```
 
@@ -500,6 +502,7 @@ export interface GenerationPort {
 - 重试、取消、删除任务。
 - 提供历史记录。
 - 编排图片生成、图片编辑、服饰试穿、商品详情图等所有会产生资产的能力。
+- 对单张结果图执行原子替换或删除；替换保留原结果槽位，删除只移除该结果关系并软删除不再被可见任务引用的资产。
 
 本地实现：
 
@@ -546,11 +549,11 @@ export interface PromptPlanPort {
 MVP 适用范围：
 
 - 商品详情图采用两阶段流程：先通过 `PromptPlanPort` 创建、编辑并确认方案，再通过 `GenerationPort.createTask` 创建资产型任务。
-- 服饰菜单采用 `GenerationPort` 三阶段链路：用户选择 AI 生成模特时，先创建 `clothing-base-model-generation` 文生图任务，基于性别、年龄、国家/族群、身材与外貌补充生成单人全身的基准模特图；年龄支持婴儿、儿童、青少年、青年、中年、老年，且 Prompt 必须按照所选年龄阶段生成，不得将未成年人错误改写为成年人。随后创建 `clothing-scene-planning` 图生文规划任务，输入服装原图、基准模特全身图、用户选择/自定义场景，输出可展示的场景与动作结构；该规划 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_scene_planning.toml` 配置。规划结果展示到第二步场景选择后默认全部未选中，用户手动选择的场景动作、画幅和角度修改保存在 App 层，生成完成或切换菜单后仍保留。用户确认动作后再创建 `clothing-tryon-generation` 资产型任务，第三步正式出图 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_tryon_generation.toml` 配置，并拼接第一步用户上传的服装图、用户选择的模特图、第二步用户选择的场景、图片比例、拍摄画幅、拍摄角度、拍摄位置和动作要求，明确约束模型严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。基准模特、服饰规划和服饰试穿执行路径要求真实 provider，默认 `mock-local` 只作为测试替身，不能向 UI 展示为真实生成结果。模型配置页的 `图生文` 类别同时覆盖商品卖点提取和服饰场景规划；旧 workspace 只有商品卖点图生文真实配置时，runtime 可按同类别复用该可用配置执行服饰规划。`clothing-base-model-generation` 则必须解析其独立的 `text-to-image` capability，不能复用 `clothing-tryon-generation` 的图生图配置。
+- 服饰菜单采用 `GenerationPort` 三阶段链路：用户选择 AI 生成模特时，先创建 `clothing-base-model-generation` 文生图任务，基于性别、年龄、国家/族群、身材与外貌补充生成单人全身的基准模特图；年龄支持婴儿、儿童、青少年、青年、中年、老年，且 Prompt 必须按照所选年龄阶段生成，不得将未成年人错误改写为成年人。随后创建 `clothing-scene-planning` 图生文规划任务，输入服装原图、基准模特全身图、用户选择/自定义场景，输出可展示的模特特征、场景与动作结构；场景规划 Prompt 不携带出图比例，也不要求模型回传运行时已经确认的参考图索引。该规划 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_scene_planning.toml` 配置。用户已选择场景时，Prompt 按编号要求模型逐字复制并保持顺序；运行时以用户场景标题为事实源，可接受唯一的标题扩写匹配并整体重排场景对象，无法唯一匹配时拒绝结果，避免标题与场景描述、动作错配。规划结果展示到第二步场景选择后默认全部未选中，用户手动选择的场景动作、画幅和角度修改保存在 App 层，生成完成或切换菜单后仍保留。用户确认动作后再创建 `clothing-tryon-generation` 资产型任务，第三步正式出图 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_tryon_generation.toml` 配置，并拼接第一步用户上传的服装图、用户选择的模特图、第二步用户选择的场景、图片比例、拍摄画幅、拍摄角度、拍摄位置和动作要求，明确约束模型严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。基准模特、服饰规划和服饰试穿执行路径要求真实 provider，默认 `mock-local` 只作为测试替身，不能向 UI 展示为真实生成结果。模型配置页的 `图生文` 类别同时覆盖商品卖点提取和服饰场景规划；旧 workspace 只有商品卖点图生文真实配置时，runtime 可按同类别复用该可用配置执行服饰规划。`clothing-base-model-generation` 则必须解析其独立的 `text-to-image` capability，不能复用 `clothing-tryon-generation` 的图生图配置。
 - 基准模特体型 UI 固定为纤细、苗条、精瘦、匀称、健美、运动型、肌肉型、壮硕、结实、丰满、微胖、大码，默认匀称且不提供肥胖；`generation_tasks.input_json` 只冻结短标签，runtime 在渲染 Prompt 时查表注入完整描述。大码复用丰满描述；历史 `标准`、`肌肉` 分别兼容为匀称、肌肉型，未知值原样保留。
 - 基准模特性别 UI 使用男、女短标签；runtime 在渲染 Prompt 时注入对应的自然发型默认描述。用户填写的外貌细节与内置发型描述冲突时，以用户输入为主，不能强行保留冲突的默认发型。
 - 基准模特输出必须严格为 2:3 纵向比例（宽:高=2:3），Prompt 的 system、user 和 `rolelessPrompt` 均明确禁止其它比例。
-- 服饰试穿支持最多 5 张服装参考图和 1 张模特图；runtime 必须按 `userImages` 实际顺序生成 A-F 角色映射，再渲染 system、user、output 和 `rolelessPrompt`，不能固定假设 B 永远是模特。`clothing_tryon_generation.toml` 的 `negative_prompt` 以“负向约束”并入真实发送的 Prompt。
+- 服饰试穿支持最多 5 张服装参考图和 1 张模特图；runtime 必须先把唯一模特图规范化为第 1 张参考图 A，再将 1–5 张服装图依次映射为 B-F，随后渲染 system、user、output 和 `rolelessPrompt`。`clothing_tryon_generation.toml` 的 `negative_prompt` 以“负向约束”并入真实发送的 Prompt。
 - 基准模特年龄 UI 使用婴儿、儿童、青少年、青年、中年、老年短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整年龄阶段描述，user message 与 `rolelessPrompt` 保持一致；未知历史年龄值原样保留。
 - 基准模特人群 UI 使用欧美白人、中国人、东亚人、东南亚人、非裔、中东人、拉丁裔短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整族裔描述，user message 与 `rolelessPrompt` 保持一致；未知历史人群值原样保留。
 - 场景图第一版采用单阶段流程：直接用 `SceneImageGenerationInput.intent` 创建任务，不强制要求 `promptPlanId`。
@@ -731,6 +734,7 @@ export type LocalModelConfigView = {
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
 - `baseUrl` 是单机模式下内置 provider profile 的可持久化配置；Mock Local 固定为 `mock://local`，其他 provider 的 React 页面允许编辑，但 Rust runtime 只接受无凭据、无查询参数的 HTTPS 地址。保存后用于连接探测和真实调用，且 Base URL 变化必须使连接状态回到 `untested`。
 - OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。图生图覆盖 `clothing-tryon-generation` 与 `image-edit`，统一使用 `/v1/images/edits` 的 `multipart/form-data`：仅接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，不裁剪或转码输入图。保存配置、Provider 连接探测和历史配置执行都强制解析该 endpoint，不允许旧 `/v1/responses` 回写。上述行为只在本地 HTTP/单元测试中验证，尚未验证真实 OpenAI 外网调用。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放；Responses `image_generation` 工具链路仍待后续切片。
+- `ModelConfigPort.listImageSizeOptions("image-edit")` 根据当前默认配置的 provider + model 返回受支持尺寸。OpenAI `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini` 返回方形、竖向、横向三组精确像素值；`doubao-seedream-5-0-pro-260628` 返回官方 1K/2K 八种宽高比（包含 21:9）的精确像素值，其他已登记 Seedream 模型继续返回对应 2K/4K 精确像素值。未知模型返回空列表，不在前端猜测。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
 - API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。
@@ -754,7 +758,7 @@ struct ResolvedModelConfig {
 
 `ResolvedModelConfig` 只能存在于 Rust runtime 内存中，不能序列化给前端。
 
-当前 timeout 策略为：`prompt-plan` 使用 300 秒；`clothing-tryon-generation` 和 `image-edit` 使用 60 秒；其余同步能力使用 90 秒。图生图的两项 60 秒策略仅约束真实 Provider 调用，不改变连接超时、下载超时或任务状态机语义。
+当前 timeout 策略为：火山引擎的 `clothing-base-model-generation`、`scene-image-generation`、`product-detail-generation`、`clothing-tryon-generation`、`image-edit` 图片调用使用 300 秒；`prompt-plan` 使用 300 秒；OpenAI 的 `clothing-tryon-generation` / `image-edit` 保持 60 秒；`clothing-scene-planning` 使用 90 秒，其余同步能力使用 90 秒。火山图片连接探测同样使用 300 秒，图生文探测保持 60 秒；Seedream 5.0 Pro 探测使用 `1K`。前端任务无进展窗口使用 360 秒，长于最长 Provider timeout 并预留结果持久化时间；queued 未启动窗口不变。
 
 ### 6.4 ProviderProfileView
 
@@ -1493,7 +1497,7 @@ ai_assist_invocations
 - `input_json` 只能作为输入快照，不能作为资产引用、删除保护和历史查询的结构化事实来源。
 - 输入资产关系必须写入 `generation_task_input_assets`。
 - 任务诊断、阶段流转和失败原因必须写入 `task_events`。
-- 普通任务重试采用“创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务”的策略。服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、目标 `imageId` 和 `imageNo`；该例外不写 `retry_of_task_id` / `attempt_no`。
+- 普通任务重试采用“创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务”的策略。商品与服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、目标 `imageId` 和 `imageNo`；该例外不写 `retry_of_task_id` / `attempt_no`。子任务成功且仅有一个 active generated output 时，runtime 在同一事务内更新或补齐父任务稳定槽位、移除子任务输出关系并隐藏子任务。
 - `generation_tasks.deleted_at` 用于隐藏历史任务，不触发资产物理删除。
 
 SQLite 运行约束：
@@ -1551,7 +1555,7 @@ CREATE INDEX idx_task_events_task_created_at ON task_events(task_id, created_at)
 - 如果 `idempotencyKey` 已存在且任务为 failed，`createTask` 返回 `TASK_RETRY_REQUIRED`，不插入新行，不复用旧任务。
 - 普通任务的用户重试必须调用 `retryTask`。
 - `retryTask` 创建新 task，并写入 `retry_of_task_id` 和 `attempt_no`。
-- 服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务；冻结输入必须包含 `parentTaskId`、目标 `imageId` 和 `imageNo`，且不写 `retry_of_task_id` / `attempt_no`。
+- 商品与服饰单图重试为保留仅含目标项的 `items` 输入，使用 `createTask` 创建子任务；冻结输入必须包含 `parentTaskId`、目标 `imageId` 和 `imageNo`，且不写 `retry_of_task_id` / `attempt_no`；成功后唯一 active output 原子归并父任务稳定槽位并隐藏子任务。
 
 `task_events.detail_json` 只允许保存脱敏后的结构化摘要：
 
@@ -1623,7 +1627,7 @@ finalizing
 
 - UI 不能自行把任务改成成功。
 - Provider 错误必须归一化后写入 `failed`。
-- 普通任务用户重试时创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务；服饰单图重试使用带 `parentTaskId`、目标 `imageId` 和 `imageNo` 的单项 `items` 输入创建子任务，不写 runtime 级 retry 关联。
+- 普通任务用户重试时创建新 task，并用 `retry_of_task_id` / `attempt_no` 关联原任务；商品与服饰单图重试使用带 `parentTaskId`、目标 `imageId` 和 `imageNo` 的单项 `items` 输入创建子任务，不写 runtime 级 retry 关联，成功后把唯一 active output 原子归并父任务稳定槽位并隐藏子任务。
 - 应用启动时，发现 `running` 但无执行上下文的任务，应恢复为 `failed`，错误为 `interrupted`。
 - UI 可以展示阶段式进度，但不要展示假百分比。
 - 每次 `stage` 变化、Provider 调用、轮询、下载、保存、失败都写入 `task_events`。
@@ -1658,8 +1662,14 @@ finalizing
 MVP 并发策略：
 
 ```text
-maxConcurrentTasks = 1
+maxConcurrentTasks = 4（后台执行）
 ```
+
+`maxConcurrentTasks` 只限制外层后台任务，单元测试和同步执行器仍使用 1。容量检查、queued task claim、running 状态和 started 事件在同一个 SQLite `BEGIN IMMEDIATE` 事务内完成，避免并发启动越过上限；async 执行由 supervisor 等待 JoinHandle，异常退出会安全回写 `LOCAL_TASK_EXECUTION_FAILED`，且不会覆盖 cancelled 终态。当前服饰试穿在单个 `clothing-tryon-generation` 任务内按最多 4 个动作一批并发调用，批次完成后再启动下一批。ModelGateway 的 async、stream 和 blocking 真实调用通过进程级 Provider 并发限流池统一约束：OpenAI / 火山引擎最多 3 路，DeepSeek 最多 4 路；localhost、IPv4/IPv6 loopback 按规范化 origin 共用 1 路，不同本地 origin 分池，因此多个外层任务不会将同一本地模型的请求并发相乘；Provider 连接测试不属于 ModelGateway 调用链。
+
+服饰规划与试穿均使用 model-first 输入顺序：唯一模特图必须是第 1 张参考图，其后的 1–5 张为服装参考图。规划输出必须包含完整 `modelFeatures`（性别外观、年龄感、族裔外观、面部、体态、发型、肤色、整体气质和身份锚点）；runtime 在归一化和校验后写入 `output_json` 时只保留顶层 `modelFeatures` 与 `scenes`，不持久化 Provider 附带的分析或校验字段。前端将 `modelFeatures` 与已冻结的输入资产一起传给正式试穿任务，runtime 将其注入试穿 Prompt 以锁定同一模特身份。
+
+真实试穿调用使用 Tokio + async reqwest + JoinSet；结果下载、暂存资产写入和文件落盘转交 blocking worker。每个单项持有的 Provider permit 从 HTTP 提交开始一直保留到对应结果下载、暂存资产记录和文件落盘完成，并在成功、失败、取消或异常退出时通过 RAII 释放，避免外层任务在结果仍写盘时继续穿透 Provider 与本地 IO 限流。单项结果先以 `staged` 资产落盘；同批 Provider 调用结束后，runtime 按 `item_index` 排序，在一个事务内为单项多图分配全局唯一、稳定递增的 `sort_order`，写入输出关系并把资产激活。任务已取消/隐藏或事务失败时，只清理无任何输入、输出引用的暂存资产。单项 Provider 调用、结果保存和失败会相互隔离：Provider 失败保留 typed `TaskModelInvocationError`，item 事件只记录脱敏 code、retryable、HTTP status 和 provider error code，不保存原始 message；取消会中止仍在 JoinSet 中的 Provider 子任务，已进入下载和落盘的结果完成后会在关联前再次校验任务状态。只要至少保存一张结果，父任务仍成功并在输出摘要记录 `failed_item_count`；全部单项均未保存时，父任务按最低 `item_index` 在 Provider 与持久化失败中确定代表错误，再规范化为安全任务错误，避免异步完成顺序改变历史分类。
 
 MVP 不开放用户配置并发数。原因：
 
@@ -1767,7 +1777,7 @@ custom-disabled
 - 所有 URL 入库前脱敏。
 - 导入 workspace 中的 provider 配置必须二次确认。
 - 本地调试诊断日志只记录 provider profile、脱敏后的 Base URL origin、请求/响应状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header、API Key 或用户配置的 Base URL / endpoint 原始路径，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
-- 真实模型调用默认不打印 raw Prompt。仅 Debug 构建且显式设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，允许将 system、user 和 roleless Prompt 输出到终端 `stderr` 供本地排障；该输出不写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建编译期禁用。
+- 真实模型调用默认不打印 raw Prompt。`make dev` 会为 Debug 构建设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1`，将 system、user、roleless Prompt 和归一化模型结果摘要输出到终端 `stderr` 供本地调试；结果摘要必须剔除图片数据、URL、header、凭据和 secret。其它 Debug 启动方式需显式设置该变量。这些输出不写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建编译期禁用。
 - 当前通用执行器分支（不含商品详情图逐项执行路径）在 HTTP 调用前遇到任务校验、资产读取或模型配置失败时，会在终端输出 `task_execution_error` 脱敏摘要；摘要只含 task、capability、错误码、重试标记和归一化 Provider 状态，不含原始输入、Prompt、图片、密钥或原始错误文本。商品详情图逐项执行路径尚未统一接入该摘要。
 
 ### 10.5 Adapter 接口
@@ -2229,7 +2239,7 @@ Task：
 - `createTask` 双击不会创建重复任务。
 - `createTask` 命中 failed 的 `idempotencyKey` 时返回 `TASK_RETRY_REQUIRED`。
 - `retryTask` 创建新 task，并关联 `retry_of_task_id`。
-- 服饰单图重试创建只含目标项的子 task，并在冻结输入中关联 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id`。
+- 商品与服饰单图重试创建只含目标项的子 task，并在冻结输入中关联 `parentTaskId`、`imageId` 和 `imageNo`，不写 `retry_of_task_id`；成功后唯一输出原子归并父任务稳定槽位并隐藏子任务。
 - `deleteTask` 只隐藏任务历史，不物理删除输入资产或生成结果资产。
 - `stage` 变化会写 `task_events`。
 - local mode 下 `task_events` 写入后会触发 runtime 事件。
@@ -2271,5 +2281,5 @@ Windows：
 9. API Key 只能进入 SQLite 本地密钥表；raw prompt、Provider raw response 永不入库。
 10. PromptPlan 当前状态和 Task 执行快照必须分离。
 11. MVP 不开放任意 custom gateway。
-12. MVP 本地任务并发数固定为 1。
+12. MVP 后台本地任务最多并发 4 个；同步执行器和单元测试固定为 1，真实 Provider 调用另受进程级限流池约束。
 13. macOS / Windows 平台差异只能由 runtime adapter 屏蔽，React 页面不写平台分支。

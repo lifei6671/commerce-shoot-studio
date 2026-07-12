@@ -22,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../../../shared/lib/cn";
+import type { ImageSizeOption, ModelImageSizeOptions } from "../../../runtime";
 import type { ProductImageAsset } from "../lib/productImagePicker";
 
 export type PreviewBoard = {
@@ -36,6 +37,9 @@ type PreviewCanvasProps = {
   detailImages?: GeneratedDetailImage[];
   onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
   onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageResize?: (image: GeneratedDetailImage, option: ImageSizeOption) => Promise<void> | void;
+  onLoadImageSizeOptions?: (image: GeneratedDetailImage) => Promise<ModelImageSizeOptions>;
   onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
 };
 
@@ -58,6 +62,7 @@ export type GeneratedDetailImage = {
   assetId?: string;
   assetLocalPath?: string;
   assetRelativePath?: string;
+  height?: number;
   kind?: "image" | "listing-copy" | "source-image";
   listingCopy?: ProductListingCopy;
   copyRequirements?: string;
@@ -71,6 +76,7 @@ export type GeneratedDetailImage = {
   status: "generating" | "complete" | "failed";
   title: string;
   visualConsistency?: Record<string, unknown>;
+  width?: number;
 };
 
 export type ProductListingCopy = {
@@ -95,6 +101,9 @@ export function PreviewCanvas({
   detailImages = [],
   onImageRewrite,
   onImageRetry,
+  onImageDelete,
+  onImageResize,
+  onLoadImageSizeOptions,
   onListingCopyRetry,
 }: PreviewCanvasProps) {
   if (detailImages.length > 0) {
@@ -103,6 +112,9 @@ export function PreviewCanvas({
         detailImages={detailImages}
         onImageRewrite={onImageRewrite}
         onImageRetry={onImageRetry}
+        onImageDelete={onImageDelete}
+        onImageResize={onImageResize}
+        onLoadImageSizeOptions={onLoadImageSizeOptions}
         onListingCopyRetry={onListingCopyRetry}
       />
     );
@@ -157,11 +169,17 @@ function GeneratedDetailCanvas({
   detailImages,
   onImageRewrite,
   onImageRetry,
+  onImageDelete,
+  onImageResize,
+  onLoadImageSizeOptions,
   onListingCopyRetry,
 }: {
   detailImages: GeneratedDetailImage[];
   onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
   onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageResize?: (image: GeneratedDetailImage, option: ImageSizeOption) => Promise<void> | void;
+  onLoadImageSizeOptions?: (image: GeneratedDetailImage) => Promise<ModelImageSizeOptions>;
   onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
 }) {
   const [removedImageIds, setRemovedImageIds] = useState<Set<string>>(() => new Set());
@@ -169,12 +187,23 @@ function GeneratedDetailCanvas({
   const [regeneratingImageIds, setRegeneratingImageIds] = useState<Set<string>>(() => new Set());
   const [imageRewriteTargetId, setImageRewriteTargetId] = useState<string | null>(null);
   const [imageRewritePrompt, setImageRewritePrompt] = useState("");
+  const [resizeTargetId, setResizeTargetId] = useState<string | null>(null);
+  const [resizeOptions, setResizeOptions] = useState<ModelImageSizeOptions | null>(null);
+  const [selectedResizeOptionId, setSelectedResizeOptionId] = useState<string | null>(null);
+  const [resizeLoading, setResizeLoading] = useState(false);
+  const [resizeSubmitting, setResizeSubmitting] = useState(false);
+  const [resizeError, setResizeError] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [bulkDeleteSubmitting, setBulkDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [textEditTargetId, setTextEditTargetId] = useState<string | null>(null);
   const [listingCopyTargetId, setListingCopyTargetId] = useState<string | null>(null);
   const [textEditValues, setTextEditValues] = useState(() => defaultEditableTexts);
   const [longPreviewOpen, setLongPreviewOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const resizeRequestIdRef = useRef(0);
   const visibleImages = detailImages
     .filter((image) => !removedImageIds.has(image.id))
     .map((image) => (regeneratingImageIds.has(image.id) ? { ...image, status: "generating" as const } : image));
@@ -190,6 +219,8 @@ function GeneratedDetailCanvas({
   const previewImage = completedImages.find((image) => image.id === previewImageId) ?? null;
   const previewImageIndex = previewImage ? completedImages.findIndex((image) => image.id === previewImage.id) : -1;
   const imageRewriteTarget = completedImages.find((image) => image.id === imageRewriteTargetId) ?? null;
+  const resizeTarget = completedImages.find((image) => image.id === resizeTargetId) ?? null;
+  const deleteTarget = visibleImageItems.find((image) => image.id === deleteTargetId) ?? null;
   const textEditTarget = completedImages.find((image) => image.id === textEditTargetId) ?? null;
   const listingCopyTarget =
     visibleImages.find((image) => image.id === listingCopyTargetId && image.kind === "listing-copy" && image.status === "complete") ??
@@ -257,15 +288,23 @@ function GeneratedDetailCanvas({
     });
   }
 
-  function deleteSelectedImages() {
-    if (selectedImageIds.size === 0) {
+  async function deleteSelectedImages() {
+    if (selectedImageIds.size === 0 || bulkDeleteSubmitting) {
       return;
     }
 
-    setRemovedImageIds((currentIds) => new Set([...currentIds, ...selectedImageIds]));
-    setSelectedImageIds(new Set());
-    if (previewImageId && selectedImageIds.has(previewImageId)) {
-      closeImagePreview();
+    const selectedTargets = visibleImageItems.filter((image) => selectedImageIds.has(image.id));
+    setBulkDeleteSubmitting(true);
+    try {
+      for (const image of selectedTargets) {
+        try {
+          await deleteImageWithPersistence(image);
+        } catch (error) {
+          showCopyToast(errorMessage(error, "图片删除失败。"));
+        }
+      }
+    } finally {
+      setBulkDeleteSubmitting(false);
     }
   }
 
@@ -281,6 +320,13 @@ function GeneratedDetailCanvas({
     }
   }
 
+  async function deleteImageWithPersistence(image: GeneratedDetailImage) {
+    if (onImageDelete) {
+      await onImageDelete(image);
+    }
+    deleteImageById(image.id);
+  }
+
   function openImageRewriteDialog(image: GeneratedDetailImage) {
     setImageRewriteTargetId(image.id);
     setImageRewritePrompt("");
@@ -289,6 +335,109 @@ function GeneratedDetailCanvas({
   function closeImageRewriteDialog() {
     setImageRewriteTargetId(null);
     setImageRewritePrompt("");
+  }
+
+  async function openResizeDialog(image: GeneratedDetailImage) {
+    if (resizeSubmitting) {
+      return;
+    }
+    const requestId = resizeRequestIdRef.current + 1;
+    resizeRequestIdRef.current = requestId;
+    setResizeTargetId(image.id);
+    setResizeOptions(null);
+    setSelectedResizeOptionId(null);
+    setResizeError(null);
+    setResizeLoading(true);
+    try {
+      if (!onLoadImageSizeOptions) {
+        throw new Error("当前页面未提供图片尺寸能力。");
+      }
+      const loadedOptions = await onLoadImageSizeOptions(image);
+      if (resizeRequestIdRef.current !== requestId) {
+        return;
+      }
+      setResizeOptions(loadedOptions);
+      const defaultOption = findClosestImageSizeOption(image, loadedOptions.options);
+      setSelectedResizeOptionId(defaultOption?.id ?? null);
+      if (loadedOptions.options.length === 0) {
+        setResizeError("当前模型暂未配置可用的图片尺寸。");
+      }
+    } catch (error) {
+      if (resizeRequestIdRef.current === requestId) {
+        setResizeError(errorMessage(error, "图片尺寸选项加载失败。"));
+      }
+    } finally {
+      if (resizeRequestIdRef.current === requestId) {
+        setResizeLoading(false);
+      }
+    }
+  }
+
+  function closeResizeDialog() {
+    if (resizeSubmitting) {
+      return;
+    }
+    resizeRequestIdRef.current += 1;
+    setResizeTargetId(null);
+    setResizeOptions(null);
+    setSelectedResizeOptionId(null);
+    setResizeError(null);
+  }
+
+  async function submitResize() {
+    const target = resizeTarget;
+    const option = resizeOptions?.options.find((item) => item.id === selectedResizeOptionId);
+    if (!target || !option || !onImageResize || resizeSubmitting) {
+      return;
+    }
+
+    setResizeSubmitting(true);
+    setResizeTargetId(null);
+    markImageRegenerating(target.id);
+    try {
+      await onImageResize(target, option);
+      setResizeOptions(null);
+      setSelectedResizeOptionId(null);
+      setResizeError(null);
+    } catch (error) {
+      showCopyToast(errorMessage(error, "图片尺寸修改失败。"));
+    } finally {
+      setResizeSubmitting(false);
+      setRegeneratingImageIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(target.id);
+        return nextIds;
+      });
+    }
+  }
+
+  function openDeleteDialog(image: GeneratedDetailImage) {
+    setDeleteTargetId(image.id);
+    setDeleteError(null);
+  }
+
+  function closeDeleteDialog() {
+    if (deleteSubmitting) {
+      return;
+    }
+    setDeleteTargetId(null);
+    setDeleteError(null);
+  }
+
+  async function confirmDeleteImage() {
+    if (!deleteTarget || deleteSubmitting) {
+      return;
+    }
+    setDeleteSubmitting(true);
+    setDeleteError(null);
+    try {
+      await deleteImageWithPersistence(deleteTarget);
+      setDeleteTargetId(null);
+    } catch (error) {
+      setDeleteError(errorMessage(error, "图片删除失败。"));
+    } finally {
+      setDeleteSubmitting(false);
+    }
   }
 
   function markImageRegenerating(targetId: string) {
@@ -364,6 +513,8 @@ function GeneratedDetailCanvas({
       markImageRegenerating(target.id);
       try {
         await onImageRewrite(target, instruction);
+      } catch (error) {
+        showCopyToast(errorMessage(error, "AI 改图失败。"));
       } finally {
         setRegeneratingImageIds((currentIds) => {
           const nextIds = new Set(currentIds);
@@ -480,8 +631,27 @@ function GeneratedDetailCanvas({
   }
 
   async function downloadImage(image: GeneratedDetailImage, index: number) {
-    const bytes = await blobToBytes(await createGeneratedImageBlob(image, index));
-    await saveBytes(`${sanitizeFilename(image.title)}.png`, bytes, "png");
+    try {
+      if (image.src) {
+        const response = await fetch(image.src);
+        if (!response.ok) {
+          throw new Error(`读取生成资产失败：${response.status}`);
+        }
+        const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+        const extension = generatedImageFileExtension(image, mimeType);
+        await saveBytes(
+          `${sanitizeFilename(image.title)}.${extension}`,
+          new Uint8Array(await response.arrayBuffer()),
+          extension,
+        );
+        return;
+      }
+
+      const bytes = await blobToBytes(await createGeneratedImageBlob(image, index));
+      await saveBytes(`${sanitizeFilename(image.title)}.png`, bytes, "png");
+    } catch {
+      showCopyToast("图片下载失败，请重试");
+    }
   }
 
   async function downloadLongImage() {
@@ -525,7 +695,7 @@ function GeneratedDetailCanvas({
         <GeneratedFailedResultCard
           image={image}
           key={image.id}
-          onDelete={() => deleteImageById(image.id)}
+          onDelete={() => openDeleteDialog(image)}
           onRetry={() => void retryImage(image)}
           onSelect={(selected) => toggleImageSelection(image.id, selected)}
           selected={selectedImageIds.has(image.id)}
@@ -543,6 +713,8 @@ function GeneratedDetailCanvas({
         onOpenPreview={openImagePreview}
         onSelect={(selected) => toggleImageSelection(image.id, selected)}
         onDownload={() => void downloadImage(image, imageIndex)}
+        onDelete={() => openDeleteDialog(image)}
+        onResize={() => void openResizeDialog(image)}
         onRewrite={() => openImageRewriteDialog(image)}
         onEditText={() => openTextEditDialog(image)}
         selected={selectedImageIds.has(image.id)}
@@ -630,11 +802,12 @@ function GeneratedDetailCanvas({
                   <button
                     aria-label="删除所选图片"
                     className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-white px-2.5 text-[12px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors hover:bg-slate-50"
-                    onClick={deleteSelectedImages}
+                    disabled={bulkDeleteSubmitting}
+                    onClick={() => void deleteSelectedImages()}
                     type="button"
                   >
                     <Trash2 className="size-3.5" />
-                    删除
+                    {bulkDeleteSubmitting ? "删除中…" : "删除"}
                   </button>
                   {selectedImages.length > 0 ? (
                     <button
@@ -756,6 +929,132 @@ function GeneratedDetailCanvas({
           {toastMessage}
         </div>
       ) : null}
+      {resizeTarget
+        ? createPortal(
+            <div
+              aria-label="修改图片尺寸"
+              aria-modal="true"
+              className="fixed inset-0 z-[118] flex items-center justify-center bg-slate-950/26 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeResizeDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-[380px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.16),0_8px_18px_rgba(15,23,42,0.08)]">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-[16px] font-semibold text-slate-950">修改图片尺寸</h2>
+                    {resizeOptions ? (
+                      <p className="mt-1 text-[12px] text-slate-500">当前模型：{resizeOptions.model}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    aria-label="关闭修改图片尺寸"
+                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    disabled={resizeSubmitting}
+                    onClick={closeResizeDialog}
+                    type="button"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+                <div className="mt-4 space-y-2">
+                  {resizeLoading ? <p className="py-5 text-center text-[13px] text-slate-500">正在读取模型尺寸…</p> : null}
+                  {!resizeLoading
+                    ? resizeOptions?.options.map((option) => {
+                        const label = imageSizeOptionLabel(option);
+                        return (
+                          <label
+                            className={cn(
+                              "flex cursor-pointer items-center gap-3 rounded-[9px] border px-3 py-2.5 text-[13px] transition-colors",
+                              selectedResizeOptionId === option.id
+                                ? "border-app-blue bg-blue-50 text-slate-950"
+                                : "border-slate-200 text-slate-600 hover:bg-slate-50",
+                            )}
+                            key={option.id}
+                          >
+                            <input
+                              aria-label={label}
+                              checked={selectedResizeOptionId === option.id}
+                              className="size-3.5 text-app-blue focus:ring-app-blue/20"
+                              name="generated-image-size"
+                              onChange={() => setSelectedResizeOptionId(option.id)}
+                              type="radio"
+                            />
+                            <span>{label}</span>
+                          </label>
+                        );
+                      })
+                    : null}
+                  {resizeError ? <p className="rounded-[8px] bg-red-50 px-3 py-2 text-[12px] text-red-700">{resizeError}</p> : null}
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <button
+                    className="h-8 rounded-control bg-slate-100 px-3 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                    disabled={resizeSubmitting}
+                    onClick={closeResizeDialog}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="h-8 rounded-control bg-[#1f1f21] px-4 text-[13px] font-medium text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                    disabled={resizeLoading || resizeSubmitting || !selectedResizeOptionId || Boolean(resizeError)}
+                    onClick={() => void submitResize()}
+                    type="button"
+                  >
+                    {resizeSubmitting ? "修改中…" : "修改"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {deleteTarget
+        ? createPortal(
+            <div
+              aria-label="删除图片"
+              aria-modal="true"
+              className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/32 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeDeleteDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-[340px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.18)]">
+                <h2 className="text-[16px] font-semibold text-slate-950">删除图片</h2>
+                <p className="mt-2 text-[13px] leading-6 text-slate-600">
+                  确认删除“{deleteTarget.title}”吗？该图片会从本次结果和生成记录中移除。
+                </p>
+                {deleteError ? <p className="mt-3 rounded-[8px] bg-red-50 px-3 py-2 text-[12px] text-red-700">{deleteError}</p> : null}
+                <div className="mt-5 flex justify-end gap-2">
+                  <button
+                    className="h-8 rounded-control bg-slate-100 px-3 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                    disabled={deleteSubmitting}
+                    onClick={closeDeleteDialog}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="h-8 rounded-control bg-red-600 px-4 text-[13px] font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-red-300"
+                    disabled={deleteSubmitting}
+                    onClick={() => void confirmDeleteImage()}
+                    type="button"
+                  >
+                    {deleteSubmitting ? "删除中…" : "确认删除"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {listingCopyTarget?.listingCopy
         ? createPortal(
             <ProductListingCopyDialog
@@ -1375,6 +1674,8 @@ function GeneratedDetailImageCard({
   onOpenPreview,
   onSelect,
   onDownload,
+  onDelete,
+  onResize,
   onRewrite,
   onEditText,
   selected,
@@ -1382,8 +1683,10 @@ function GeneratedDetailImageCard({
   image: GeneratedDetailImage;
   index: number;
   onDownload: () => void;
+  onDelete: () => void;
   onEditText: () => void;
   onOpenPreview: (image: GeneratedDetailImage) => void;
+  onResize: () => void;
   onRewrite: () => void;
   onSelect: (selected: boolean) => void;
   selected: boolean;
@@ -1436,9 +1739,9 @@ function GeneratedDetailImageCard({
             />
           </div>
           <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-            <IconActionButton icon={Maximize2} label={`修改尺寸 ${image.title}`} />
+            <IconActionButton icon={Maximize2} label={`修改尺寸 ${image.title}`} onClick={onResize} />
             <IconActionButton icon={Download} label={`下载 ${image.title}`} onClick={onDownload} />
-            <IconActionButton icon={Trash2} label={`删除 ${image.title}`} />
+            <IconActionButton icon={Trash2} label={`删除 ${image.title}`} onClick={onDelete} />
           </div>
           <div className="absolute inset-x-0 bottom-0 h-[104px] bg-[linear-gradient(180deg,transparent,rgba(15,23,42,0.58)_24%,rgba(15,23,42,0.88))] px-2.5 pb-2.5 text-white">
             <h2
@@ -1512,6 +1815,60 @@ function IconActionButton({ icon: Icon, label, onClick }: { icon: LucideIcon; la
 
 const generatedResultFilePrefix = "生成结果-2026-06-29-1552";
 const generatedImageSize = { height: 600, width: 970 };
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function imageSizeOptionLabel(option: ImageSizeOption) {
+  return option.label.replace(/(\d)x(\d)/g, "$1×$2");
+}
+
+function findClosestImageSizeOption(image: GeneratedDetailImage, options: ImageSizeOption[]) {
+  if (options.length === 0) {
+    return undefined;
+  }
+  const currentRatio =
+    image.width && image.height
+      ? image.width / image.height
+      : parseImageRatio(image.ratio) ?? parseImageRatio(options[0].ratio) ?? 1;
+
+  return options.reduce((closest, option) => {
+    const closestRatio = parseImageRatio(closest.ratio) ?? closest.width / closest.height;
+    const optionRatio = parseImageRatio(option.ratio) ?? option.width / option.height;
+    return Math.abs(Math.log(currentRatio / optionRatio)) < Math.abs(Math.log(currentRatio / closestRatio))
+      ? option
+      : closest;
+  });
+}
+
+function parseImageRatio(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const [width, height] = value.split(":").map(Number);
+  if (!width || !height || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return width / height;
+}
+
+function generatedImageFileExtension(image: GeneratedDetailImage, mimeType: string) {
+  const pathExtension = image.assetRelativePath
+    ?.split(/[?#]/, 1)[0]
+    .match(/\.([a-zA-Z0-9]+)$/)?.[1]
+    ?.toLowerCase();
+  if (pathExtension && ["png", "jpg", "jpeg", "webp"].includes(pathExtension)) {
+    return pathExtension;
+  }
+  if (mimeType === "image/jpeg") {
+    return "jpg";
+  }
+  if (mimeType === "image/webp") {
+    return "webp";
+  }
+  return "png";
+}
 
 const generatedImageBackgrounds = [
   "bg-[linear-gradient(135deg,#111827,#334155_38%,#94a3b8_39%,#0f172a_68%,#020617)]",

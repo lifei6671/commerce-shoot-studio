@@ -556,6 +556,17 @@ fn create_clothing_tryon_task(idempotency_key: &str) -> CreateGenerationTaskInpu
         input: Some(serde_json::json!({
             "kind": "clothing-tryon-generation",
             "ratio": "3:4",
+            "modelFeatures": {
+                "gender": "女",
+                "ageRange": "青年",
+                "ethnicityAppearance": "东亚面孔",
+                "face": "柔和鹅蛋脸，五官清晰",
+                "body": "匀称身材，肩颈自然",
+                "hair": "黑色中长直发",
+                "skinTone": "自然暖白肤色",
+                "overallStyle": "简约都市气质",
+                "identityAnchor": ["保持脸部身份", "保持自然身材比例"]
+            },
             "items": [
                 {
                     "id": "scene-1-pose-1",

@@ -9,7 +9,9 @@ use crate::domain::errors::{
 };
 use crate::infrastructure::database::WorkspaceDatabase;
 use crate::infrastructure::providers::deterministic::DeterministicModelGatewayAdapter;
-use crate::infrastructure::providers::http_model_gateway::HttpModelGatewayAdapter;
+use crate::infrastructure::providers::http_model_gateway::{
+    HttpModelGatewayAdapter, ProviderInvocationLease,
+};
 use crate::services::model_config::{
     default_resolved_config_for_capability, provider_profile, ModelConfigError,
     ResolvedModelConfig, CAPABILITIES,
@@ -32,6 +34,21 @@ pub struct ModelGatewayResult {
     pub model: String,
     pub output_text: Option<String>,
     pub output_json: serde_json::Value,
+}
+
+pub(crate) struct LeasedModelGatewayResult {
+    result: ModelGatewayResult,
+    _lease: ProviderInvocationLease,
+}
+
+impl LeasedModelGatewayResult {
+    pub(crate) fn result(&self) -> &ModelGatewayResult {
+        &self.result
+    }
+
+    pub(crate) fn into_result(self) -> ModelGatewayResult {
+        self.result
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +152,132 @@ impl ModelGatewayService {
             .map_err(model_config_error_from_gateway_error)?;
 
         self.invoke_with_resolved_context(workspace_directory, request, &adapter, resolved_context)
+    }
+
+    pub(crate) fn invoke_real_provider_leased(
+        &self,
+        workspace_directory: &Path,
+        request: ModelGatewayRequest,
+    ) -> Result<LeasedModelGatewayResult, ModelConfigError> {
+        let resolved_context =
+            resolve_gateway_context(workspace_directory, &request.capability_id)?;
+        if resolved_context.config.provider_profile_id == "mock-local" {
+            return Err(ModelConfigError::Validation(no_available_model_message()));
+        }
+        let diagnostic_log_path = Some(
+            workspace_directory
+                .join("logs")
+                .join("model-gateway-diagnostics.jsonl"),
+        );
+        let adapter = HttpModelGatewayAdapter::new(diagnostic_log_path)
+            .map_err(model_config_error_from_gateway_error)?;
+        let database =
+            WorkspaceDatabase::open(workspace_directory).map_err(ModelConfigError::from)?;
+        let invocation_id = create_invocation_id();
+        let input_summary = summarize_input(&request.input);
+        let leased_adapter_result = adapter
+            .invoke_blocking_leased(ModelGatewayAdapterRequest {
+                api_key: resolved_context.api_key.as_deref(),
+                base_url: &resolved_context.base_url,
+                capability_id: &request.capability_id,
+                endpoint_path: &resolved_context.endpoint_path,
+                input: &request.input,
+                input_summary: &input_summary,
+                model: &resolved_context.config.view.model,
+                provider_profile_id: &resolved_context.config.provider_profile_id,
+            })
+            .map_err(model_config_error_from_gateway_error)?;
+        let (adapter_result, lease) = leased_adapter_result.into_parts();
+        let request_summary_json = serde_json::json!({
+            "inputSummary": input_summary,
+        });
+        let output_summary_json = summarize_output(&adapter_result);
+        insert_invocation(
+            &database,
+            &invocation_id,
+            &request.capability_id,
+            &resolved_context.config.provider_profile_id,
+            &resolved_context.config.view.model,
+            &request_summary_json,
+            &output_summary_json,
+            adapter_result.usage_json.as_ref(),
+        )?;
+
+        Ok(LeasedModelGatewayResult {
+            result: ModelGatewayResult {
+                invocation_id,
+                capability_id: request.capability_id,
+                provider_profile_id: resolved_context.config.provider_profile_id,
+                model: resolved_context.config.view.model,
+                output_text: adapter_result.output_text,
+                output_json: adapter_result.output_json,
+            },
+            _lease: lease,
+        })
+    }
+
+    /// 真实 HTTP Provider 的异步入口。返回值持有 Provider lease，调用方必须在结果落盘后再释放。
+    pub(crate) async fn invoke_real_provider_async(
+        &self,
+        workspace_directory: &Path,
+        request: ModelGatewayRequest,
+    ) -> Result<LeasedModelGatewayResult, ModelConfigError> {
+        let resolved_context =
+            resolve_gateway_context(workspace_directory, &request.capability_id)?;
+        if resolved_context.config.provider_profile_id == "mock-local" {
+            return Err(ModelConfigError::Validation(no_available_model_message()));
+        }
+        let diagnostic_log_path = Some(
+            workspace_directory
+                .join("logs")
+                .join("model-gateway-diagnostics.jsonl"),
+        );
+        let adapter = HttpModelGatewayAdapter::new(diagnostic_log_path)
+            .map_err(model_config_error_from_gateway_error)?;
+        let database =
+            WorkspaceDatabase::open(workspace_directory).map_err(ModelConfigError::from)?;
+        let invocation_id = create_invocation_id();
+        let input_summary = summarize_input(&request.input);
+        let leased_adapter_result = adapter
+            .invoke_async(ModelGatewayAdapterRequest {
+                api_key: resolved_context.api_key.as_deref(),
+                base_url: &resolved_context.base_url,
+                capability_id: &request.capability_id,
+                endpoint_path: &resolved_context.endpoint_path,
+                input: &request.input,
+                input_summary: &input_summary,
+                model: &resolved_context.config.view.model,
+                provider_profile_id: &resolved_context.config.provider_profile_id,
+            })
+            .await
+            .map_err(model_config_error_from_gateway_error)?;
+        let (adapter_result, lease) = leased_adapter_result.into_parts();
+        let request_summary_json = serde_json::json!({
+            "inputSummary": input_summary,
+        });
+        let output_summary_json = summarize_output(&adapter_result);
+        insert_invocation(
+            &database,
+            &invocation_id,
+            &request.capability_id,
+            &resolved_context.config.provider_profile_id,
+            &resolved_context.config.view.model,
+            &request_summary_json,
+            &output_summary_json,
+            adapter_result.usage_json.as_ref(),
+        )?;
+
+        Ok(LeasedModelGatewayResult {
+            result: ModelGatewayResult {
+                invocation_id,
+                capability_id: request.capability_id,
+                provider_profile_id: resolved_context.config.provider_profile_id,
+                model: resolved_context.config.view.model,
+                output_text: adapter_result.output_text,
+                output_json: adapter_result.output_json,
+            },
+            _lease: lease,
+        })
     }
 
     pub fn stream_real_provider<F>(

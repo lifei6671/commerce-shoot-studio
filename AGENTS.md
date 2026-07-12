@@ -126,7 +126,7 @@ Rust 代码按以下方向组织：
 - 日志、`task_events.detail_json`、settings、asset、导出默认包和前端 DTO 都不能包含 API Key 明文。
 - raw prompt、系统 Prompt、Provider raw request、Provider raw response 永不入库。
 - 模型“测试连接”的控制台诊断只能输出脱敏摘要，且不得持久化；禁止输出请求/响应原文、Authorization、Cookie、原始 header、API Key、Prompt、图片数据或用户配置的 Base URL / endpoint 原始路径。
-- 真实模型调用默认不输出 raw Prompt。仅 Debug 构建且显式设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1` 时，可将 system、user 和 roleless Prompt 输出到终端 `stderr`；该例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建必须编译期禁用。
+- 真实模型调用默认不输出 raw Prompt。仓库 `make dev` 会在 Debug 构建中设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1`，将 system、user 和 roleless Prompt 输出到终端 `stderr`；同一开关也允许输出归一化后的模型结果摘要，但必须移除图片数据、URL、header、凭据和 secret。其它 Debug 启动方式需显式设置该变量。这些例外不得写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建必须编译期禁用。
 - SQLite 只保存 workspace 内相对路径，不保存用户原始绝对路径。
 - workspace / DB 文件要做权限加固：macOS/Linux 目录建议 `0700`、DB 文件建议 `0600`；Windows 使用当前用户 ACL。
 
@@ -231,9 +231,10 @@ M7 真实场景生图闭环
 - DeepSeek 当前只开放文生文能力。
 - OpenAI-compatible 文生文默认走 `/chat/completions`。
 - OpenAI 图生图的 `clothing-tryon-generation` 与 `image-edit` 固定走 `/v1/images/edits` 的 `multipart/form-data`；只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，输入图不裁剪、不转码。保存配置、Provider 连接探测和历史配置执行都必须强制解析该 endpoint，不能回写旧 `/v1/responses`；当前仅有本地 HTTP/单元测试证据，未验证真实 OpenAI 外网调用。
-- 火山引擎文生图和图生图使用 Ark `/api/v3/images/generations`；图生图测试图片可用很小的 base64 图片。
+- 火山引擎文生图和图生图使用 Ark `/api/v3/images/generations`；图生图测试图片可用很小的 base64 图片。连接探测必须按精确 Seedream 模型能力构造参数：`doubao-seedream-5-0-pro-260628` 不支持组图和流式字段，禁止发送 `sequential_image_generation`、`sequential_image_generation_options`、`stream`，并使用 `1K` 降低探测耗时和费用；Seedream 5.0 Lite、4.5、4.0 使用单图非流式探测，发送 `sequential_image_generation: "disabled"`、`stream: false` 且不发送组图 options；未登记模型使用不含这些可选字段的最小请求，不猜测能力。单张参考图发送字符串，多张参考图发送数组。火山引擎文生图/图生图连接探测和真实图片调用使用 300 秒总超时，图生文探测保持 60 秒；OpenAI 图片调用仍使用既有时限。前端生成任务无进展窗口为 360 秒，必须长于最长 Provider timeout，queued 未启动窗口保持不变。
 - 火山引擎图生文使用 Ark `/api/v3/responses`，图片理解输入按官方 `input_image` + `input_text` 结构组织。
 - React 页面不要让用户自由编辑真实执行 endpoint；Rust runtime 对 OpenAI / 火山引擎的特殊图像能力强制解析内置 endpoint，其他类别使用已保存的 endpoint path 或 provider profile 默认值。
+- 图片尺寸选项必须由 Rust runtime 按当前 `image-edit` 的 provider + model 精确返回；React 只展示选项并回传 provider 原始 `size` 值，不能自行维护模型尺寸表。`doubao-seedream-5-0-pro-260628` 只暴露官方 1K/2K 八种宽高比（包含 21:9）的精确像素选项，不沿用旧 Seedream 2K/4K 表；未知模型不猜测尺寸，直接返回空选项。
 
 ## Rust 规范
 
@@ -278,7 +279,8 @@ M7 真实场景生图闭环
 - M2 已支持导入图片到 workspace 相对路径、sha256 去重、PNG/JPEG 尺寸读取、`staged/active/deleted` 生命周期、列表/详情、reveal、软删除和 GC。
 - M3 的任务历史后端基础已建立：`generation_tasks` / `task_events` baseline schema、Rust `GenerationService` / Tauri command、前端 `localGenerationPort` adapter。
 - M3 已支持 create/get/list/getTaskDetail、idempotency key、failed idempotency 返回 `TASK_RETRY_REQUIRED`、input asset relations、创建任务时激活输入资产、retry/cancel/delete 基础语义。
-- 普通任务重试必须调用 `retryTask`，由 runtime 写入 `retry_of_task_id` / `attempt_no`；服饰单图重试为保留单项 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、该项 `imageId` 和 `imageNo`，不伪造 runtime 级 retry 关联。
+- 普通任务重试必须调用 `retryTask`，由 runtime 写入 `retry_of_task_id` / `attempt_no`；商品与服饰单图重试为保留单项 `items` 输入，使用 `createTask` 创建子任务，并在冻结输入中持久化 `parentTaskId`、该项 `imageId` 和 `imageNo`，不伪造 runtime 级 retry 关联。历史恢复必须优先原样使用冻结输入中的稳定 `imageId`，仅为旧任务合成 fallback。商品/服饰单图重试成功后必须在同一事务内把唯一 active output 归并到父任务稳定槽位并隐藏子任务；失败槽位删除即使没有 output asset，也必须按稳定 `imageId` / `imageNo` 写删除 tombstone，保证历史恢复不复活卡片，后续晚到的重试结果也必须拒绝归并。同槽位旧派生任务被替换或删除时，仍处于 `queued` / `running` 的任务必须原子转为 `cancelled` 并隐藏，执行器的 stage、结果持久化和终态回写都必须拒绝隐藏任务。
+- 生成历史的展示状态以当前结果槽为事实源，不修改父 `generation_task` 的原始审计终态：全部结果槽成功显示“已完成”，成功与失败并存显示“部分失败”，全部失败显示“失败”，非 stale 的 `queued` / `running` 任务显示“生成中”。
 - M5 的模型配置基础已建立：`model_configs` / `model_secrets` baseline schema、内置 provider profile allowlist、Rust `ModelConfigService` / `SecretService` / `CapabilityService`、前端 local adapters 和模型配置页真实 UI。
 - 默认内置 `mock-local` provider，并为 `listing-copy`、`prompt-plan`、`viral-style-analysis`、`scene-image-generation`、`product-detail-generation`、`clothing-tryon-generation`、`image-edit` 生成默认 mock 配置；mock 不触发真实模型调用。
 - 当前 provider allowlist 是 `mock-local`、`openai`、`deepseek`、`volcengine`。DeepSeek 第一版只开放文生文能力；OpenAI 和火山引擎可作为多能力 provider profile。

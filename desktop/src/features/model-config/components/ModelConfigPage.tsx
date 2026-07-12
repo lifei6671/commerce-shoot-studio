@@ -68,12 +68,14 @@ export const modelCatalog = {
       "doubao-seed-1-8-251228",
     ],
     textToImage: [
+      "doubao-seedream-5-0-pro-260628",
       "doubao-seedream-5-0-260128",
       "doubao-seedream-5-0-lite-260128",
       "doubao-seedream-4-5-251128",
       "doubao-seedream-4-0-250828",
     ],
     imageToImage: [
+      "doubao-seedream-5-0-pro-260628",
       "doubao-seedream-5-0-260128",
       "doubao-seedream-5-0-lite-260128",
       "doubao-seedream-4-5-251128",

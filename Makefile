@@ -24,7 +24,7 @@ install:
 	$(NPM) install
 
 dev:
-	AppleLanguages='(zh-Hans, en)' LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 $(NPM) run tauri -- dev -- -- -AppleLanguages '(zh-Hans, en)'
+	COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1 AppleLanguages='(zh-Hans, en)' LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8 $(NPM) run tauri -- dev -- -- -AppleLanguages '(zh-Hans, en)'
 
 build:
 	$(NPM) run tauri -- build --no-bundle

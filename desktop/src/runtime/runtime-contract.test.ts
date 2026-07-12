@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { runtimeContractVersion } from "./index";
+import { localModelConfigPort } from "./local/model-config";
 import type {
   AssetPage,
   CreateGenerationTaskInput,
   GenerationTask,
   LocalModelConfigView,
+  ModelImageSizeOptions,
   ModelCapability,
   ProviderProfileView,
   RuntimeClient,
@@ -74,6 +76,23 @@ describe("Runtime public contract", () => {
       secretStatus,
     };
 
+    const imageSizeOptions: ModelImageSizeOptions = {
+      capabilityId: "image-edit",
+      configId: config.id,
+      model: "gpt-image-1",
+      options: [
+        {
+          height: 1536,
+          id: "1024x1536",
+          label: "竖图 2:3 · 1024x1536",
+          providerValue: "1024x1536",
+          ratio: "2:3",
+          width: 1024,
+        },
+      ],
+      providerProfileId: "openai",
+    };
+
     const providerProfile: ProviderProfileView = {
       baseUrl: "https://api.openai.com",
       customEnabled: false,
@@ -132,6 +151,7 @@ describe("Runtime public contract", () => {
           }),
         ),
         deleteTask: vi.fn(() => Promise.resolve()),
+        deleteResultImage: vi.fn(() => Promise.resolve()),
         getTask: vi.fn(() => Promise.resolve(task)),
         getTaskDetail: vi.fn(() =>
           Promise.resolve({
@@ -150,6 +170,7 @@ describe("Runtime public contract", () => {
           }),
         ),
         retryTask: vi.fn(() => Promise.resolve({ ...task, attemptNo: 2, retryOfTaskId: task.id })),
+        replaceResultImage: vi.fn(() => Promise.resolve()),
         runNext: vi.fn(() => Promise.resolve({ invocationId: "inv_1", taskId: task.id })),
         runTask: vi.fn(() => Promise.resolve({ invocationId: "inv_1", taskId: task.id })),
       },
@@ -157,6 +178,7 @@ describe("Runtime public contract", () => {
         deleteConfig: vi.fn(() => Promise.resolve()),
         getConfig: vi.fn(() => Promise.resolve(config)),
         listConfigs: vi.fn(() => Promise.resolve([config])),
+        listImageSizeOptions: vi.fn(() => Promise.resolve(imageSizeOptions)),
         listProviderProfiles: vi.fn(() => Promise.resolve([providerProfile])),
         saveConfig: vi.fn((input: SaveLocalModelConfigInput) =>
           Promise.resolve({
@@ -232,6 +254,8 @@ describe("Runtime public contract", () => {
       workspace: "scene",
     });
     await expect(fakeRuntime.modelConfig.listProviderProfiles()).resolves.toHaveLength(1);
+    await expect(fakeRuntime.modelConfig.listImageSizeOptions("image-edit")).resolves.toEqual(imageSizeOptions);
+    expect(typeof localModelConfigPort.listImageSizeOptions).toBe("function");
     await expect(fakeRuntime.secrets.getSecretStatus({ providerProfileId: "openai" })).resolves.toMatchObject({
       configured: true,
       storage: "sqlite-local",

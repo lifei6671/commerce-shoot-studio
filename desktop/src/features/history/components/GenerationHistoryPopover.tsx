@@ -12,7 +12,7 @@ export type GenerationRecord = {
   promptPlanId?: string;
   persistedTaskId?: string;
   relatedTaskIds?: string[];
-  status: "complete" | "failed" | "generating";
+  status: "complete" | "failed" | "generating" | "partial";
   title: string;
   workspace: "product" | "clothing";
 };
@@ -39,6 +39,7 @@ const statusLabelMap: Record<GenerationRecord["status"], string> = {
   complete: "已完成",
   failed: "失败",
   generating: "生成中",
+  partial: "部分失败",
 };
 
 export function GenerationHistoryPopover({

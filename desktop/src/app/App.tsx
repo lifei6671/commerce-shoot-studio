@@ -51,16 +51,28 @@ import { moduleOptions, navItems, previewBoards } from "./studioData";
 import type { ProductImageAsset } from "../features/generation/lib/productImagePicker";
 import { localAssetPort } from "../runtime/local/assets";
 import { localGenerationPort } from "../runtime/local/generation";
-import type { GenerationTaskDetail, GenerationTaskInputAssetInput } from "../runtime";
+import { localModelConfigPort } from "../runtime/local/model-config";
+import type { GenerationTaskDetail, GenerationTaskInputAssetInput, ImageSizeOption } from "../runtime";
 import { useToast } from "../shared/ui/toast";
 
 const generationCompleteDelayMs = 3000;
 const productGenerationPollIntervalMs = 800;
 const productGenerationMaxQueuedPollCount = 15;
-const productGenerationMaxUnchangedPollCount = 120;
+export const productGenerationMaxUnchangedDurationMs = 360_000;
+const productGenerationMaxUnchangedPollCount =
+  productGenerationMaxUnchangedDurationMs / productGenerationPollIntervalMs;
 const restoredRunningTaskStaleMs = 10 * 60 * 1000;
 const scenePlanDraftDelayMs = 2500;
 const historyRestoreDetailConcurrency = 4;
+
+async function cleanupUnmergedRetryTask(taskId: string, message: string) {
+  try {
+    await localGenerationPort.deleteTask(taskId);
+    return message;
+  } catch {
+    return `${message}；未归并重试任务清理失败，请从生成记录中手动删除。`;
+  }
+}
 
 function createDefaultProductGenerationSettings(): ProductGenerationSettings {
   return {
@@ -77,6 +89,11 @@ type ProductGenerationInputSnapshot = {
   productImages: ProductImageAsset[];
   productPrompt: string;
   settings: ProductGenerationSettings;
+};
+
+type ClothingScenePlanningContext = {
+  inputAssets: GenerationTaskInputAssetInput[];
+  modelFeatures: unknown;
 };
 
 function createProductGenerationInputSnapshot(
@@ -189,7 +206,7 @@ export function App() {
   const clothingScenePlanningRequestIdRef = useRef(0);
   const clothingScenePlanningTaskIdsRef = useRef(new Set<string>());
   const clothingScenePlanningCancellationsRef = useRef(new Map<string, Promise<boolean>>());
-  const clothingScenePlanningInputAssetsRef = useRef<GenerationTaskInputAssetInput[] | null>(null);
+  const clothingScenePlanningContextRef = useRef<ClothingScenePlanningContext | null>(null);
   const clothingBaseModelGenerationRequestIdRef = useRef(0);
   const clothingBaseModelGenerationTaskIdRef = useRef<string | null>(null);
   const clothingBaseModelCancellationRef = useRef<{ promise: Promise<boolean>; taskId: string } | null>(null);
@@ -251,7 +268,7 @@ export function App() {
 
   function invalidateClothingScenePlanning() {
     clothingScenePlanningRequestIdRef.current += 1;
-    clothingScenePlanningInputAssetsRef.current = null;
+    clothingScenePlanningContextRef.current = null;
     void cancelTrackedClothingPlanningTasks();
   }
 
@@ -998,7 +1015,222 @@ export function App() {
     );
   }
 
+  function removeGeneratedImageById(imageId: string, workspace: "clothing" | "product") {
+    if (workspace === "product") {
+      setProductDetailImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    } else {
+      setClothingSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    }
+    setGenerationRecords((currentRecords) =>
+      currentRecords.map((record) => {
+        if (record.workspace !== workspace || !record.images.some((image) => image.id === imageId)) {
+          return record;
+        }
+        const images = record.images.filter((image) => image.id !== imageId);
+        return {
+          ...record,
+          images,
+          status: deriveProductGenerationRecordStatus(images),
+        };
+      }),
+    );
+  }
+
+  function findGeneratedImageRecord(imageId: string) {
+    return generationRecords.find(
+      (record) =>
+        (record.workspace === "product" || record.workspace === "clothing") &&
+        record.images.some((image) => image.id === imageId),
+    );
+  }
+
+  async function loadGeneratedImageSizeOptions() {
+    return localModelConfigPort.listImageSizeOptions("image-edit");
+  }
+
+  async function findPersistedResultAsset(parentTaskId: string, imageNo: number) {
+    const detail = await localGenerationPort.getTaskDetail(parentTaskId);
+    return detail.outputAssets.find((item) => item.sortOrder === imageNo - 1)?.asset;
+  }
+
+  async function resolvePersistedResultAsset(parentTaskId: string, imageNo: number) {
+    const result = await findPersistedResultAsset(parentTaskId, imageNo);
+    if (!result) {
+      throw new Error("当前图片在原生成任务中缺少可操作的结果资产。");
+    }
+    return result;
+  }
+
+  async function resizeGeneratedImage(image: GeneratedDetailImage, option: ImageSizeOption) {
+    const parentRecord = findGeneratedImageRecord(image.id);
+    if (!parentRecord?.persistedTaskId || !image.assetId) {
+      const message = "当前图片缺少可替换的任务或资产信息。";
+      throw new Error(message);
+    }
+
+    const imageNo =
+      image.imageNo ??
+      parentRecord.images
+        .filter((recordImage) => recordImage.kind !== "source-image" && recordImage.kind !== "listing-copy")
+        .findIndex((recordImage) => recordImage.id === image.id) +
+        1;
+    if (imageNo <= 0) {
+      const message = "当前图片缺少稳定的结果序号。";
+      throw new Error(message);
+    }
+
+    const persistedAsset = await resolvePersistedResultAsset(parentRecord.persistedTaskId, imageNo);
+
+    const basePrompt = image.prompt?.trim() || image.sceneDescription?.trim() || `保持“${image.title}”的现有内容一致。`;
+    const resolvedPrompt = `${basePrompt}\n\n尺寸修改要求：保持当前图片的人物、商品、服饰、场景、动作、构图信息和文字内容一致，仅将画布调整为 ${option.ratio}（${option.width}×${option.height}）。不得替换主体或重新设计画面。`;
+    const task = await localGenerationPort.createTask({
+      idempotencyKey: `${image.id}:resize:${option.providerValue}:${Date.now()}`,
+      workspace: parentRecord.workspace,
+      kind: "image-edit",
+      title: `修改尺寸 ${image.title}`,
+      input: {
+        kind: "result-image-resize",
+        parentTaskId: parentRecord.persistedTaskId,
+        targetImageId: image.id,
+        imageNo,
+        sourceAssetId: image.assetId,
+        basePrompt,
+        ratio: option.ratio,
+        size: option.providerValue,
+        prompt: {
+          messages: [
+            {
+              role: "system",
+              content: "你是专业商拍图片尺寸调整助手。必须严格保持参考图主体、身份、服饰、商品、场景、动作、构图和文字信息一致，只调整画布比例与尺寸。",
+            },
+            {
+              role: "user",
+              content: resolvedPrompt,
+            },
+          ],
+          rolelessPrompt: resolvedPrompt,
+        },
+      },
+      inputAssets: [{ assetId: image.assetId, role: "reference", sortOrder: 0 }],
+    });
+
+    let unmergedSucceededTaskId: string | null = null;
+    try {
+      await requestGenerationTaskStart(task.id, "图片尺寸修改任务未能启动。");
+      const replacement = await pollGeneratedImageReplacement(task.id);
+      unmergedSucceededTaskId = task.id;
+      await localGenerationPort.replaceResultImage({
+        taskId: parentRecord.persistedTaskId,
+        currentAssetId: persistedAsset.id,
+        displayedAssetId: image.assetId,
+        replacementTaskId: task.id,
+        replacementAssetId: replacement.asset.id,
+      });
+      unmergedSucceededTaskId = null;
+      const updateImage = (currentImage: GeneratedDetailImage): GeneratedDetailImage => ({
+        ...currentImage,
+        assetId: replacement.asset.id,
+        assetLocalPath: replacement.asset.localPath,
+        assetRelativePath: replacement.asset.relativePath,
+        errorMessage: undefined,
+        height: replacement.asset.height ?? option.height,
+        ratio: option.ratio,
+        src: replacement.asset.url ?? replacement.asset.localPath,
+        status: "complete",
+        width: replacement.asset.width ?? option.width,
+      });
+      if (parentRecord.workspace === "product") {
+        updateProductDetailImageById(image.id, updateImage);
+      } else {
+        updateClothingSceneImageById(image.id, updateImage);
+      }
+      showToast({ message: "图片尺寸已修改", variant: "success" });
+    } catch (error) {
+      let message = error instanceof Error ? error.message : "图片尺寸修改失败。";
+      if (unmergedSucceededTaskId) {
+        message = await cleanupUnmergedRetryTask(unmergedSucceededTaskId, message);
+      }
+      throw new Error(message);
+    }
+  }
+
+  async function deleteGeneratedImage(image: GeneratedDetailImage) {
+    const parentRecord = findGeneratedImageRecord(image.id);
+    if (!parentRecord?.persistedTaskId) {
+      const message = "当前图片缺少可删除的任务信息。";
+      showToast({ message, variant: "error" });
+      throw new Error(message);
+    }
+    const imageNo =
+      image.imageNo ??
+      parentRecord.images
+        .filter((recordImage) => recordImage.kind !== "source-image" && recordImage.kind !== "listing-copy")
+        .findIndex((recordImage) => recordImage.id === image.id) +
+        1;
+    if (imageNo <= 0) {
+      const message = "当前图片缺少稳定的结果序号。";
+      showToast({ message, variant: "error" });
+      throw new Error(message);
+    }
+    try {
+      const persistedAsset = await findPersistedResultAsset(parentRecord.persistedTaskId, imageNo);
+      await localGenerationPort.deleteResultImage({
+        taskId: parentRecord.persistedTaskId,
+        imageId: image.id,
+        imageNo,
+        ...(persistedAsset ? { assetId: persistedAsset.id } : {}),
+        ...(image.assetId ? { displayedAssetId: image.assetId } : {}),
+      });
+      removeGeneratedImageById(image.id, parentRecord.workspace);
+      showToast({ message: "图片已删除", variant: "success" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "图片删除失败。";
+      showToast({ message, variant: "error" });
+      throw error;
+    }
+  }
+
+  async function pollGeneratedImageReplacement(taskId: string, operationName = "图片尺寸修改") {
+    let queuedPollCount = 0;
+    let unchangedPollCount = 0;
+    let lastPollSignature = "";
+    for (;;) {
+      const detail = await localGenerationPort.getTaskDetail(taskId);
+      const outputAsset = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
+      if (detail.task.status === "succeeded" && outputAsset) {
+        return outputAsset;
+      }
+      if (detail.task.status === "failed" || detail.task.status === "cancelled" || detail.task.status === "interrupted") {
+        throw new Error(detail.task.error?.message ?? `${operationName}失败。`);
+      }
+      if (isTaskTerminal(detail.task.status)) {
+        throw new Error(`${operationName}结果缺少可用图片。`);
+      }
+
+      const signature = createTaskPollSignature(detail);
+      if (signature === lastPollSignature) {
+        unchangedPollCount += 1;
+      } else {
+        lastPollSignature = signature;
+        unchangedPollCount = 0;
+      }
+      queuedPollCount = detail.task.status === "queued" ? queuedPollCount + 1 : 0;
+      if (detail.task.status === "queued") {
+        await requestGenerationTaskStart(taskId, `${operationName}任务未能启动。`);
+      }
+      if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
+        throw new Error(`${operationName}任务长时间未启动，请检查后台任务状态。`);
+      }
+      if (unchangedPollCount >= productGenerationMaxUnchangedPollCount) {
+        throw new Error(`${operationName}任务长时间无进展，请检查模型配置或后台日志。`);
+      }
+      await delay(productGenerationPollIntervalMs);
+    }
+  }
+
   async function retryClothingSceneImage(image: GeneratedDetailImage) {
+    const imageBeforeRetry = { ...image };
+    let unmergedSucceededTaskId: string | null = null;
     try {
       const parentRecord = generationRecords.find(
         (record) => record.workspace === "clothing" && record.images.some((recordImage) => recordImage.id === image.id),
@@ -1076,21 +1308,39 @@ export function App() {
 
       let retryImages: GeneratedDetailImage[] = [{ ...image, errorMessage: undefined, status: "generating" }];
       await requestGenerationTaskStart(task.id, "服饰场景图重新生成任务未能启动。");
-      await pollClothingImageTask(
+      const retryDetail = await pollClothingImageTask(
         task.id,
         () => retryImages,
         (nextImages) => {
           retryImages = nextImages;
-          const retriedImage = nextImages[0];
-          if (retriedImage) {
-            updateClothingSceneImageById(image.id, () => retriedImage);
-          }
         },
       );
+      const retryOutput = [...retryDetail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
+      if (!retryOutput) {
+        throw new Error("服饰场景图重新生成结果缺少可用图片。");
+      }
+      unmergedSucceededTaskId = task.id;
+      const currentAsset = await findPersistedResultAsset(parentRecord.persistedTaskId, imageNo);
+      await localGenerationPort.replaceResultImage({
+        taskId: parentRecord.persistedTaskId,
+        ...(currentAsset ? { currentAssetId: currentAsset.id } : {}),
+        ...(image.assetId ? { displayedAssetId: image.assetId } : {}),
+        replacementTaskId: task.id,
+        replacementAssetId: retryOutput.asset.id,
+      });
+      unmergedSucceededTaskId = null;
+      const retriedImage = retryImages[0];
+      if (!retriedImage) {
+        throw new Error("服饰场景图重新生成结果缺少可展示图片。");
+      }
+      updateClothingSceneImageById(image.id, () => retriedImage);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "服饰场景图重新生成失败。";
-      updateClothingSceneImageById(image.id, (currentImage) => ({
-        ...currentImage,
+      let message = error instanceof Error ? error.message : "服饰场景图重新生成失败。";
+      if (unmergedSucceededTaskId) {
+        message = await cleanupUnmergedRetryTask(unmergedSucceededTaskId, message);
+      }
+      updateClothingSceneImageById(image.id, () => ({
+        ...imageBeforeRetry,
         errorMessage: message,
         status: "failed",
       }));
@@ -1099,10 +1349,14 @@ export function App() {
   }
 
   async function retryProductDetailImage(image: GeneratedDetailImage) {
+    const imageBeforeRetry = { ...image };
     const parentRecord = generationRecords.find(
       (record) => record.workspace === "product" && record.images.some((recordImage) => recordImage.id === image.id),
     );
     const parentTaskId = parentRecord?.persistedTaskId;
+    if (!parentTaskId) {
+      throw new Error("找不到商品详情图所属任务，无法重新生成。");
+    }
     const referenceImages =
       image.referenceImages && image.referenceImages.length > 0
         ? image.referenceImages
@@ -1162,6 +1416,7 @@ export function App() {
       status: "generating",
     }));
 
+    let unmergedSucceededTaskId: string | null = null;
     try {
       const task = await localGenerationPort.createTask({
         idempotencyKey: `${image.id}:retry:${Date.now()}`,
@@ -1171,7 +1426,7 @@ export function App() {
         promptPlanId: promptPlanSnapshot.planId,
         input: {
           kind: "product-detail-generation",
-          ...(parentTaskId ? { parentTaskId } : {}),
+          parentTaskId,
           sourceImageNames: referenceImages.map((referenceImage) => referenceImage.originalName).filter(Boolean),
           productSellingPoints: productPrompt,
           platform: productGenerationSettings.platform,
@@ -1205,16 +1460,41 @@ export function App() {
         startResult,
         taskId: task.id,
       });
-      await pollProductSingleImageTask(task.id, image.id, referenceImages);
+      const retryOutput = await pollProductSingleImageTask(task.id, image.id);
+      unmergedSucceededTaskId = task.id;
+      const currentAsset = await findPersistedResultAsset(parentTaskId, imageNo);
+      await localGenerationPort.replaceResultImage({
+        taskId: parentTaskId,
+        ...(currentAsset ? { currentAssetId: currentAsset.id } : {}),
+        ...(image.assetId ? { displayedAssetId: image.assetId } : {}),
+        replacementTaskId: task.id,
+        replacementAssetId: retryOutput.asset.id,
+      });
+      unmergedSucceededTaskId = null;
+      updateProductDetailImageById(image.id, () => ({
+        ...imageBeforeRetry,
+        assetId: retryOutput.asset.id,
+        assetLocalPath: retryOutput.asset.localPath,
+        assetRelativePath: retryOutput.asset.relativePath,
+        errorMessage: undefined,
+        height: retryOutput.asset.height,
+        referenceImages,
+        src: retryOutput.asset.url ?? retryOutput.asset.localPath,
+        status: "complete",
+        width: retryOutput.asset.width,
+      }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "单图重新生成失败。";
-      updateProductDetailImageById(image.id, (currentImage) => ({
-        ...currentImage,
+      let message = error instanceof Error ? error.message : "单图重新生成失败。";
+      if (unmergedSucceededTaskId) {
+        message = await cleanupUnmergedRetryTask(unmergedSucceededTaskId, message);
+      }
+      updateProductDetailImageById(image.id, () => ({
+        ...imageBeforeRetry,
         errorMessage: message,
         referenceImages,
         status: "failed",
       }));
-      throw error;
+      showToast({ message: `单图重新生成失败：${message}`, variant: "error" });
     }
   }
 
@@ -1342,7 +1622,6 @@ export function App() {
   async function pollProductSingleImageTask(
     taskId: string,
     imageId: string,
-    referenceImages: GeneratedReferenceImage[],
   ) {
     let lastPollSignature = "";
     let queuedPollCount = 0;
@@ -1372,18 +1651,11 @@ export function App() {
       if (imageTaskDetail.task.status === "queued") {
         await requestGenerationTaskStart(taskId, "单图重新生成任务未能启动。");
       }
-      if (firstOutputAsset?.asset.url || firstOutputAsset?.asset.localPath) {
-        updateProductDetailImageById(imageId, (currentImage) => ({
-          ...currentImage,
-          assetId: firstOutputAsset.asset.id,
-          assetLocalPath: firstOutputAsset.asset.localPath,
-          assetRelativePath: firstOutputAsset.asset.relativePath,
-          errorMessage: undefined,
-          referenceImages,
-          src: firstOutputAsset.asset.url ?? firstOutputAsset.asset.localPath,
-          status: "complete",
-        }));
-        return;
+      if (
+        imageTaskDetail.task.status === "succeeded" &&
+        (firstOutputAsset?.asset.url || firstOutputAsset?.asset.localPath)
+      ) {
+        return firstOutputAsset;
       }
       if (imageTaskDetail.task.status === "failed") {
         throw new Error(imageTaskDetail.task.error?.message ?? "单图重新生成失败。");
@@ -1420,6 +1692,12 @@ export function App() {
     if (inputAssets.length === 0) {
       throw new Error("AI 改图缺少可复用的生成图资产，请等待图片生成完成后再试。");
     }
+    const parentRecord = generationRecords.find(
+      (record) => record.workspace === "product" && record.images.some((recordImage) => recordImage.id === image.id),
+    );
+    if (!parentRecord?.persistedTaskId || !image.assetId) {
+      throw new Error("AI 改图缺少原生成任务或结果资产，无法建立可追踪的替换关系。");
+    }
     const task = await localGenerationPort.createTask({
       idempotencyKey: `${image.id}:rewrite:${Date.now()}`,
       workspace: "product",
@@ -1427,6 +1705,10 @@ export function App() {
       title: `微调 ${image.title}`,
       input: {
         kind: "product-detail-image-rewrite",
+        parentTaskId: parentRecord.persistedTaskId,
+        targetImageId: image.id,
+        imageNo,
+        sourceAssetId: image.assetId,
         sourceImageId: image.id,
         sourceImageNo: imageNo,
         sourceImageTitle: image.title,
@@ -1452,23 +1734,49 @@ export function App() {
     if (!task?.id) {
       throw new Error("AI 改图任务创建失败。");
     }
-    const parentRecord = generationRecords.find(
-      (record) => record.workspace === "product" && record.images.some((recordImage) => recordImage.id === image.id),
-    );
-    if (parentRecord) {
-      setGenerationRecords((currentRecords) =>
-        currentRecords.map((record) =>
-          record.id === parentRecord.id
-            ? {
-                ...record,
-                relatedTaskIds: Array.from(new Set([...(record.relatedTaskIds ?? []), task.id])),
-              }
-            : record,
+    setGenerationRecords((currentRecords) =>
+      currentRecords.map((record) =>
+        record.id === parentRecord.id
+          ? {
+              ...record,
+              relatedTaskIds: Array.from(new Set([...(record.relatedTaskIds ?? []), task.id])),
+            }
+          : record,
         ),
-      );
+    );
+    let unmergedSucceededTaskId: string | null = null;
+    try {
+      await requestGenerationTaskStart(task.id, "AI 改图任务未能启动。");
+      const replacement = await pollGeneratedImageReplacement(task.id, "AI 改图");
+      unmergedSucceededTaskId = task.id;
+      const persistedAsset = await resolvePersistedResultAsset(parentRecord.persistedTaskId, imageNo);
+      await localGenerationPort.replaceResultImage({
+        taskId: parentRecord.persistedTaskId,
+        currentAssetId: persistedAsset.id,
+        displayedAssetId: image.assetId,
+        replacementTaskId: task.id,
+        replacementAssetId: replacement.asset.id,
+      });
+      unmergedSucceededTaskId = null;
+      updateProductDetailImageById(image.id, (currentImage) => ({
+        ...currentImage,
+        assetId: replacement.asset.id,
+        assetLocalPath: replacement.asset.localPath,
+        assetRelativePath: replacement.asset.relativePath,
+        errorMessage: undefined,
+        height: replacement.asset.height,
+        referenceImages,
+        src: replacement.asset.url ?? replacement.asset.localPath,
+        status: "complete",
+        width: replacement.asset.width,
+      }));
+    } catch (error) {
+      let message = error instanceof Error ? error.message : "AI 改图失败。";
+      if (unmergedSucceededTaskId) {
+        message = await cleanupUnmergedRetryTask(unmergedSucceededTaskId, message);
+      }
+      throw new Error(message);
     }
-    await requestGenerationTaskStart(task.id, "AI 改图任务未能启动。");
-    await pollProductSingleImageTask(task.id, image.id, referenceImages);
   }
 
   function handleOpenGenerationRecord(record: GenerationRecord) {
@@ -1524,7 +1832,7 @@ export function App() {
   async function handleGenerateClothingScenePlan(config: ClothingConfigState) {
     const requestId = clothingScenePlanningRequestIdRef.current + 1;
     clothingScenePlanningRequestIdRef.current = requestId;
-    clothingScenePlanningInputAssetsRef.current = null;
+    clothingScenePlanningContextRef.current = null;
     setClothingSceneDrafting(true);
     setClothingScenePlanning(true);
     setClothingSceneDrafts([]);
@@ -1570,13 +1878,16 @@ export function App() {
         throw new Error(detail.task.error?.message ?? "服饰场景规划失败。");
       }
       const drafts = createClothingSceneDraftsFromTaskDetail(detail);
-      clothingScenePlanningInputAssetsRef.current = inputAssets.map((asset) => ({ ...asset }));
+      clothingScenePlanningContextRef.current = {
+        inputAssets: inputAssets.map((asset) => ({ ...asset })),
+        modelFeatures: readClothingModelFeaturesFromTaskDetail(detail),
+      };
       setClothingSceneDrafts(drafts);
     } catch (error) {
       if (clothingScenePlanningRequestIdRef.current !== requestId) {
         return;
       }
-      clothingScenePlanningInputAssetsRef.current = null;
+      clothingScenePlanningContextRef.current = null;
       setClothingSceneDrafting(false);
       setClothingSceneDrafts([]);
       showToast({ message: `服饰场景规划失败：${error instanceof Error ? error.message : String(error)}`, variant: "error" });
@@ -1677,13 +1988,13 @@ export function App() {
   }
 
   function handleGenerateClothingScenes(drafts: ClothingSceneDraft[]) {
-    const plannedInputAssets = clothingScenePlanningInputAssetsRef.current;
-    if (!plannedInputAssets) {
+    const planningContext = clothingScenePlanningContextRef.current;
+    if (!planningContext) {
       setClothingSceneDrafting(false);
       showToast({ message: "服饰场景规划输入已失效，请重新规划。", variant: "error" });
       return;
     }
-    const inputAssets = plannedInputAssets.map((asset) => ({ ...asset }));
+    const inputAssets = planningContext.inputAssets.map((asset) => ({ ...asset }));
     const recordId = createGenerationRecordId("clothing");
     const sourceImage: GeneratedDetailImage = {
       id: `${recordId}-source`,
@@ -1692,8 +2003,9 @@ export function App() {
       status: "complete" as const,
       title: "原图",
     };
-    const generatedImages = drafts.map((draft) => ({
+    const generatedImages = drafts.map((draft, index) => ({
       id: `${recordId}-${draft.id}`,
+      imageNo: index + 1,
       prompt: draft.description,
       ratio: clothingConfig.ratio,
       sceneDescription: draft.description,
@@ -1721,7 +2033,7 @@ export function App() {
     setClothingSceneImages(images);
     setClothingSceneGenerating(true);
     setHistoryOpen(false);
-    void runClothingSceneGeneration(recordId, drafts, images, inputAssets);
+    void runClothingSceneGeneration(recordId, drafts, images, inputAssets, planningContext.modelFeatures);
   }
 
   async function runClothingSceneGeneration(
@@ -1729,6 +2041,7 @@ export function App() {
     drafts: ClothingSceneDraft[],
     resultItems: GeneratedDetailImage[],
     inputAssets: GenerationTaskInputAssetInput[],
+    modelFeatures: unknown,
   ) {
     let latestImages = resultItems;
     const publishImages = (nextImages: GeneratedDetailImage[], status: GenerationRecord["status"] = "generating") => {
@@ -1754,19 +2067,23 @@ export function App() {
         idempotencyKey: `${recordId}:clothing-tryon-generation`,
         input: {
           kind: "clothing-tryon-generation",
+          modelFeatures,
           ratio: clothingConfig.ratio,
-          items: drafts.map((draft) => ({
+          items: drafts.map((draft, index) => ({
             cameraSetup: {
               framing: draft.framing,
               perspective: draft.angle,
               shootingPosition: draft.shootingPosition,
             },
             id: draft.id,
+            imageId: resultItems[index + 1].id,
+            imageNo: index + 1,
             poseAction: draft.description,
             ratio: clothingConfig.ratio,
             scene: draft.scene,
             scenePromptSegment: draft.scenePromptSegment,
             sceneVisualAnchor: draft.sceneVisualAnchor,
+            sortOrder: index,
           })),
         },
         inputAssets,
@@ -1833,7 +2150,7 @@ export function App() {
         throw new Error(taskDetail.task.error?.message ?? "服饰场景图生成失败。");
       }
       if (final) {
-        return;
+        return taskDetail;
       }
       if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
         throw new Error("服饰场景图任务长时间未启动，请检查后台任务执行状态。");
@@ -2111,7 +2428,14 @@ export function App() {
           )
         ) : isClothingWorkspace ? (
           clothingSceneImages.length > 0 ? (
-            <PreviewCanvas boards={previewBoards} detailImages={clothingSceneImages} onImageRetry={retryClothingSceneImage} />
+            <PreviewCanvas
+              boards={previewBoards}
+              detailImages={clothingSceneImages}
+              onImageDelete={deleteGeneratedImage}
+              onImageResize={resizeGeneratedImage}
+              onImageRetry={retryClothingSceneImage}
+              onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
+            />
           ) : (
             <ClothingPreviewCanvas />
           )
@@ -2119,8 +2443,11 @@ export function App() {
           <PreviewCanvas
             boards={previewBoards}
             detailImages={productDetailImages}
+            onImageDelete={deleteGeneratedImage}
+            onImageResize={resizeGeneratedImage}
             onImageRewrite={persistProductImageRewriteTask}
             onImageRetry={retryProductDetailImage}
+            onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
             onListingCopyRetry={retryProductListingCopy}
           />
         )
@@ -2236,20 +2563,28 @@ function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDeta
 
   const stale = isRestoredTaskStale(detail.task);
   const referenceImages = readReferenceImagesFromTaskDetail(detail, input);
-  const outputAssets = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder);
+  const outputAssetBySortOrder = new Map(detail.outputAssets.map((item) => [item.sortOrder, item] as const));
+  const deletedSortOrders = deletedResultSortOrders(detail);
   const inputItems = readClothingGenerationInputItems(input);
-  const itemCount = Math.max(inputItems.length, outputAssets.length);
+  const itemCount = Math.max(
+    inputItems.length,
+    ...detail.outputAssets.map((item) => item.sortOrder + 1),
+  );
   const shouldFailMissingOutput = stale || isTaskTerminal(detail.task.status);
-  const restoredImages = Array.from({ length: itemCount }, (_, index): GeneratedDetailImage => {
+  const restoredImages = Array.from({ length: itemCount }, (_, index): GeneratedDetailImage | null => {
+    if (deletedSortOrders.has(index)) {
+      return null;
+    }
     const inputItem = inputItems[index];
-    const outputAsset = outputAssets[index];
+    const outputAsset = outputAssetBySortOrder.get(index);
     const title = inputItem?.scene || `服饰场景 ${index + 1}`;
-    const imageId = createRestoredDetailImageId(detail.task.id, inputItem?.id, index);
+    const imageId = inputItem?.imageId || createRestoredDetailImageId(detail.task.id, inputItem?.id, index);
     if (outputAsset?.asset.url || outputAsset?.asset.localPath) {
       return {
         assetId: outputAsset.asset.id,
         assetLocalPath: outputAsset.asset.localPath,
         assetRelativePath: outputAsset.asset.relativePath,
+        height: outputAsset.asset.height,
         id: imageId,
         imageNo: index + 1,
         prompt: inputItem?.poseAction,
@@ -2259,6 +2594,7 @@ function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDeta
         src: outputAsset.asset.url ?? outputAsset.asset.localPath,
         status: "complete",
         title,
+        width: outputAsset.asset.width,
       };
     }
 
@@ -2273,7 +2609,7 @@ function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDeta
       status: shouldFailMissingOutput ? "failed" : "generating",
       title,
     };
-  });
+  }).filter((image): image is GeneratedDetailImage => image !== null);
   if (restoredImages.length === 0) {
     return null;
   }
@@ -2532,20 +2868,42 @@ function readTaskPromptPlanId(detail: GenerationTaskDetail) {
   return detail.task.promptPlanId || readPromptPlanSnapshotId(detail.promptPlanSnapshot);
 }
 
+function deletedResultSortOrders(detail: GenerationTaskDetail) {
+  return new Set(
+    detail.events.flatMap((event) => {
+      if (event.eventType !== "task.result-image-deleted" || !event.detail || typeof event.detail !== "object") {
+        return [];
+      }
+      const sortOrder = (event.detail as Record<string, unknown>).sortOrder;
+      return typeof sortOrder === "number" && Number.isInteger(sortOrder) && sortOrder >= 0 ? [sortOrder] : [];
+    }),
+  );
+}
+
 function restoreGeneratedDetailImages(
   detail: GenerationTaskDetail,
   options: { referenceImages?: GeneratedReferenceImage[]; stale?: boolean } = {},
 ): GeneratedDetailImage[] {
+  const input = detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {};
+  const inputItems = Array.isArray(input.items) ? input.items : [];
   const planItems = readPromptPlanSnapshotItems(detail.promptPlanSnapshot);
-  const outputAssets = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder);
-  const itemCount = Math.max(planItems.length, outputAssets.length);
+  const outputAssetBySortOrder = new Map(detail.outputAssets.map((item) => [item.sortOrder, item] as const));
+  const deletedSortOrders = deletedResultSortOrders(detail);
+  const itemCount = Math.max(planItems.length, ...detail.outputAssets.map((item) => item.sortOrder + 1));
   const shouldFailMissingOutput = options.stale || isTaskTerminal(detail.task.status);
 
-  const restoredImages = Array.from({ length: itemCount }, (_, index) => {
+  const restoredImages = Array.from({ length: itemCount }, (_, index): GeneratedDetailImage | null => {
+    if (deletedSortOrders.has(index)) {
+      return null;
+    }
     const planItem = planItems[index];
-    const outputAsset = outputAssets[index];
+    const inputItem = inputItems[index] && typeof inputItems[index] === "object"
+      ? (inputItems[index] as Record<string, unknown>)
+      : {};
+    const outputAsset = outputAssetBySortOrder.get(index);
     const displayTitle = planItem?.title || `详情图 ${index + 1}`;
-    const imageId = createRestoredDetailImageId(detail.task.id, planItem?.id, index);
+    const imageId =
+      readOutputString(inputItem.imageId) || createRestoredDetailImageId(detail.task.id, planItem?.id, index);
     if (outputAsset?.asset.url || outputAsset?.asset.localPath) {
       return {
         assetId: outputAsset.asset.id,
@@ -2554,13 +2912,16 @@ function restoreGeneratedDetailImages(
         id: imageId,
         groupId: planItem?.groupId,
         groupTitle: planItem?.groupTitle,
+        height: outputAsset.asset.height,
         prompt: planItem?.imagePrompt,
+        ratio: planItem?.ratio,
         imageNo: planItem?.imageNo ?? index + 1,
         referenceImages: options.referenceImages,
         sceneDescription: planItem?.sceneDescription,
         src: outputAsset.asset.url ?? outputAsset.asset.localPath,
         status: "complete" as const,
         title: displayTitle,
+        width: outputAsset.asset.width,
       };
     }
 
@@ -2571,12 +2932,13 @@ function restoreGeneratedDetailImages(
       groupTitle: planItem?.groupTitle,
       imageNo: planItem?.imageNo ?? index + 1,
       prompt: planItem?.imagePrompt,
+      ratio: planItem?.ratio,
       referenceImages: options.referenceImages,
       sceneDescription: planItem?.sceneDescription,
       status: shouldFailMissingOutput ? ("failed" as const) : ("generating" as const),
       title: displayTitle,
     };
-  });
+  }).filter((image): image is GeneratedDetailImage => image !== null);
 
   return prependRestoredSourceImageCards(detail.task.id, restoredImages, options.referenceImages ?? []);
 }
@@ -2599,6 +2961,7 @@ function readPromptPlanSnapshotItems(snapshot: unknown) {
       groupTitle: readOutputString(intent.groupTitle) || readOutputString(value.groupTitle),
       imageNo: readOutputNumber(intent.imageNo) || readOutputNumber(value.imageNo) || index + 1,
       imagePrompt: readOutputString(intent.imagePrompt),
+      ratio: readOutputString(intent.ratio) || readOutputString(value.ratio),
       sceneDescription: readOutputString(intent.sceneDescription) || readOutputString(value.displaySummary),
       title: readOutputString(value.title) || `详情图 ${index + 1}`,
     };
@@ -2693,6 +3056,7 @@ function createRestoredProductHistorySummary(input: Record<string, unknown>) {
 
 type RestoredClothingGenerationInputItem = {
   id: string;
+  imageId: string;
   poseAction: string;
   ratio: string;
   scene: string;
@@ -2705,6 +3069,7 @@ function readClothingGenerationInputItems(input: Record<string, unknown>): Resto
     const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
     return {
       id: readOutputString(value.id) || `clothing-scene-${index + 1}`,
+      imageId: readOutputString(value.imageId),
       poseAction: readOutputString(value.poseAction),
       ratio: readOutputString(value.ratio),
       scene: readOutputString(value.scene),
@@ -2738,13 +3103,14 @@ function restoredGenerationTaskStatus(
   images: GeneratedDetailImage[],
   stale: boolean,
 ): GenerationRecord["status"] {
-  if (detail.task.status === "succeeded" && images.every((image) => image.status === "complete")) {
-    return "complete";
+  const resultImages = images.filter((image) => image.kind !== "source-image" && image.kind !== "listing-copy");
+  if (!stale && !isTaskTerminal(detail.task.status)) {
+    return generationTaskStatusToRecordStatus(detail.task.status);
+  }
+  if (resultImages.length > 0) {
+    return deriveProductGenerationRecordStatus(resultImages);
   }
   if (stale) {
-    return images.every((image) => image.status === "complete") ? "complete" : "failed";
-  }
-  if (images.some((image) => image.status === "failed")) {
     return "failed";
   }
   return generationTaskStatusToRecordStatus(detail.task.status);
@@ -2816,9 +3182,11 @@ function applyGeneratedAssetOutputs(
       assetId: outputAsset.asset.id,
       assetLocalPath: outputAsset.asset.localPath,
       assetRelativePath: outputAsset.asset.relativePath,
+      height: outputAsset.asset.height,
       referenceImages: referenceImages.length > 0 ? referenceImages : image.referenceImages,
       src: outputAsset.asset.url ?? outputAsset.asset.localPath,
       status: "complete",
+      width: outputAsset.asset.width,
     };
   });
 }
@@ -2922,9 +3290,15 @@ function resolveGeneratedImageNo(target: GeneratedDetailImage, images: Generated
 }
 
 function deriveProductGenerationRecordStatus(images: GeneratedDetailImage[]): GenerationRecord["status"] {
-  const resultImages = images.filter((image) => image.kind !== "source-image");
+  const resultImages = images.filter((image) => image.kind !== "source-image" && image.kind !== "listing-copy");
   if (resultImages.some((image) => image.status === "generating")) {
     return "generating";
+  }
+  if (
+    resultImages.some((image) => image.status === "complete") &&
+    resultImages.some((image) => image.status === "failed")
+  ) {
+    return "partial";
   }
   if (resultImages.some((image) => image.status === "failed")) {
     return "failed";
@@ -3110,7 +3484,10 @@ async function createClothingInputAssets(config: ClothingConfigState): Promise<G
     throw new Error("请选择可用的模特全身图。");
   }
   const modelAssets = selectedModel ? await importProductInputAssets([selectedModel], "model") : [];
-  return [...clothingAssets, ...modelAssets.map((asset) => ({ ...asset, sortOrder: clothingAssets.length + asset.sortOrder }))];
+  return [
+    ...modelAssets.map((asset, index) => ({ ...asset, sortOrder: index })),
+    ...clothingAssets.map((asset, index) => ({ ...asset, sortOrder: modelAssets.length + index })),
+  ];
 }
 
 function findSelectedClothingModelImage(config: ClothingConfigState): ProductImageAsset | null {
@@ -3156,6 +3533,11 @@ function createClothingSceneDraftsFromTaskDetail(detail: GenerationTaskDetail): 
     throw new Error("服饰场景规划结果为空。");
   }
   return drafts;
+}
+
+function readClothingModelFeaturesFromTaskDetail(detail: GenerationTaskDetail): unknown {
+  const output = detail.output && typeof detail.output === "object" ? (detail.output as Record<string, unknown>) : {};
+  return output.modelFeatures;
 }
 
 function mimeTypeFromImageName(name: string) {

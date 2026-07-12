@@ -2,15 +2,16 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use commerce_shoot_studio_lib::domain::errors::ProviderTransportErrorKind;
 use commerce_shoot_studio_lib::infrastructure::providers::http_model_gateway::{
     build_model_gateway_request_body, build_model_gateway_stream_request_body,
     model_gateway_request_timeout, parse_model_gateway_sse_event,
     sanitize_model_gateway_request_for_diagnostics, HttpModelGatewayAdapter,
-    HttpModelGatewayRequestConfig, ModelGatewaySseEvent,
+    HttpModelGatewayRequestConfig, ModelGatewaySseEvent, ProviderConcurrencyRegistry,
 };
 use commerce_shoot_studio_lib::infrastructure::providers::openai_compatible::{
     normalize_openai_compatible_response, redact_provider_result_url,
@@ -63,6 +64,380 @@ fn http_adapter_preserves_provider_http_status_without_response_body() {
             provider_error_code: None,
         }
     );
+    server.join().expect("test server should finish");
+}
+
+#[tokio::test]
+async fn http_adapter_async_invoke_uses_the_async_http_client() {
+    let (base_url, server) = spawn_http_response(
+        "200 OK",
+        r#"{"output_text":"异步网关响应","usage":{"total_tokens":1}}"#,
+    );
+    let input = provider_text_input();
+
+    let result = HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke_async(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .await
+        .expect("async response should normalize successfully");
+
+    assert_eq!(result.output_text.as_deref(), Some("异步网关响应"));
+    server.join().expect("test server should finish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_provider_permit_remains_held_after_http_until_result_is_released() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let (second_arrived_tx, second_arrived_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut first_stream, _) = listener.accept().expect("first request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = first_stream.read(&mut buffer);
+        write_json_response(&mut first_stream, r#"{"output_text":"first"}"#);
+
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut second_stream = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.read(&mut buffer);
+                    second_stream = Some(stream);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::yield_now();
+                }
+                Err(error) => panic!("second request accept failed: {error}"),
+            }
+        }
+        second_arrived_tx
+            .send(second_stream.is_some())
+            .expect("second request observation should send");
+
+        let mut second_stream = match second_stream {
+            Some(stream) => stream,
+            None => {
+                listener
+                    .set_nonblocking(false)
+                    .expect("listener should become blocking");
+                let (mut stream, _) = listener.accept().expect("second request should arrive");
+                let _ = stream.read(&mut buffer);
+                stream
+            }
+        };
+        write_json_response(&mut second_stream, r#"{"output_text":"second"}"#);
+    });
+
+    let registry = ProviderConcurrencyRegistry::default();
+    let input = provider_text_input();
+    let first_result = HttpModelGatewayAdapter::with_concurrency_registry(None, registry.clone())
+        .expect("first adapter should initialize")
+        .invoke_async(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "listing-copy",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .await
+        .expect("first request should succeed");
+    let (persist_started_tx, persist_started_rx) = mpsc::channel();
+    let (persist_finished_tx, persist_finished_rx) = mpsc::channel();
+    let persistence = tokio::task::spawn_blocking(move || {
+        persist_started_tx
+            .send(())
+            .expect("persistence should report that it owns the result");
+        persist_finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("persistence should be allowed to finish");
+        drop(first_result);
+    });
+    persist_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("persistence should start before the next request");
+
+    let second_base_url = base_url.clone();
+    let second_call = tokio::spawn(async move {
+        let input = provider_text_input();
+        HttpModelGatewayAdapter::with_concurrency_registry(None, registry)
+            .expect("second adapter should initialize")
+            .invoke_async(ModelGatewayAdapterRequest {
+                api_key: Some("sk-test"),
+                base_url: &second_base_url,
+                capability_id: "listing-copy",
+                endpoint_path: "/v1/responses",
+                input: &input,
+                input_summary: "test",
+                model: "gpt-test",
+                provider_profile_id: "openai",
+            })
+            .await
+    });
+    let second_arrived_early = tokio::task::spawn_blocking(move || {
+        second_arrived_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server should report whether the second request arrived early")
+    })
+    .await
+    .expect("second request observer should finish");
+
+    assert!(
+        !second_arrived_early,
+        "the next Provider request must remain blocked while the first result is awaiting persistence"
+    );
+    persist_finished_tx
+        .send(())
+        .expect("persistence finish signal should send");
+    persistence
+        .await
+        .expect("persistence owner should release the result");
+    second_call
+        .await
+        .expect("second task should finish")
+        .expect("second request should succeed");
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn blocking_provider_permit_remains_held_after_http_until_result_is_released() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let (second_arrived_tx, second_arrived_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut first_stream, _) = listener.accept().expect("first request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = first_stream.read(&mut buffer);
+        write_json_response(&mut first_stream, r#"{"output_text":"first"}"#);
+
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut second_stream = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.read(&mut buffer);
+                    second_stream = Some(stream);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::yield_now();
+                }
+                Err(error) => panic!("second request accept failed: {error}"),
+            }
+        }
+        second_arrived_tx
+            .send(second_stream.is_some())
+            .expect("second request observation should send");
+
+        let mut second_stream = match second_stream {
+            Some(stream) => stream,
+            None => {
+                listener
+                    .set_nonblocking(false)
+                    .expect("listener should become blocking");
+                let (mut stream, _) = listener.accept().expect("second request should arrive");
+                let _ = stream.read(&mut buffer);
+                stream
+            }
+        };
+        write_json_response(&mut second_stream, r#"{"output_text":"second"}"#);
+    });
+
+    let registry = ProviderConcurrencyRegistry::default();
+    let input = provider_text_input();
+    let first_result = HttpModelGatewayAdapter::with_concurrency_registry(None, registry.clone())
+        .expect("first adapter should initialize")
+        .invoke_blocking_leased(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "product-detail-generation",
+            endpoint_path: "/v1/responses",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-test",
+            provider_profile_id: "openai",
+        })
+        .expect("first request should succeed");
+    let (persist_finished_tx, persist_finished_rx) = mpsc::channel();
+    let persistence = thread::spawn(move || {
+        persist_finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("persistence should be allowed to finish");
+        drop(first_result);
+    });
+
+    let second_base_url = base_url.clone();
+    let second_call = thread::spawn(move || {
+        let input = provider_text_input();
+        HttpModelGatewayAdapter::with_concurrency_registry(None, registry)
+            .expect("second adapter should initialize")
+            .invoke(ModelGatewayAdapterRequest {
+                api_key: Some("sk-test"),
+                base_url: &second_base_url,
+                capability_id: "product-detail-generation",
+                endpoint_path: "/v1/responses",
+                input: &input,
+                input_summary: "test",
+                model: "gpt-test",
+                provider_profile_id: "openai",
+            })
+    });
+    let second_arrived_early = second_arrived_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("server should report whether the second request arrived early");
+
+    assert!(
+        !second_arrived_early,
+        "the next blocking Provider request must remain blocked while persistence owns the first result"
+    );
+    persist_finished_tx
+        .send(())
+        .expect("persistence finish signal should send");
+    persistence.join().expect("persistence owner should finish");
+    second_call
+        .join()
+        .expect("second request thread should finish")
+        .expect("second request should succeed");
+    server.join().expect("test server should finish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocking_and_async_invocations_share_the_local_provider_limit() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("address should resolve")
+    );
+    let (first_request_tx, first_request_rx) = mpsc::channel();
+    let (early_second_tx, early_second_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut first_stream, _) = listener.accept().expect("first request should arrive");
+        let mut buffer = [0_u8; 4096];
+        let _ = first_stream.read(&mut buffer);
+        first_request_tx
+            .send(())
+            .expect("first request signal should send");
+
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut second_stream = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.read(&mut buffer);
+                    second_stream = Some(stream);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::yield_now();
+                }
+                Err(error) => panic!("second request accept failed: {error}"),
+            }
+        }
+        early_second_tx
+            .send(second_stream.is_some())
+            .expect("early request signal should send");
+        write_json_response(&mut first_stream, r#"{"output_text":"同步响应"}"#);
+
+        let mut second_stream = match second_stream {
+            Some(stream) => stream,
+            None => {
+                listener
+                    .set_nonblocking(false)
+                    .expect("listener should become blocking");
+                let (mut stream, _) = listener.accept().expect("second request should arrive");
+                let _ = stream.read(&mut buffer);
+                stream
+            }
+        };
+        write_json_response(&mut second_stream, r#"{"output_text":"异步响应"}"#);
+    });
+
+    let registry = ProviderConcurrencyRegistry::default();
+    let blocking_base_url = base_url.clone();
+    let blocking_registry = registry.clone();
+    let blocking = thread::spawn(move || {
+        let input = provider_text_input();
+        HttpModelGatewayAdapter::with_concurrency_registry(None, blocking_registry)
+            .expect("blocking adapter should initialize")
+            .invoke(ModelGatewayAdapterRequest {
+                api_key: Some("sk-test"),
+                base_url: &blocking_base_url,
+                capability_id: "listing-copy",
+                endpoint_path: "/v1/responses",
+                input: &input,
+                input_summary: "test",
+                model: "gpt-test",
+                provider_profile_id: "openai",
+            })
+    });
+    first_request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("blocking request should reach the server");
+
+    let async_base_url = base_url.clone();
+    let async_call = tokio::spawn(async move {
+        let input = provider_text_input();
+        HttpModelGatewayAdapter::with_concurrency_registry(None, registry)
+            .expect("async adapter should initialize")
+            .invoke_async(ModelGatewayAdapterRequest {
+                api_key: Some("sk-test"),
+                base_url: &async_base_url,
+                capability_id: "listing-copy",
+                endpoint_path: "/v1/responses",
+                input: &input,
+                input_summary: "test",
+                model: "gpt-test",
+                provider_profile_id: "openai",
+            })
+            .await
+    });
+    let early_second = tokio::task::spawn_blocking(move || {
+        early_second_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server should report whether the second request arrived early")
+    })
+    .await
+    .expect("early request observer should finish");
+
+    assert!(
+        !early_second,
+        "async request must wait while the blocking request holds the local Provider permit"
+    );
+    tokio::task::spawn_blocking(move || blocking.join().expect("blocking call should finish"))
+        .await
+        .expect("blocking join should finish")
+        .expect("blocking request should succeed");
+    async_call
+        .await
+        .expect("async task should finish")
+        .expect("async request should succeed");
     server.join().expect("test server should finish");
 }
 
@@ -249,6 +624,16 @@ fn spawn_http_response(
             .expect("response should write");
     });
     (base_url, server)
+}
+
+fn write_json_response(stream: &mut std::net::TcpStream, response_body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        response_body.len(),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("response should write");
 }
 
 fn test_diagnostic_log_path(label: &str) -> PathBuf {
@@ -587,6 +972,7 @@ fn builds_image_generation_request_with_reference_images_and_consistency_prompt(
             provider_profile_id: "volcengine",
         },
         &serde_json::json!({
+            "size": "1152x2048",
             "prompt": {
                 "messages": [
                     {
@@ -616,7 +1002,7 @@ fn builds_image_generation_request_with_reference_images_and_consistency_prompt(
     assert!(body.get("sequential_image_generation").is_none());
     assert!(body.get("max_tokens").is_none());
     assert!(body.get("temperature").is_none());
-    assert_eq!(body["size"], "2K");
+    assert_eq!(body["size"], "1152x2048");
     assert_eq!(body["response_format"], "url");
     assert!(body.get("output_format").is_none());
     assert_eq!(body["watermark"], false);
@@ -928,6 +1314,40 @@ fn openai_image_edit_uses_landscape_size() {
         .recv()
         .expect("test server should capture the image edit request");
     assert_multipart_request_contains(&request, &["name=\"size\"", "1536x1024"]);
+    server.join().expect("test server should finish");
+}
+
+#[test]
+fn openai_image_edit_prefers_explicit_size_over_ratio_direction() {
+    let (base_url, request, server) = spawn_openai_image_edit_server();
+    let input = serde_json::json!({
+        "ratio": "4:3",
+        "size": "1024x1536",
+        "prompt": {
+            "messages": [{ "role": "user", "content": "按指定尺寸修改商品图" }],
+            "rolelessPrompt": "explicit-size-image-edit-prompt"
+        },
+        "userImages": [{ "mimeType": "image/png", "dataUrl": valid_png_data_url() }]
+    });
+
+    HttpModelGatewayAdapter::new(None)
+        .expect("adapter should initialize")
+        .invoke(ModelGatewayAdapterRequest {
+            api_key: Some("sk-test"),
+            base_url: &base_url,
+            capability_id: "image-edit",
+            endpoint_path: "/v1/images/edits",
+            input: &input,
+            input_summary: "test",
+            model: "gpt-image-1",
+            provider_profile_id: "openai",
+        })
+        .expect("OpenAI image edit request should succeed");
+
+    let request = request
+        .recv()
+        .expect("test server should capture the image edit request");
+    assert_multipart_request_contains(&request, &["name=\"size\"", "1024x1536"]);
     server.join().expect("test server should finish");
 }
 
@@ -1474,15 +1894,33 @@ fn builds_text_only_chat_completion_request_with_string_content() {
 }
 
 #[test]
-fn uses_one_minute_timeout_for_image_to_image_calls() {
-    assert_eq!(model_gateway_request_timeout("prompt-plan").as_secs(), 300);
+fn uses_capability_specific_request_timeouts() {
     assert_eq!(
-        model_gateway_request_timeout("clothing-tryon-generation").as_secs(),
+        model_gateway_request_timeout("openai", "prompt-plan").as_secs(),
+        300
+    );
+    assert_eq!(
+        model_gateway_request_timeout("volcengine", "clothing-scene-planning").as_secs(),
+        90
+    );
+    assert_eq!(
+        model_gateway_request_timeout("volcengine", "clothing-tryon-generation").as_secs(),
+        300
+    );
+    assert_eq!(
+        model_gateway_request_timeout("volcengine", "image-edit").as_secs(),
+        300
+    );
+    assert_eq!(
+        model_gateway_request_timeout("openai", "clothing-tryon-generation").as_secs(),
         60
     );
-    assert_eq!(model_gateway_request_timeout("image-edit").as_secs(), 60);
     assert_eq!(
-        model_gateway_request_timeout("viral-style-analysis").as_secs(),
+        model_gateway_request_timeout("openai", "image-edit").as_secs(),
+        60
+    );
+    assert_eq!(
+        model_gateway_request_timeout("deepseek", "viral-style-analysis").as_secs(),
         90
     );
 }

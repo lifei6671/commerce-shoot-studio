@@ -46,6 +46,30 @@ pub struct RetryGenerationTaskInput {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceGenerationResultImageInput {
+    pub task_id: String,
+    #[serde(default)]
+    pub current_asset_id: Option<String>,
+    #[serde(default)]
+    pub displayed_asset_id: Option<String>,
+    pub replacement_task_id: String,
+    pub replacement_asset_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteGenerationResultImageInput {
+    pub task_id: String,
+    pub image_id: String,
+    pub image_no: Option<i64>,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub displayed_asset_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskQuery {
@@ -242,6 +266,365 @@ impl GenerationService {
         Ok(())
     }
 
+    pub fn replace_result_image(
+        &self,
+        workspace_directory: &Path,
+        input: ReplaceGenerationResultImageInput,
+    ) -> Result<(), GenerationError> {
+        if input.task_id == input.replacement_task_id {
+            return Err(GenerationError::Validation(
+                "原任务与替换任务不能相同。".to_string(),
+            ));
+        }
+
+        let database = open_database(workspace_directory)?;
+        let transaction = database.connection().unchecked_transaction()?;
+        let replacement_task: Option<(String, Option<String>, String, Option<String>)> =
+            transaction
+                .query_row(
+                    "
+                    SELECT status, hidden_at, kind, input_json
+                    FROM generation_tasks
+                    WHERE id = ?1
+                    ",
+                    params![input.replacement_task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+        let Some((status, hidden_at, kind, input_json)) = replacement_task else {
+            return Err(GenerationError::Validation("替换任务不存在。".to_string()));
+        };
+        if status != "succeeded" || hidden_at.is_some() {
+            return Err(GenerationError::Validation(
+                "替换任务必须已成功且仍然可见。".to_string(),
+            ));
+        }
+        let replacement_input = input_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()?
+            .ok_or_else(|| GenerationError::Validation("替换任务缺少输入快照。".to_string()))?;
+        if replacement_input
+            .get("parentTaskId")
+            .and_then(serde_json::Value::as_str)
+            != Some(input.task_id.as_str())
+        {
+            return Err(GenerationError::Validation(
+                "替换任务与原结果图不匹配。".to_string(),
+            ));
+        }
+        let replacement_input_kind = replacement_input
+            .get("kind")
+            .and_then(serde_json::Value::as_str);
+        let (target_image_id, image_no, source_asset_id) =
+            match (kind.as_str(), replacement_input_kind) {
+                ("image-edit", Some("result-image-resize" | "product-detail-image-rewrite")) => {
+                    let target_image_id = replacement_input
+                        .get("targetImageId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            GenerationError::Validation("替换任务缺少目标结果图标识。".to_string())
+                        })?;
+                    let image_no = replacement_input
+                        .get("imageNo")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            GenerationError::Validation("替换任务缺少有效结果图序号。".to_string())
+                        })?;
+                    let source_asset_id = replacement_input
+                        .get("sourceAssetId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            GenerationError::Validation("替换任务缺少来源结果资产。".to_string())
+                        })?;
+                    (target_image_id, image_no, Some(source_asset_id))
+                }
+                (
+                    "image-generation",
+                    Some("product-detail-generation" | "clothing-tryon-generation"),
+                ) => {
+                    let items = replacement_input
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .filter(|items| items.len() == 1)
+                        .ok_or_else(|| {
+                            GenerationError::Validation(
+                                "单图重试任务必须且只能包含一个结果项。".to_string(),
+                            )
+                        })?;
+                    let item = &items[0];
+                    let target_image_id = item
+                        .get("imageId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                        GenerationError::Validation("单图重试任务缺少目标结果图标识。".to_string())
+                    })?;
+                    let image_no = item
+                        .get("imageNo")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            GenerationError::Validation(
+                                "单图重试任务缺少有效结果图序号。".to_string(),
+                            )
+                        })?;
+                    (target_image_id, image_no, None)
+                }
+                _ => {
+                    return Err(GenerationError::Validation(
+                        "替换任务与原结果图不匹配。".to_string(),
+                    ));
+                }
+            };
+        let sort_order = image_no - 1;
+        validate_result_image_identity(
+            &transaction,
+            &input.task_id,
+            sort_order,
+            target_image_id,
+            Some(image_no),
+        )?;
+        let target_was_deleted: i64 = transaction.query_row(
+            "
+            SELECT EXISTS(
+                SELECT 1
+                FROM task_events
+                WHERE task_id = ?1
+                  AND event_type = 'task.result-image-deleted'
+                  AND json_extract(detail_json, '$.imageId') = ?2
+                  AND json_extract(detail_json, '$.imageNo') = ?3
+            )
+            ",
+            params![input.task_id, target_image_id, image_no],
+            |row| row.get(0),
+        )?;
+        if target_was_deleted != 0 {
+            return Err(GenerationError::Validation(
+                "结果图已删除，不能归并晚到的重试结果。".to_string(),
+            ));
+        }
+        let current_slot_asset_id = transaction
+            .query_row(
+                "
+                SELECT asset_id
+                FROM generation_assets
+                WHERE task_id = ?1 AND role = 'output' AND sort_order = ?2
+                ",
+                params![input.task_id, sort_order],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let requested_current_asset_id = input
+            .current_asset_id
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        match (requested_current_asset_id, current_slot_asset_id.as_deref()) {
+            (Some(requested), Some(current)) if requested == current => {}
+            (None, None) => {}
+            _ => {
+                return Err(GenerationError::Validation(
+                    "替换任务与原结果图不匹配。".to_string(),
+                ));
+            }
+        }
+        let displayed_asset_id = input
+            .displayed_asset_id
+            .as_deref()
+            .or(requested_current_asset_id);
+        if source_asset_id.is_some() && source_asset_id != displayed_asset_id {
+            return Err(GenerationError::Validation(
+                "替换任务与当前展示结果图不匹配。".to_string(),
+            ));
+        }
+        let replacement_output_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
+            params![input.replacement_task_id],
+            |row| row.get(0),
+        )?;
+        if replacement_output_count != 1 {
+            return Err(GenerationError::Validation(
+                "替换任务必须且只能生成一张结果图。".to_string(),
+            ));
+        }
+        let replacement_relation_count: i64 = transaction.query_row(
+            "
+            SELECT COUNT(*)
+            FROM generation_assets rel
+            JOIN assets asset ON asset.id = rel.asset_id
+            WHERE rel.task_id = ?1 AND rel.asset_id = ?2 AND rel.role = 'output'
+              AND asset.kind = 'generated' AND asset.lifecycle = 'active'
+              AND asset.deleted_at IS NULL
+            ",
+            params![input.replacement_task_id, input.replacement_asset_id],
+            |row| row.get(0),
+        )?;
+        if replacement_relation_count != 1 {
+            return Err(GenerationError::Validation(
+                "替换任务的结果资产不可用。".to_string(),
+            ));
+        }
+
+        if let Some(current_asset_id) = current_slot_asset_id.as_deref() {
+            transaction.execute(
+                "
+                UPDATE generation_assets
+                SET asset_id = ?1
+                WHERE task_id = ?2 AND role = 'output' AND sort_order = ?3 AND asset_id = ?4
+                ",
+                params![
+                    input.replacement_asset_id,
+                    input.task_id,
+                    sort_order,
+                    current_asset_id,
+                ],
+            )?;
+        } else {
+            transaction.execute(
+                "DELETE FROM generation_assets WHERE task_id = ?1 AND role = 'output' AND sort_order = ?2",
+                params![input.task_id, sort_order],
+            )?;
+            transaction.execute(
+                "
+                INSERT INTO generation_assets (task_id, asset_id, role, sort_order)
+                VALUES (?1, ?2, 'output', ?3)
+                ",
+                params![input.task_id, input.replacement_asset_id, sort_order],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM generation_assets WHERE task_id = ?1 AND asset_id = ?2",
+            params![input.replacement_task_id, input.replacement_asset_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM generation_task_input_assets WHERE task_id = ?1",
+            params![input.replacement_task_id],
+        )?;
+        transaction.execute(
+            "
+            UPDATE generation_tasks
+            SET hidden_at = COALESCE(hidden_at, datetime('now')),
+                updated_at = datetime('now')
+            WHERE id = ?1
+            ",
+            params![input.replacement_task_id],
+        )?;
+        let derived_displayed_asset_id = displayed_asset_id
+            .filter(|displayed| current_slot_asset_id.as_deref() != Some(*displayed));
+        hide_superseded_result_tasks(
+            &transaction,
+            &input.task_id,
+            target_image_id,
+            image_no,
+            derived_displayed_asset_id,
+            Some(&input.replacement_task_id),
+        )?;
+        if let Some(current_asset_id) = current_slot_asset_id.as_deref() {
+            soft_delete_asset_without_visible_references(&transaction, current_asset_id)?;
+        }
+        if let Some(displayed_asset_id) = derived_displayed_asset_id {
+            soft_delete_asset_without_visible_references(&transaction, displayed_asset_id)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_result_image(
+        &self,
+        workspace_directory: &Path,
+        input: DeleteGenerationResultImageInput,
+    ) -> Result<(), GenerationError> {
+        let database = open_database(workspace_directory)?;
+        let transaction = database.connection().unchecked_transaction()?;
+        let image_no = input
+            .image_no
+            .filter(|value| *value > 0)
+            .ok_or_else(|| GenerationError::Validation("结果图序号必须是正整数。".to_string()))?;
+        let sort_order = image_no - 1;
+        validate_result_image_identity(
+            &transaction,
+            &input.task_id,
+            sort_order,
+            &input.image_id,
+            Some(image_no),
+        )?;
+        let current_slot_asset_id = transaction
+            .query_row(
+                "
+                SELECT asset_id
+                FROM generation_assets
+                WHERE task_id = ?1 AND role = 'output' AND sort_order = ?2
+                ",
+                params![input.task_id, sort_order],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let requested_asset_id = input.asset_id.as_deref().filter(|value| !value.is_empty());
+        match (requested_asset_id, current_slot_asset_id.as_deref()) {
+            (Some(requested), Some(current)) if requested == current => {}
+            (None, None) => {}
+            _ => {
+                return Err(GenerationError::Validation(
+                    "待删除的结果资产不存在或与目标槽位不匹配。".to_string(),
+                ));
+            }
+        }
+        if current_slot_asset_id.is_none()
+            && input
+                .displayed_asset_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err(GenerationError::Validation(
+                "失败空槽不能携带展示资产。".to_string(),
+            ));
+        }
+
+        if let Some(current_asset_id) = current_slot_asset_id.as_deref() {
+            transaction.execute(
+                "
+                DELETE FROM generation_assets
+                WHERE task_id = ?1 AND asset_id = ?2 AND role = 'output' AND sort_order = ?3
+                ",
+                params![input.task_id, current_asset_id, sort_order],
+            )?;
+        }
+        let derived_displayed_asset_id = input
+            .displayed_asset_id
+            .as_deref()
+            .filter(|displayed| current_slot_asset_id.as_deref() != Some(*displayed));
+        hide_superseded_result_tasks(
+            &transaction,
+            &input.task_id,
+            &input.image_id,
+            image_no,
+            derived_displayed_asset_id,
+            None,
+        )?;
+        if let Some(displayed_asset_id) = derived_displayed_asset_id {
+            soft_delete_asset_without_visible_references(&transaction, displayed_asset_id)?;
+        }
+        if let Some(current_asset_id) = current_slot_asset_id.as_deref() {
+            soft_delete_asset_without_visible_references(&transaction, current_asset_id)?;
+        }
+        insert_task_event_on_connection(
+            &transaction,
+            &input.task_id,
+            "task.result-image-deleted",
+            None,
+            Some(json!({
+                "sortOrder": sort_order,
+                "imageId": input.image_id,
+                "imageNo": image_no,
+                "assetId": current_slot_asset_id,
+            })),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn get_task(
         &self,
         workspace_directory: &Path,
@@ -397,6 +780,292 @@ fn ensure_task_exists(database: &WorkspaceDatabase, task_id: &str) -> Result<(),
         return Ok(());
     }
     Err(GenerationError::NotFound(task_id.to_string()))
+}
+
+fn soft_delete_asset_without_visible_references(
+    connection: &rusqlite::Connection,
+    asset_id: &str,
+) -> Result<(), GenerationError> {
+    connection.execute(
+        "
+        UPDATE assets
+        SET lifecycle = 'deleted',
+            deleted_at = COALESCE(deleted_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE id = ?1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM generation_assets rel
+              JOIN generation_tasks task ON task.id = rel.task_id
+              WHERE rel.asset_id = assets.id AND task.hidden_at IS NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM generation_task_input_assets rel
+              JOIN generation_tasks task ON task.id = rel.task_id
+              WHERE rel.asset_id = assets.id AND task.hidden_at IS NULL
+          )
+        ",
+        params![asset_id],
+    )?;
+    Ok(())
+}
+
+fn hide_superseded_result_tasks(
+    connection: &rusqlite::Connection,
+    parent_task_id: &str,
+    image_id: &str,
+    image_no: i64,
+    displayed_asset_id: Option<&str>,
+    excluded_task_id: Option<&str>,
+) -> Result<(), GenerationError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT task.id,
+               task.input_json,
+               EXISTS(
+                   SELECT 1
+                   FROM generation_assets rel
+                   JOIN assets asset ON asset.id = rel.asset_id
+                   WHERE rel.task_id = task.id
+                     AND rel.asset_id = ?1
+                     AND rel.role = 'output'
+                     AND asset.kind = 'generated'
+                     AND asset.lifecycle = 'active'
+                     AND asset.deleted_at IS NULL
+               ) AS owns_displayed_asset
+        FROM generation_tasks task
+        WHERE task.hidden_at IS NULL
+          AND task.id != ?2
+          AND CASE
+                  WHEN json_valid(task.input_json)
+                  THEN json_extract(task.input_json, '$.parentTaskId')
+              END = ?2
+        ",
+    )?;
+    let candidates = statement
+        .query_map(params![displayed_asset_id, parent_task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut displayed_task_matched = false;
+    let mut matched_tasks = Vec::new();
+    for (task_id, input_json, owns_displayed_asset) in candidates {
+        if excluded_task_id == Some(task_id.as_str()) {
+            continue;
+        }
+        let task_input = input_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()?;
+        let Some(task_input) = task_input else {
+            continue;
+        };
+        let matches_parent = task_input
+            .get("parentTaskId")
+            .and_then(serde_json::Value::as_str)
+            == Some(parent_task_id);
+        let matches_direct_target = task_input
+            .get("targetImageId")
+            .and_then(serde_json::Value::as_str)
+            == Some(image_id)
+            && task_input
+                .get("imageNo")
+                .and_then(serde_json::Value::as_i64)
+                == Some(image_no);
+        let matches_item_target = task_input
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.first())
+            .is_some_and(|item| {
+                item.get("imageId").and_then(serde_json::Value::as_str) == Some(image_id)
+                    && item.get("imageNo").and_then(serde_json::Value::as_i64) == Some(image_no)
+            });
+        if !matches_parent || (!matches_direct_target && !matches_item_target) {
+            continue;
+        }
+        displayed_task_matched |= owns_displayed_asset;
+        let output_asset_ids = {
+            let mut output_statement = connection.prepare(
+                "SELECT asset_id FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
+            )?;
+            let output_asset_ids = output_statement
+                .query_map([task_id.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            output_asset_ids
+        };
+        matched_tasks.push((task_id, output_asset_ids));
+    }
+    if displayed_asset_id.is_some() && !displayed_task_matched {
+        return Err(GenerationError::Validation(
+            "当前展示资产与目标结果图不匹配。".to_string(),
+        ));
+    }
+
+    for (task_id, output_asset_ids) in matched_tasks {
+        connection.execute(
+            "DELETE FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
+            [task_id.as_str()],
+        )?;
+        connection.execute(
+            "DELETE FROM generation_task_input_assets WHERE task_id = ?1",
+            [task_id.as_str()],
+        )?;
+        connection.execute(
+            "
+            UPDATE generation_tasks
+            SET status = CASE
+                    WHEN status IN ('queued', 'running') THEN 'cancelled'
+                    ELSE status
+                END,
+                stage = CASE
+                    WHEN status IN ('queued', 'running') THEN 'failed'
+                    ELSE stage
+                END,
+                completed_at = CASE
+                    WHEN status IN ('queued', 'running')
+                    THEN COALESCE(completed_at, datetime('now'))
+                    ELSE completed_at
+                END,
+                hidden_at = COALESCE(hidden_at, datetime('now')),
+                updated_at = datetime('now')
+            WHERE id = ?1
+            ",
+            params![task_id],
+        )?;
+        for output_asset_id in output_asset_ids {
+            soft_delete_asset_without_visible_references(connection, &output_asset_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_result_image_identity(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+    sort_order: i64,
+    image_id: &str,
+    image_no: Option<i64>,
+) -> Result<(), GenerationError> {
+    if image_id.trim().is_empty() {
+        return Err(GenerationError::Validation(
+            "结果图标识不能为空。".to_string(),
+        ));
+    }
+    let image_no = image_no
+        .filter(|value| *value > 0)
+        .ok_or_else(|| GenerationError::Validation("结果图序号必须是正整数。".to_string()))?;
+    let expected_image_no = sort_order + 1;
+    if image_no != expected_image_no {
+        return Err(GenerationError::Validation(
+            "结果图序号与输出位置不匹配。".to_string(),
+        ));
+    }
+
+    let (input_json, prompt_plan_snapshot_json): (Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT input_json, prompt_plan_snapshot_json FROM generation_tasks WHERE id = ?1",
+            params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+    let input_json = input_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()?;
+    let prompt_plan_snapshot = prompt_plan_snapshot_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()?;
+    let mut expected_image_ids = Vec::new();
+    if let Some(item) = input_json
+        .as_ref()
+        .and_then(|value| result_item_for_slot(value, sort_order, expected_image_no))
+    {
+        validate_result_item_image_no(item, expected_image_no)?;
+        if let Some(value) = item.get("imageId").and_then(serde_json::Value::as_str) {
+            expected_image_ids.push(value.to_string());
+        }
+        if let Some(value) = item.get("id").and_then(serde_json::Value::as_str) {
+            expected_image_ids.push(value.to_string());
+            if !value.starts_with(&format!("{task_id}:"))
+                && !value.starts_with(&format!("{task_id}-"))
+            {
+                expected_image_ids.push(format!("{task_id}:{value}"));
+            }
+        }
+    }
+    if let Some(item) = prompt_plan_snapshot
+        .as_ref()
+        .and_then(|value| result_item_for_slot(value, sort_order, expected_image_no))
+    {
+        if let Some(intent) = item.get("intent") {
+            validate_result_item_image_no(intent, expected_image_no)?;
+        }
+        if let Some(value) = item.get("id").and_then(serde_json::Value::as_str) {
+            expected_image_ids.push(value.to_string());
+            if !value.starts_with(&format!("{task_id}:"))
+                && !value.starts_with(&format!("{task_id}-"))
+            {
+                expected_image_ids.push(format!("{task_id}:{value}"));
+            }
+        }
+    }
+    if !expected_image_ids.is_empty()
+        && !expected_image_ids
+            .iter()
+            .any(|expected| expected == image_id)
+    {
+        return Err(GenerationError::Validation(
+            "结果图标识与任务快照不匹配。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn result_item_for_slot(
+    value: &serde_json::Value,
+    sort_order: i64,
+    image_no: i64,
+) -> Option<&serde_json::Value> {
+    let items = value.get("items")?.as_array()?;
+    items
+        .iter()
+        .find(|item| item.get("sortOrder").and_then(serde_json::Value::as_i64) == Some(sort_order))
+        .or_else(|| {
+            items.iter().find(|item| {
+                item.get("imageNo").and_then(serde_json::Value::as_i64) == Some(image_no)
+                    || item
+                        .get("intent")
+                        .and_then(|intent| intent.get("imageNo"))
+                        .and_then(serde_json::Value::as_i64)
+                        == Some(image_no)
+            })
+        })
+        .or_else(|| {
+            usize::try_from(sort_order)
+                .ok()
+                .and_then(|index| items.get(index))
+        })
+}
+
+fn validate_result_item_image_no(
+    item: &serde_json::Value,
+    expected_image_no: i64,
+) -> Result<(), GenerationError> {
+    if let Some(value) = item.get("imageNo").and_then(serde_json::Value::as_i64) {
+        if value != expected_image_no {
+            return Err(GenerationError::Validation(
+                "结果图序号与任务快照不匹配。".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -693,8 +1362,18 @@ pub(crate) fn insert_task_event(
     stage: Option<GenerationTaskStage>,
     detail: Option<serde_json::Value>,
 ) -> Result<(), GenerationError> {
+    insert_task_event_on_connection(database.connection(), task_id, event_type, stage, detail)
+}
+
+pub(crate) fn insert_task_event_on_connection(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+    event_type: &str,
+    stage: Option<GenerationTaskStage>,
+    detail: Option<serde_json::Value>,
+) -> Result<(), GenerationError> {
     let detail_json = serialize_optional_json(detail)?;
-    database.connection().execute(
+    connection.execute(
         "
         INSERT INTO task_events (id, task_id, event_type, stage, detail_json)
         VALUES (?1, ?2, ?3, ?4, ?5)
@@ -763,5 +1442,1544 @@ impl From<rusqlite::Error> for GenerationError {
 impl From<serde_json::Error> for GenerationError {
     fn from(source: serde_json::Error) -> Self {
         Self::Serde(format!("任务 JSON 序列化失败：{source}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use rusqlite::params;
+    use serde_json::json;
+
+    use super::{
+        DeleteGenerationResultImageInput, GenerationService, GenerationTaskQuery,
+        ReplaceGenerationResultImageInput,
+    };
+    use crate::domain::generation::GenerationError;
+    use crate::infrastructure::database::WorkspaceDatabase;
+
+    struct TestWorkspace {
+        path: PathBuf,
+    }
+
+    impl TestWorkspace {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "commerce-shoot-studio-generation-{name}-{}-{}",
+                std::process::id(),
+                super::create_sequenced_id("test", &super::TASK_ID_SEQUENCE)
+            ));
+            fs::create_dir_all(&path).expect("创建测试 workspace");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn database(&self) -> WorkspaceDatabase {
+            WorkspaceDatabase::open(&self.path).expect("打开测试数据库")
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn insert_task(database: &WorkspaceDatabase, task_id: &str, hidden: bool) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO generation_tasks (
+                    id, attempt_no, idempotency_key, workspace, kind, status, stage,
+                    title, hidden_at
+                )
+                VALUES (?1, 1, ?2, 'product', 'image-generation', 'succeeded',
+                        'completed', ?1, CASE WHEN ?3 THEN datetime('now') END)
+                ",
+                params![task_id, format!("idem-{task_id}"), hidden],
+            )
+            .expect("插入测试任务");
+    }
+
+    fn insert_resize_task(
+        database: &WorkspaceDatabase,
+        task_id: &str,
+        parent_task_id: &str,
+        image_no: i64,
+        source_asset_id: &str,
+    ) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO generation_tasks (
+                    id, attempt_no, idempotency_key, workspace, kind, status, stage,
+                    title, input_json
+                )
+                VALUES (?1, 1, ?2, 'product', 'image-edit', 'succeeded', 'completed',
+                        ?1, ?3)
+                ",
+                params![
+                    task_id,
+                    format!("idem-{task_id}"),
+                    json!({
+                        "kind": "result-image-resize",
+                        "parentTaskId": parent_task_id,
+                        "targetImageId": format!("{parent_task_id}:item-{image_no}"),
+                        "imageNo": image_no,
+                        "sourceAssetId": source_asset_id,
+                    })
+                    .to_string()
+                ],
+            )
+            .expect("插入测试尺寸替换任务");
+    }
+
+    fn insert_derived_result_task(
+        database: &WorkspaceDatabase,
+        task_id: &str,
+        task_kind: &str,
+        input: serde_json::Value,
+    ) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO generation_tasks (
+                    id, attempt_no, idempotency_key, workspace, kind, status, stage,
+                    title, input_json
+                )
+                VALUES (?1, 1, ?2, 'product', ?3, 'succeeded', 'completed', ?1, ?4)
+                ",
+                params![
+                    task_id,
+                    format!("idem-{task_id}"),
+                    task_kind,
+                    input.to_string(),
+                ],
+            )
+            .expect("插入测试派生结果任务");
+    }
+
+    fn set_task_items(database: &WorkspaceDatabase, task_id: &str, items: serde_json::Value) {
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET input_json = ?1 WHERE id = ?2",
+                params![json!({ "items": items }).to_string(), task_id],
+            )
+            .expect("设置测试任务 items");
+    }
+
+    fn insert_asset(database: &WorkspaceDatabase, asset_id: &str) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO assets (
+                    id, kind, name, original_name, mime_type, relative_path, sha256,
+                    width, height, size_bytes, lifecycle
+                )
+                VALUES (?1, 'generated', ?1, ?1, 'image/png', ?2, ?1, 512, 512, 4, 'active')
+                ",
+                params![asset_id, format!("assets/generated/{asset_id}.png")],
+            )
+            .expect("插入测试资产");
+    }
+
+    fn link_output(database: &WorkspaceDatabase, task_id: &str, asset_id: &str, sort_order: i64) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO generation_assets (task_id, asset_id, role, sort_order)
+                VALUES (?1, ?2, 'output', ?3)
+                ",
+                params![task_id, asset_id, sort_order],
+            )
+            .expect("关联测试输出资产");
+    }
+
+    fn link_input(database: &WorkspaceDatabase, task_id: &str, asset_id: &str, sort_order: i64) {
+        database
+            .connection()
+            .execute(
+                "
+                INSERT INTO generation_task_input_assets (task_id, asset_id, role, sort_order)
+                VALUES (?1, ?2, 'reference', ?3)
+                ",
+                params![task_id, asset_id, sort_order],
+            )
+            .expect("关联测试输入资产");
+    }
+
+    fn asset_lifecycle(database: &WorkspaceDatabase, asset_id: &str) -> (String, Option<String>) {
+        database
+            .connection()
+            .query_row(
+                "SELECT lifecycle, deleted_at FROM assets WHERE id = ?1",
+                params![asset_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("读取资产生命周期")
+    }
+
+    fn output_relation_count(database: &WorkspaceDatabase, task_id: &str, asset_id: &str) -> i64 {
+        database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM generation_assets WHERE task_id = ?1 AND asset_id = ?2 AND role = 'output'",
+                params![task_id, asset_id],
+                |row| row.get(0),
+            )
+            .expect("读取输出资产关系数量")
+    }
+
+    fn input_relation_count(database: &WorkspaceDatabase, task_id: &str, asset_id: &str) -> i64 {
+        database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM generation_task_input_assets WHERE task_id = ?1 AND asset_id = ?2",
+                params![task_id, asset_id],
+                |row| row.get(0),
+            )
+            .expect("读取输入资产关系数量")
+    }
+
+    fn asset_reference_count(database: &WorkspaceDatabase, asset_id: &str) -> i64 {
+        database
+            .connection()
+            .query_row(
+                "
+                SELECT
+                    (SELECT COUNT(*) FROM generation_assets WHERE asset_id = ?1) +
+                    (SELECT COUNT(*) FROM generation_task_input_assets WHERE asset_id = ?1)
+                ",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .expect("读取资产引用数量")
+    }
+
+    #[test]
+    fn replace_result_image_input_allows_an_empty_parent_slot() {
+        let input = serde_json::from_value::<ReplaceGenerationResultImageInput>(json!({
+            "taskId": "original-task",
+            "replacementTaskId": "replacement-task",
+            "replacementAssetId": "replacement-asset",
+        }));
+
+        input.expect("空父槽位不应要求 currentAssetId 或 displayedAssetId");
+    }
+
+    #[test]
+    fn delete_result_image_input_allows_a_failed_slot_without_assets() {
+        let input = serde_json::from_value::<DeleteGenerationResultImageInput>(json!({
+            "taskId": "original-task",
+            "imageId": "original-task:item-1",
+            "imageNo": 1,
+        }));
+
+        input.expect("失败空槽删除不应要求 assetId 或 displayedAssetId");
+    }
+
+    #[test]
+    fn replace_result_image_accepts_product_detail_rewrite_with_matching_lineage() {
+        let workspace = TestWorkspace::new("replace-product-rewrite");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "rewrite-task",
+            "image-edit",
+            json!({
+                "kind": "product-detail-image-rewrite",
+                "parentTaskId": "original-task",
+                "targetImageId": "original-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "old-asset",
+            }),
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "rewrite-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "rewrite-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("匹配父槽位的商品微调结果应可替换原图");
+
+        let service = GenerationService::new();
+        let original = service
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取父任务");
+        assert_eq!(original.output_assets[0].asset.id, "replacement-asset");
+        let visible = service
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible.items.len(), 1);
+        assert_eq!(visible.items[0].id, "original-task");
+    }
+
+    #[test]
+    fn replace_result_image_merges_single_item_product_and_clothing_retries_into_empty_parent_slots(
+    ) {
+        for (case, input_kind) in [
+            ("product", "product-detail-generation"),
+            ("clothing", "clothing-tryon-generation"),
+        ] {
+            let workspace = TestWorkspace::new(&format!("merge-empty-retry-{case}"));
+            let database = workspace.database();
+            insert_task(&database, "original-task", false);
+            set_task_items(
+                &database,
+                "original-task",
+                json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+            );
+            insert_derived_result_task(
+                &database,
+                "retry-task",
+                "image-generation",
+                json!({
+                    "kind": input_kind,
+                    "parentTaskId": "original-task",
+                    "items": [{
+                        "imageId": "original-task:item-1",
+                        "imageNo": 1,
+                        "sortOrder": 0,
+                    }],
+                }),
+            );
+            insert_asset(&database, "retry-asset");
+            link_output(&database, "retry-task", "retry-asset", 0);
+            drop(database);
+
+            GenerationService::new()
+                .replace_result_image(
+                    workspace.path(),
+                    ReplaceGenerationResultImageInput {
+                        task_id: "original-task".into(),
+                        current_asset_id: None,
+                        displayed_asset_id: None,
+                        replacement_task_id: "retry-task".into(),
+                        replacement_asset_id: "retry-asset".into(),
+                    },
+                )
+                .expect("单项重试结果应归并到父任务空槽");
+
+            let service = GenerationService::new();
+            let original = service
+                .get_task_detail(workspace.path(), "original-task")
+                .expect("读取归并后的父任务");
+            assert_eq!(original.output_assets.len(), 1);
+            assert_eq!(original.output_assets[0].sort_order, 0);
+            assert_eq!(original.output_assets[0].asset.id, "retry-asset");
+            let retry = service
+                .get_task_detail(workspace.path(), "retry-task")
+                .expect("读取已隐藏重试任务");
+            assert!(retry.output_assets.is_empty());
+            let visible = service
+                .list_tasks(workspace.path(), GenerationTaskQuery::default())
+                .expect("列出可见任务");
+            assert_eq!(visible.items.len(), 1);
+            assert_eq!(visible.items[0].id, "original-task");
+        }
+    }
+
+    #[test]
+    fn replace_result_image_rejects_retry_output_after_the_empty_parent_slot_was_deleted() {
+        let workspace = TestWorkspace::new("reject-retry-after-empty-slot-delete");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "retry-task",
+            "image-generation",
+            json!({
+                "kind": "clothing-tryon-generation",
+                "parentTaskId": "original-task",
+                "items": [{
+                    "imageId": "original-task:item-1",
+                    "imageNo": 1,
+                    "sortOrder": 0,
+                }],
+            }),
+        );
+        insert_asset(&database, "retry-asset");
+        link_output(&database, "retry-task", "retry-asset", 0);
+        drop(database);
+
+        let service = GenerationService::new();
+        service
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    image_id: "original-task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: None,
+                    displayed_asset_id: None,
+                },
+            )
+            .expect("失败空槽删除应先写入 tombstone");
+
+        let error = service
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: None,
+                    displayed_asset_id: None,
+                    replacement_task_id: "retry-task".into(),
+                    replacement_asset_id: "retry-asset".into(),
+                },
+            )
+            .expect_err("删除完成后，晚到的重试结果不能重新占用父任务槽位");
+        assert!(matches!(error, GenerationError::Validation(_)));
+
+        let original = service
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取父任务");
+        assert!(original.output_assets.is_empty());
+        let retry = service
+            .get_task_detail(workspace.path(), "retry-task")
+            .expect("读取已隐藏的未归并重试任务");
+        assert!(retry.output_assets.is_empty());
+        let visible = service
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible.items.len(), 1);
+        assert_eq!(visible.items[0].id, "original-task");
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "retry-asset").0, "deleted");
+    }
+
+    #[test]
+    fn delete_result_image_records_a_tombstone_for_a_failed_empty_slot() {
+        let workspace = TestWorkspace::new("delete-failed-empty-slot");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        drop(database);
+
+        GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    image_id: "original-task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: None,
+                    displayed_asset_id: None,
+                },
+            )
+            .expect("失败空槽应写入删除 tombstone");
+
+        let detail = GenerationService::new()
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取父任务");
+        assert!(detail.output_assets.is_empty());
+        assert_eq!(detail.events.len(), 1);
+        assert_eq!(detail.events[0].event_type, "task.result-image-deleted");
+        assert_eq!(
+            detail.events[0].detail,
+            Some(json!({
+                "sortOrder": 0,
+                "imageId": "original-task:item-1",
+                "imageNo": 1,
+                "assetId": null,
+            }))
+        );
+    }
+
+    #[test]
+    fn delete_failed_empty_slot_cancels_a_running_retry_for_the_same_image() {
+        let workspace = TestWorkspace::new("delete-empty-slot-cancels-running-retry");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "running-retry-task",
+            "image-generation",
+            json!({
+                "kind": "product-detail-generation",
+                "parentTaskId": "original-task",
+                "items": [{ "imageId": "original-task:item-1", "imageNo": 1 }],
+            }),
+        );
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = 'running-retry-task'",
+                [],
+            )
+            .expect("将重试任务设为运行中");
+        drop(database);
+
+        GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    image_id: "original-task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: None,
+                    displayed_asset_id: None,
+                },
+            )
+            .expect("删除失败空槽应终止同槽位运行中重试");
+
+        let database = workspace.database();
+        let (status, hidden_at, completed_at): (String, Option<String>, Option<String>) = database
+            .connection()
+            .query_row(
+                "SELECT status, hidden_at, completed_at FROM generation_tasks WHERE id = 'running-retry-task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("读取运行中重试终态");
+        assert_eq!(status, "cancelled");
+        assert!(hidden_at.is_some());
+        assert!(completed_at.is_some());
+    }
+
+    #[test]
+    fn replace_result_image_keeps_original_slot_hides_replacement_task_and_soft_deletes_old_asset()
+    {
+        let workspace = TestWorkspace::new("replace");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            4,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 3);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        link_input(&database, "replacement-task", "old-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("替换结果图");
+
+        let detail = GenerationService::new()
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取原任务详情");
+        assert_eq!(detail.output_assets.len(), 1);
+        assert_eq!(detail.output_assets[0].sort_order, 3);
+        assert_eq!(detail.output_assets[0].role, "output");
+        assert_eq!(detail.output_assets[0].asset.id, "replacement-asset");
+
+        let replacement_detail = GenerationService::new()
+            .get_task_detail(workspace.path(), "replacement-task")
+            .expect("读取替换任务详情");
+        assert!(replacement_detail.output_assets.is_empty());
+        let visible_tasks = GenerationService::new()
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible_tasks.items.len(), 1);
+        assert_eq!(visible_tasks.items[0].id, "original-task");
+
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "old-asset").0, "deleted");
+        assert_eq!(asset_lifecycle(&database, "replacement-asset").0, "active");
+        assert_eq!(
+            input_relation_count(&database, "replacement-task", "old-asset"),
+            0
+        );
+        assert_eq!(asset_reference_count(&database, "old-asset"), 0);
+    }
+
+    #[test]
+    fn replace_result_image_preserves_old_asset_when_another_visible_task_references_it() {
+        let workspace = TestWorkspace::new("replace-shared");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_task(&database, "shared-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "shared-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("替换共享结果图");
+
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "old-asset").0, "active");
+    }
+
+    #[test]
+    fn replace_result_image_hides_matching_derived_task_and_soft_deletes_its_output() {
+        let workspace = TestWorkspace::new("replace-derived");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(&database, "derived-task", "original-task", 1, "old-asset");
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "displayed-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "displayed-asset");
+        insert_asset(&database, "derived-sibling-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "derived-task", "displayed-asset", 0);
+        link_output(&database, "derived-task", "derived-sibling-asset", 1);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("displayed-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("替换派生结果图");
+
+        let visible_tasks = GenerationService::new()
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible_tasks.items.len(), 1);
+        assert_eq!(visible_tasks.items[0].id, "original-task");
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "displayed-asset").0, "deleted");
+        assert_eq!(
+            asset_lifecycle(&database, "derived-sibling-asset").0,
+            "deleted"
+        );
+        assert_eq!(
+            output_relation_count(&database, "derived-task", "displayed-asset"),
+            0
+        );
+        assert_eq!(
+            output_relation_count(&database, "derived-task", "derived-sibling-asset"),
+            0
+        );
+    }
+
+    #[test]
+    fn replace_result_image_hides_all_older_visible_tasks_for_the_same_slot() {
+        let workspace = TestWorkspace::new("replace-all-older-derived");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "older-derived-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_resize_task(
+            &database,
+            "displayed-derived-task",
+            "original-task",
+            1,
+            "older-derived-asset",
+        );
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "displayed-asset",
+        );
+        for asset_id in [
+            "old-asset",
+            "older-derived-asset",
+            "displayed-asset",
+            "replacement-asset",
+        ] {
+            insert_asset(&database, asset_id);
+        }
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "older-derived-task", "older-derived-asset", 0);
+        link_output(&database, "displayed-derived-task", "displayed-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        link_input(&database, "older-derived-task", "old-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("displayed-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("最新结果应归并并清理同槽位的全部旧派生任务");
+
+        let visible_tasks = GenerationService::new()
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible_tasks.items.len(), 1);
+        assert_eq!(visible_tasks.items[0].id, "original-task");
+
+        let database = workspace.database();
+        for (task_id, asset_id) in [
+            ("older-derived-task", "older-derived-asset"),
+            ("displayed-derived-task", "displayed-asset"),
+        ] {
+            assert_eq!(output_relation_count(&database, task_id, asset_id), 0);
+            assert_eq!(asset_lifecycle(&database, asset_id).0, "deleted");
+        }
+        assert_eq!(
+            output_relation_count(&database, "original-task", "replacement-asset"),
+            1
+        );
+        assert_eq!(
+            output_relation_count(&database, "replacement-task", "replacement-asset"),
+            0
+        );
+        assert_eq!(asset_lifecycle(&database, "old-asset").0, "deleted");
+        assert_eq!(
+            input_relation_count(&database, "older-derived-task", "old-asset"),
+            0
+        );
+        assert_eq!(asset_reference_count(&database, "old-asset"), 0);
+        assert_eq!(asset_lifecycle(&database, "replacement-asset").0, "active");
+    }
+
+    #[test]
+    fn replace_result_image_cleans_older_slot_tasks_when_parent_asset_is_displayed() {
+        let workspace = TestWorkspace::new("replace-parent-displayed-cleans-older");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "older-derived-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        for asset_id in ["old-asset", "older-derived-asset", "replacement-asset"] {
+            insert_asset(&database, asset_id);
+        }
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "older-derived-task", "older-derived-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("展示父槽位资产时也应清理同槽位旧派生任务");
+
+        let visible_tasks = GenerationService::new()
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible_tasks.items.len(), 1);
+        assert_eq!(visible_tasks.items[0].id, "original-task");
+        let database = workspace.database();
+        assert_eq!(
+            output_relation_count(&database, "older-derived-task", "older-derived-asset"),
+            0
+        );
+        assert_eq!(
+            asset_lifecycle(&database, "older-derived-asset").0,
+            "deleted"
+        );
+    }
+
+    #[test]
+    fn delete_result_image_cleans_older_slot_tasks_when_parent_asset_is_displayed() {
+        let workspace = TestWorkspace::new("delete-parent-displayed-cleans-older");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_resize_task(
+            &database,
+            "older-derived-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "older-derived-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "older-derived-task", "older-derived-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    image_id: "original-task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                },
+            )
+            .expect("展示父槽位资产时也应清理同槽位旧派生任务");
+
+        let visible_tasks = GenerationService::new()
+            .list_tasks(workspace.path(), GenerationTaskQuery::default())
+            .expect("列出可见任务");
+        assert_eq!(visible_tasks.items.len(), 1);
+        assert_eq!(visible_tasks.items[0].id, "original-task");
+        let database = workspace.database();
+        assert_eq!(
+            output_relation_count(&database, "older-derived-task", "older-derived-asset"),
+            0
+        );
+        assert_eq!(
+            asset_lifecycle(&database, "older-derived-asset").0,
+            "deleted"
+        );
+        assert_eq!(asset_lifecycle(&database, "old-asset").0, "deleted");
+    }
+
+    #[test]
+    fn delete_result_image_cancels_a_running_derived_task_before_hiding_it() {
+        let workspace = TestWorkspace::new("delete-cancels-running-derived");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_resize_task(
+            &database,
+            "running-derived-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = 'running-derived-task'",
+                [],
+            )
+            .expect("将派生任务设为运行中");
+        insert_asset(&database, "old-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    image_id: "original-task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                },
+            )
+            .expect("删除结果图应同时终止同槽位运行中派生任务");
+
+        let database = workspace.database();
+        let (status, stage, hidden_at, completed_at): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = database
+            .connection()
+            .query_row(
+                "SELECT status, stage, hidden_at, completed_at FROM generation_tasks WHERE id = 'running-derived-task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("读取派生任务终态");
+        assert_eq!(status, "cancelled");
+        assert_eq!(stage, "failed");
+        assert!(hidden_at.is_some());
+        assert!(completed_at.is_some());
+    }
+
+    #[test]
+    fn replace_result_image_rejects_unrelated_displayed_asset_without_mutation() {
+        let workspace = TestWorkspace::new("replace-unrelated-displayed");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "unrelated-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "unrelated-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        drop(database);
+
+        let error = GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("unrelated-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect_err("无关展示资产必须被拒绝");
+        assert_eq!(
+            error,
+            GenerationError::Validation("当前展示资产与目标结果图不匹配。".to_string())
+        );
+
+        let original = GenerationService::new()
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取未变更原任务");
+        let replacement = GenerationService::new()
+            .get_task_detail(workspace.path(), "replacement-task")
+            .expect("读取未变更替换任务");
+        assert_eq!(original.output_assets[0].asset.id, "old-asset");
+        assert_eq!(replacement.output_assets[0].asset.id, "replacement-asset");
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "old-asset").0, "active");
+        assert_eq!(asset_lifecycle(&database, "unrelated-asset").0, "active");
+        assert_eq!(asset_lifecycle(&database, "replacement-asset").0, "active");
+    }
+
+    #[test]
+    fn replace_result_image_rejects_replacement_from_another_image_slot() {
+        let workspace = TestWorkspace::new("replace-wrong-slot");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            2,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        drop(database);
+
+        let error = GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "replacement-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect_err("不同图片槽位的替换结果必须被拒绝");
+        assert_eq!(
+            error,
+            GenerationError::Validation("替换任务与原结果图不匹配。".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_result_image_removes_only_target_and_records_stable_image_identity() {
+        let workspace = TestWorkspace::new("delete");
+        let database = workspace.database();
+        insert_task(&database, "task", false);
+        insert_resize_task(&database, "derived-task", "task", 1, "asset-0");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET input_json = ?1 WHERE id = 'derived-task'",
+                params![json!({
+                    "kind": "product-detail-image-rewrite",
+                    "parentTaskId": "task",
+                    "targetImageId": "task:item-1",
+                    "imageNo": 1,
+                    "sourceAssetId": "asset-0",
+                })
+                .to_string()],
+            )
+            .expect("设置 AI 改图派生任务输入");
+        insert_asset(&database, "asset-0");
+        insert_asset(&database, "asset-1");
+        insert_asset(&database, "displayed-asset");
+        link_output(&database, "task", "asset-0", 0);
+        link_output(&database, "task", "asset-1", 1);
+        link_output(&database, "derived-task", "displayed-asset", 0);
+        set_task_items(
+            &database,
+            "task",
+            json!([
+                { "imageId": "task:item-1", "imageNo": 1, "sortOrder": 0 },
+                { "imageId": "task:item-2", "imageNo": 2, "sortOrder": 1 },
+            ]),
+        );
+        drop(database);
+
+        GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "task".into(),
+                    image_id: "task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: Some("asset-0".into()),
+                    displayed_asset_id: Some("displayed-asset".into()),
+                },
+            )
+            .expect("删除结果图");
+
+        let detail = GenerationService::new()
+            .get_task_detail(workspace.path(), "task")
+            .expect("读取任务详情");
+        assert_eq!(detail.output_assets.len(), 1);
+        assert_eq!(detail.output_assets[0].sort_order, 1);
+        assert_eq!(detail.output_assets[0].asset.id, "asset-1");
+        let event = detail.events.last().expect("删除事件");
+        assert_eq!(event.event_type, "task.result-image-deleted");
+        assert_eq!(
+            event.detail,
+            Some(json!({
+                "sortOrder": 0,
+                "imageId": "task:item-1",
+                "imageNo": 1,
+                "assetId": "asset-0",
+            }))
+        );
+
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "asset-0").0, "deleted");
+        assert_eq!(asset_lifecycle(&database, "asset-1").0, "active");
+        assert_eq!(asset_lifecycle(&database, "displayed-asset").0, "deleted");
+        assert_eq!(
+            output_relation_count(&database, "derived-task", "displayed-asset"),
+            0
+        );
+    }
+
+    #[test]
+    fn delete_result_image_rejects_unrelated_displayed_assets_without_mutation() {
+        for unrelated_kind in ["model", "source", "generated"] {
+            let workspace = TestWorkspace::new(&format!("delete-unrelated-{unrelated_kind}"));
+            let database = workspace.database();
+            insert_task(&database, "task", false);
+            insert_asset(&database, "target-asset");
+            insert_asset(&database, "unrelated-asset");
+            database
+                .connection()
+                .execute(
+                    "UPDATE assets SET kind = ?1 WHERE id = 'unrelated-asset'",
+                    [unrelated_kind],
+                )
+                .expect("设置无关资产类型");
+            link_output(&database, "task", "target-asset", 0);
+            set_task_items(
+                &database,
+                "task",
+                json!([{ "imageId": "task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+            );
+            drop(database);
+
+            let error = GenerationService::new()
+                .delete_result_image(
+                    workspace.path(),
+                    DeleteGenerationResultImageInput {
+                        task_id: "task".into(),
+                        image_id: "task:item-1".into(),
+                        image_no: Some(1),
+                        asset_id: Some("target-asset".into()),
+                        displayed_asset_id: Some("unrelated-asset".into()),
+                    },
+                )
+                .expect_err("无关展示资产必须被拒绝");
+            assert_eq!(
+                error,
+                GenerationError::Validation("当前展示资产与目标结果图不匹配。".to_string())
+            );
+
+            let detail = GenerationService::new()
+                .get_task_detail(workspace.path(), "task")
+                .expect("读取未变更任务");
+            assert_eq!(detail.output_assets.len(), 1);
+            assert_eq!(detail.output_assets[0].asset.id, "target-asset");
+            assert!(detail
+                .events
+                .iter()
+                .all(|event| event.event_type != "task.result-image-deleted"));
+            let database = workspace.database();
+            assert_eq!(asset_lifecycle(&database, "target-asset").0, "active");
+            assert_eq!(asset_lifecycle(&database, "unrelated-asset").0, "active");
+        }
+    }
+
+    #[test]
+    fn delete_result_image_rejects_generated_output_with_wrong_lineage() {
+        let workspace = TestWorkspace::new("delete-wrong-displayed-lineage");
+        let database = workspace.database();
+        insert_task(&database, "task", false);
+        insert_resize_task(
+            &database,
+            "unrelated-derived-task",
+            "another-parent-task",
+            1,
+            "unrelated-asset",
+        );
+        insert_asset(&database, "target-asset");
+        insert_asset(&database, "unrelated-asset");
+        link_output(&database, "task", "target-asset", 0);
+        link_output(&database, "unrelated-derived-task", "unrelated-asset", 0);
+        set_task_items(
+            &database,
+            "task",
+            json!([{ "imageId": "task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        drop(database);
+
+        let error = GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "task".into(),
+                    image_id: "task:item-1".into(),
+                    image_no: Some(1),
+                    asset_id: Some("target-asset".into()),
+                    displayed_asset_id: Some("unrelated-asset".into()),
+                },
+            )
+            .expect_err("错误 lineage 的派生输出必须被拒绝");
+        assert_eq!(
+            error,
+            GenerationError::Validation("当前展示资产与目标结果图不匹配。".to_string())
+        );
+
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "target-asset").0, "active");
+        assert_eq!(asset_lifecycle(&database, "unrelated-asset").0, "active");
+        assert_eq!(
+            output_relation_count(&database, "unrelated-derived-task", "unrelated-asset"),
+            1
+        );
+    }
+
+    #[test]
+    fn delete_result_image_rolls_back_relation_and_soft_delete_when_event_insert_fails() {
+        let workspace = TestWorkspace::new("delete-rollback");
+        let database = workspace.database();
+        insert_task(&database, "task", false);
+        insert_asset(&database, "asset");
+        link_output(&database, "task", "asset", 2);
+        database
+            .connection()
+            .execute_batch(
+                "
+                CREATE TRIGGER reject_result_image_deleted_event
+                BEFORE INSERT ON task_events
+                WHEN NEW.event_type = 'task.result-image-deleted'
+                BEGIN
+                    SELECT RAISE(ABORT, 'reject delete event');
+                END;
+                ",
+            )
+            .expect("创建失败注入 trigger");
+        drop(database);
+
+        let error = GenerationService::new()
+            .delete_result_image(
+                workspace.path(),
+                DeleteGenerationResultImageInput {
+                    task_id: "task".into(),
+                    image_id: "task:item-3".into(),
+                    image_no: Some(3),
+                    asset_id: Some("asset".into()),
+                    displayed_asset_id: Some("asset".into()),
+                },
+            )
+            .expect_err("事件失败必须回滚事务");
+        assert!(error.to_string().contains("reject delete event"));
+
+        let detail = GenerationService::new()
+            .get_task_detail(workspace.path(), "task")
+            .expect("读取回滚后的任务详情");
+        assert_eq!(detail.output_assets.len(), 1);
+        assert_eq!(detail.output_assets[0].asset.id, "asset");
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "asset").0, "active");
+    }
+
+    #[test]
+    fn replace_result_image_rejects_non_succeeded_or_hidden_replacement_task_without_mutation() {
+        let workspace = TestWorkspace::new("replace-task-state");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = 'replacement-task'",
+                [],
+            )
+            .expect("设置运行中替换任务");
+        drop(database);
+
+        let service = GenerationService::new();
+        let input = ReplaceGenerationResultImageInput {
+            task_id: "original-task".into(),
+            current_asset_id: Some("old-asset".into()),
+            displayed_asset_id: Some("old-asset".into()),
+            replacement_task_id: "replacement-task".into(),
+            replacement_asset_id: "replacement-asset".into(),
+        };
+        service
+            .replace_result_image(workspace.path(), input.clone())
+            .expect_err("运行中替换任务必须被拒绝");
+
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'succeeded', stage = 'completed', hidden_at = datetime('now') WHERE id = 'replacement-task'",
+                [],
+            )
+            .expect("设置隐藏替换任务");
+        drop(database);
+        service
+            .replace_result_image(workspace.path(), input)
+            .expect_err("隐藏替换任务必须被拒绝");
+
+        let original = service
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取未变更原任务");
+        let replacement = service
+            .get_task_detail(workspace.path(), "replacement-task")
+            .expect("读取未变更替换任务");
+        assert_eq!(original.output_assets[0].asset.id, "old-asset");
+        assert_eq!(replacement.output_assets[0].asset.id, "replacement-asset");
+    }
+
+    #[test]
+    fn replace_result_image_rejects_non_generated_or_inactive_replacement_asset_without_mutation() {
+        let workspace = TestWorkspace::new("replace-asset-state");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "original-task",
+            1,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        database
+            .connection()
+            .execute(
+                "UPDATE assets SET kind = 'model' WHERE id = 'replacement-asset'",
+                [],
+            )
+            .expect("设置错误资产类型");
+        drop(database);
+
+        let service = GenerationService::new();
+        let input = ReplaceGenerationResultImageInput {
+            task_id: "original-task".into(),
+            current_asset_id: Some("old-asset".into()),
+            displayed_asset_id: Some("old-asset".into()),
+            replacement_task_id: "replacement-task".into(),
+            replacement_asset_id: "replacement-asset".into(),
+        };
+        service
+            .replace_result_image(workspace.path(), input.clone())
+            .expect_err("非 generated 替换资产必须被拒绝");
+
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE assets SET kind = 'generated', lifecycle = 'staged' WHERE id = 'replacement-asset'",
+                [],
+            )
+            .expect("设置 staged 替换资产");
+        drop(database);
+        service
+            .replace_result_image(workspace.path(), input)
+            .expect_err("非 active 替换资产必须被拒绝");
+
+        let original = service
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取未变更原任务");
+        let replacement = service
+            .get_task_detail(workspace.path(), "replacement-task")
+            .expect("读取未变更替换任务");
+        assert_eq!(original.output_assets[0].asset.id, "old-asset");
+        assert_eq!(replacement.output_assets[0].asset.id, "replacement-asset");
+    }
+
+    #[test]
+    fn replace_result_image_rejects_non_dedicated_or_multi_output_replacement_task() {
+        let workspace = TestWorkspace::new("replace-task-contract");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        insert_resize_task(
+            &database,
+            "replacement-task",
+            "wrong-parent",
+            1,
+            "old-asset",
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        insert_asset(&database, "extra-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "replacement-task", "replacement-asset", 0);
+        drop(database);
+
+        let service = GenerationService::new();
+        let input = ReplaceGenerationResultImageInput {
+            task_id: "original-task".into(),
+            current_asset_id: Some("old-asset".into()),
+            displayed_asset_id: Some("old-asset".into()),
+            replacement_task_id: "replacement-task".into(),
+            replacement_asset_id: "replacement-asset".into(),
+        };
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET kind = 'image-generation' WHERE id = 'replacement-task'",
+                [],
+            )
+            .expect("设置错误替换任务 kind");
+        drop(database);
+        let error = service
+            .replace_result_image(workspace.path(), input.clone())
+            .expect_err("非白名单任务 kind 与 input kind 组合必须被拒绝");
+        assert_eq!(
+            error,
+            GenerationError::Validation("替换任务与原结果图不匹配。".to_string())
+        );
+
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET kind = 'image-edit', input_json = ?1 WHERE id = 'replacement-task'",
+                params![json!({
+                    "kind": "product-detail-image-rewrite",
+                    "parentTaskId": "original-task",
+                }).to_string()],
+            )
+            .expect("设置错误替换任务 input kind");
+        drop(database);
+        let error = service
+            .replace_result_image(workspace.path(), input.clone())
+            .expect_err("缺少目标身份的商品微调任务必须被拒绝");
+        assert_eq!(
+            error,
+            GenerationError::Validation("替换任务缺少目标结果图标识。".to_string())
+        );
+
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET input_json = ?1 WHERE id = 'replacement-task'",
+                params![json!({
+                    "kind": "result-image-resize",
+                    "parentTaskId": "wrong-parent",
+                })
+                .to_string()],
+            )
+            .expect("设置错配 parentTaskId");
+        drop(database);
+        service
+            .replace_result_image(workspace.path(), input.clone())
+            .expect_err("parentTaskId 错配必须被拒绝");
+
+        let database = workspace.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET input_json = ?1 WHERE id = 'replacement-task'",
+                params![json!({
+                    "kind": "result-image-resize",
+                    "parentTaskId": "original-task",
+                })
+                .to_string()],
+            )
+            .expect("修正替换任务输入");
+        link_output(&database, "replacement-task", "extra-asset", 1);
+        drop(database);
+        service
+            .replace_result_image(workspace.path(), input)
+            .expect_err("多输出替换任务必须被拒绝");
+
+        let original = service
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取未变更原任务");
+        let replacement = service
+            .get_task_detail(workspace.path(), "replacement-task")
+            .expect("读取未变更替换任务");
+        assert_eq!(original.output_assets[0].asset.id, "old-asset");
+        assert_eq!(replacement.output_assets.len(), 2);
+    }
+
+    #[test]
+    fn delete_result_image_rejects_image_identity_mismatch_without_mutation() {
+        let workspace = TestWorkspace::new("delete-identity");
+        let database = workspace.database();
+        insert_task(&database, "task", false);
+        insert_asset(&database, "asset");
+        link_output(&database, "task", "asset", 1);
+        set_task_items(
+            &database,
+            "task",
+            json!([
+                { "imageId": "task:item-1", "imageNo": 1, "sortOrder": 0 },
+                { "imageId": "task:item-2", "imageNo": 2, "sortOrder": 1 },
+            ]),
+        );
+        drop(database);
+
+        let service = GenerationService::new();
+        for (image_id, image_no) in [
+            ("", Some(2)),
+            ("task:item-2", None),
+            ("task:item-2", Some(0)),
+            ("task:item-2", Some(1)),
+            ("task:wrong-item", Some(2)),
+        ] {
+            service
+                .delete_result_image(
+                    workspace.path(),
+                    DeleteGenerationResultImageInput {
+                        task_id: "task".into(),
+                        image_id: image_id.into(),
+                        image_no,
+                        asset_id: Some("asset".into()),
+                        displayed_asset_id: Some("asset".into()),
+                    },
+                )
+                .expect_err("错配图片身份必须被拒绝");
+        }
+
+        let detail = service
+            .get_task_detail(workspace.path(), "task")
+            .expect("读取未变更任务");
+        assert_eq!(detail.output_assets.len(), 1);
+        assert_eq!(detail.output_assets[0].asset.id, "asset");
+        assert!(detail.events.is_empty());
+        let database = workspace.database();
+        assert_eq!(asset_lifecycle(&database, "asset").0, "active");
     }
 }

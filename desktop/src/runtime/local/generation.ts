@@ -1,12 +1,14 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   CreateGenerationTaskInput,
+  DeleteGenerationResultImageInput,
   GenerationPort,
   GenerationTask,
   GenerationTaskDetail,
   GenerationTaskPage,
   GenerationTaskQuery,
   LocalTaskExecutionResult,
+  ReplaceGenerationResultImageInput,
   RetryGenerationTaskInput,
   WorkspaceStatus,
 } from "../index";
@@ -23,6 +25,12 @@ export const localGenerationPort: GenerationPort = {
   },
   deleteTask(taskId: string) {
     return invoke("generation_delete_task", { taskId });
+  },
+  replaceResultImage(input: ReplaceGenerationResultImageInput) {
+    return invoke("generation_replace_result_image", { input });
+  },
+  deleteResultImage(input: DeleteGenerationResultImageInput) {
+    return invoke("generation_delete_result_image", { input });
   },
   getTask(taskId: string) {
     return invoke<GenerationTask>("generation_get_task", { taskId });
