@@ -532,11 +532,12 @@ M7 真实场景生图闭环
 - 执行动作：
   - 商品详情图生成前走 plan create/edit/confirm。
   - 服饰试穿生成前走 `clothing-scene-planning`，让模型基于服装图、模特图和场景输入输出可展示的场景/动作方案。
-  - 场景图 MVP 继续单阶段 intent，不要求 `promptPlanId`。
+  - 场景图先走 `scene-prompt-planning` 结构化规划，用户审核后再创建
+    `scene-image-generation` 父任务，并用 `promptPlanId` 关联规划任务。
 - 验收标准：
   - 商品详情图未确认 plan 时不能创建对应生成任务。
   - 服饰菜单未完成场景/动作规划时不能创建对应出图任务。
-  - 场景任务不传 `promptPlanId` 也可创建。
+  - 场景生图任务冻结两份 Prompt 版本、catalog 版本、Campaign Style Lock 和 items。
   - `make test`、`make frontend-build` 通过。
 - 退出条件：商品详情 PromptPlan 语义和服饰规划任务语义在 UI 层明确。
 
@@ -547,7 +548,7 @@ M7 真实场景生图闭环
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
-- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，`provider_profile_id` 由 Rust allowlist 校验；用户可为内置 profile 的模型配置修改并持久化 Base URL，Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。协议和 capability 矩阵仍由 Rust 内置映射控制。DeepSeek 和火山引擎按 OpenAI-compatible 形态维护 endpoint 默认值。OpenAI 已开放已实现的文生文、图生文、`clothing-base-model-generation` 纯文生图，以及图生图 `clothing-tryon-generation` / `image-edit` capability；后两项统一固定到 `/v1/images/edits`。`clothing-base-model-generation` 固定生成 2:3 纵向图且不接收参考图；需要商品参考图或任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放。
+- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，`provider_profile_id` 由 Rust allowlist 校验；用户可为内置 profile 的模型配置修改并持久化 Base URL，Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。协议和 capability 矩阵仍由 Rust 内置映射控制。OpenAI 已开放 `scene-prompt-planning` 图生文与 `scene-image-generation` 图生图；前者走 Responses，后者与 `clothing-tryon-generation` / `image-edit` 一样走 `/v1/images/edits` multipart。火山规划走 Responses，场景生图走 `/images/generations`。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
@@ -637,7 +638,7 @@ M7 真实场景生图闭环
 ### M5-T04 CapabilityPort
 
 - 依赖：M5-T02、M5-T03。
-- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但 `clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation` 三项 real-provider-only 能力在仅有 `mock-local` 时必须返回不可用。基准模特生成不能复用 `clothing-tryon-generation` 的图生图配置；服饰场景规划可复用同属 `image-to-text` 类别且已测试可用的真实默认模型配置，避免旧 workspace 只配置商品卖点图生文模型时被误判为无可用模型。基准模特公开元数据固定为 0 张输入、2:3、1 张输出；服饰规划和试穿最多接收 5 张服装图加 1 张模特图，并只声明当前 UI 支持的 3:4、1:1、9:16 比例。
+- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但服饰三项能力以及 `scene-prompt-planning`、`scene-image-generation` 均为 real-provider-only。场景规划和场景生图最多接收 3 张参考图，类别分别为 `image-to-text`、`image-to-image`，并声明 3:4、1:1、9:16 比例。
 - 主要文件：
   - `desktop/src-tauri/src/services/capability*`
   - `desktop/src/runtime/local/capability*`
@@ -654,7 +655,7 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
-- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 10 个 capability、provider profiles、local configs 和 secret status；Mock Local 的 Base URL 固定为 `mock://local`，其他 provider 的 Base URL 可编辑并随模型配置通过 `ModelConfigPort` 持久化，但只接受无凭据、无查询参数的 HTTPS 地址。连接探测和真实调用均使用持久化地址，变更后连接状态回到 `untested`。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。保存 API Key 走 `SecretPort`，连接测试会触发 Rust runtime 的 Provider 探测，结果持久化后刷新能力状态。保存分类配置时会将该分类 capability 与当前 `ProviderProfile.supportedCapabilities` 求交集，不向后端提交 Provider 未实现的能力；重载分类配置、读取 secret status 和 reveal 明文也复用同一个 Provider 支持的代表 capability，因此 OpenAI 仅保存 `clothing-base-model-generation` 时不会被该分类中的 Mock 默认配置覆盖回显，API Key scope 也保持一致。`clothing-base-model-generation` 已作为独立于图生图试穿的文生图配置项展示与保存。OpenAI 图生图 profile 会在“图生图 Provider”菜单中出现；选择并保存时，页面会分别提交 `clothing-tryon-generation` 与 `image-edit` 两项配置，实际 endpoint 仍由 Rust runtime 固定解析。`图生文` 类别会同时保存 `product-selling-points` 和 `clothing-scene-planning`，但测试连接只发起一次代表该类别 Provider/model/API Key 的最小探测；Rust runtime 会复用同类别、同 provider 的已有 secret，并同步同类别、同配置的默认项状态，避免模型测试和具体业务能力重复耦合。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 11 个 capability、provider profiles、local configs 和 secret status。`图生文` 分类包含商品卖点、服饰规划和场景规划；`图生图` 分类包含场景生图、服饰试穿和图片编辑。保存分类配置时仍与 Provider allowlist 求交集，endpoint 由 Rust runtime 固定解析。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
@@ -696,7 +697,7 @@ M7 真实场景生图闭环
 ### M6-T02 DeterministicModelGatewayAdapter
 
 - 依赖：M6-T01。
-- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，支持 10 个 capability 的 deterministic mock 输出，不触发真实 Provider 调用；其中 `clothing-scene-planning` 会返回结构化场景方案 JSON，每个场景包含 4 个动作，`clothing-base-model-generation` 返回文生图结果；每次调用会写入脱敏 invocation 记录。
+- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，覆盖 11 个 capability 的底层测试替身，不触发真实 Provider 调用；real-provider-only 能力不会因此在业务 UI 中变为可用。每次调用会写入脱敏 invocation 记录。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/deterministic*`
   - `desktop/src-tauri/src/services/model_gateway*test*`
@@ -712,7 +713,7 @@ M7 真实场景生图闭环
 ### M6-T03 OpenAI / OpenAI-compatible adapter 骨架
 
 - 依赖：M6-T01。
-- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，`image-edit` 优先使用 runtime 按当前模型校验过的显式 `size`，旧任务仍按 1:1、横向、竖向映射目标尺寸；火山引擎图生图也会校验并透传当前模型支持的显式 `size`，`doubao-seedream-5-0-pro-260628` 使用独立的官方 1K/2K 精确尺寸表，且真实最小请求不发送该模型不支持的组图或流式字段。保存配置、Provider 连接探测和历史配置执行都会强制解析对应 endpoint。火山引擎文生图/图生图真实调用使用 300 秒总超时；OpenAI `clothing-tryon-generation` / `image-edit` 保持 60 秒，`clothing-scene-planning` 和其余普通能力为 90 秒，`prompt-plan` 为 300 秒；前端任务无进展窗口为 360 秒并长于最长 Provider timeout，queued 未启动窗口保持不变。诊断同时保留机器可读的 `elapsedMs` 与人类可读的 `elapsed` 总耗时；Debug 开关开启时会额外输出已剔除图片数据、URL、header、凭据和 secret 的归一化模型结果摘要。上述证据来自本地 HTTP/单元测试，尚未重新验证优化后的真实火山引擎外网调用。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
+- 当前状态：部分完成。已接入真实同步 HTTP 请求和文本流式请求；OpenAI-compatible 响应归一化支持 Chat Completions `choices[].message.content` 和 Responses API `output_text` 两类文本出参，并统一 `usage` 字段；OpenAI Images Generations 当前仅用于不携带参考图的 `clothing-base-model-generation`，固定请求 `1024x1536` 与业务 2:3 纵向约束一致，收到参考图或其他生图 kind 时快速失败，不丢图或静默折算比例。OpenAI 图生图已通过 `/v1/images/edits` 发送 `multipart/form-data`：只接受 PNG、JPEG、WebP，`image-edit` 优先使用 runtime 按当前模型校验过的显式 `size`，旧任务仍按 1:1、横向、竖向映射目标尺寸；火山引擎图生图也会校验并透传当前模型支持的显式 `size`，`doubao-seedream-5-0-pro-260628` 使用独立的官方 1K/2K 精确尺寸表，连接探测继续使用 1K，真实场景任务未显式指定尺寸时按冻结比例选择 2K，且真实最小请求不发送该模型不支持的组图或流式字段。保存配置、Provider 连接探测和历史配置执行都会强制解析对应 endpoint。火山引擎文生图/图生图真实调用使用 300 秒总超时；OpenAI `clothing-tryon-generation` / `image-edit` 保持 60 秒，`clothing-scene-planning` 和其余普通能力为 90 秒，`prompt-plan` 为 300 秒；前端任务无进展窗口为 360 秒并长于最长 Provider timeout，queued 未启动窗口保持不变。诊断同时保留机器可读的 `elapsedMs` 与人类可读的 `elapsed` 总耗时；Debug 开关开启时会额外输出已剔除图片数据、URL、header、凭据和 secret 的归一化模型结果摘要。上述证据来自本地 HTTP/单元测试，尚未重新验证优化后的真实火山引擎外网调用。Provider `async-task` 提交与轮询、OpenAI Responses `image_generation` 工具仍待后续切片。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/openai_compatible.rs`
   - `desktop/src-tauri/src/infrastructure/providers/openai_images.rs`
@@ -752,6 +753,50 @@ M7 真实场景生图闭环
 
 目标：完成第一条真实场景图片生成链路。
 
+2026-07-12 验证状态：场景菜单已完成两阶段真实任务接线。规划阶段使用
+`scene-prompt-planning` + 25 模板 TOML catalog，用户确认后由一个
+`scene-image-generation` 父任务按稳定 item 槽位并发生成；OpenAI 走 Responses /
+`/v1/images/edits`，火山走 Responses / `/images/generations`。场景 fake timer 已移除，
+历史恢复、部分失败、取消、删除、尺寸修改和单图重试已接入既有合同。`make check` exit 0，
+覆盖 249 项 Vitest、frontend build、cargo check 和 0 个高危 npm audit；Rust 全量
+`cargo test` exit 0，lib 182/182 及全部 integration tests 通过，`git diff --check` 通过。
+付费真实 Provider 外网 smoke test 与真实桌面竞态仍需人工验收。
+
+2026-07-12 兼容性修复状态：已完成并验证。H/D 输出叙事、模式字段边界、Prompt
+审核交互和场景单图重试归并已与本轮 `ecom-details-image` 迁移合同对齐；已通过场景
+定向测试、前后端全量测试、生产构建、Rust 检查、依赖审计和补丁格式检查。付费真实
+Provider 外网 smoke test 仍由人工验收。
+
+2026-07-12 生图参数修复：场景审核页统一显示“场景方案”和“场景摘要”，只展示模型生成的
+摘要，不展示或编辑完整 Prompt；Seedream 5.0 / 5.0 Lite 不再复用 4.x 的低像素 2K 尺寸，3:4
+映射改为 `1728x2304`。场景成功结果进入生成历史“场景”分类的既有链路已增加回归
+断言；参考图仍不单独生成历史记录。付费真实 Provider 重试仍待人工验收。
+
+2026-07-12 模板兼容修复：已逐项 review 原 `ecom-details-image` 25 个模板，catalog
+恢复原 variant ID、品类覆盖和安全化后的镜头、光线、姿态、情绪及 Anti-AI 执行语义。
+当前自动路由目标版本为 routing/planning/generation/catalog `v3/v10/v7/v5`；此前 v9 精简策略的
+自动化合同已通过 `make check`（249 项 Vitest、frontend build、cargo check、0 个高危 npm
+audit）和 Rust 全量 `cargo test`（lib 182/182 及全部 integration tests），v10 的新增定向合同
+覆盖渠道与交付物优先级、infographic 完整度和文化器物事实边界；25 模板按真实参考图
+与补充信息进行路由的语义表现和付费 Provider A/B 仍待人工验收。规划结果必须通过独立
+`variantId` 冻结唯一 variant，并同时输出用户摘要与完整可执行 Prompt；人物参考主体允许
+在身份和身体比例不变的前提下受控调整姿态、视线和表情；只有服装本身是商品参考或用户
+要求保留时才锁定现有服装。旧 Prompt/catalog
+版本任务仍可查看，但重试必须重新规划。真实人物杂志图的付费 Provider A/B 仍待人工验收。
+Generation Prompt 改为薄执行器，只消费第二步的完整 Prompt、参考图和尺寸，不再叠加
+Style Lock、模板规则或独立负向约束；所有非当前版本任务仍可查看，但重试前必须重新规划。
+25 个模板新增各自的 `executor_identity`；第三步按 `templateId` 注入对应专业身份并直接
+生图，Prompt 不得出现“上一步”“本阶段”等模型不可见的流程上下文。
+
+2026-07-13 信息图语义修复：当前版本升级为 routing/planning/generation/catalog
+`v3/v10/v7/v5`。routing 区分交付物形式、画面语言和投放渠道，“用于小红书发布的信息图”
+不得仅因渠道词退化为 social-media；planning 与 catalog 为 infographic 恢复结构化布局、
+HEX 色板、移动端字号、4-6 个证据型 callout、主体占比、留白和文化器物事实边界。自动化
+合同已补；本轮又补充取消后的结构化结果原子写入、Seedream 5 Pro 探测/真实生成尺寸分离、
+非终态场景任务恢复轮询和标题编号幂等回归。`make check` 通过 255 项 Vitest、frontend build、
+cargo check 和 0 个 npm 漏洞，Rust 全量通过 185 项 lib tests 及全部 integration/doc tests。真实参考图的语义路由和付费
+Provider 视觉效果仍待人工验收，本项不标记完成。
+
 ### M7-T01 LocalTaskExecutor
 
 - 依赖：M3-T03、M6-T02。
@@ -783,7 +828,16 @@ M7 真实场景生图闭环
 ### M7-T02 场景任务调用 ModelGateway
 
 - 依赖：M7-T01、M6-T03。
-- 当前状态：部分完成。`LocalTaskExecutor` 已能把 `scene + image-generation` 映射为 `scene-image-generation` capability，并通过 deterministic `ModelGatewayService` 完成 mock 调用，生成 `model_invocations` 记录；服饰菜单已补充 `clothing-base-model-generation` 文生图、`clothing-scene-planning` 图生文规划映射和 `clothing-tryon-generation` 逐动作出图映射。基准模特 Prompt 支持婴儿、儿童、青少年、青年、中年、老年；规划阶段会渲染 `clothing_scene_planning.toml` 并要求模型输出可展示的场景/动作结构，第三步出图阶段会渲染 `clothing_tryon_generation.toml` 并拼接用户上传服装图、用户选择模特和第二步用户选择的场景动作。失败服饰结果卡的“重新生成”会复用原任务的输入资产和对应单项参数，创建并立即启动新的单项 `clothing-tryon-generation` 任务，不重跑已成功卡片。服饰基准模特、规划和试穿执行路径要求真实 provider，`mock-local` 只保留为底层 adapter/测试替身。真实同步 HTTP 和文本流式调用入口已接入；`async-task` Provider 提交与轮询仍待后续切片。
+- 当前状态：场景链路与自动路由已有实现，前端 Scene 相关回归和后端 Prompt、参考资产、
+  脱敏、variant/routing、安全入库问题已修复，并通过 `make check` 与 Rust 全量测试。目标合同是在同一个
+  real-provider-only `scene-prompt-planning` 任务内部先用精简 routing index 执行模板路由，
+  返回并冻结 conversion driver、视觉方向和模板，再只注入选中模板完整规则执行最终规划，
+  由 planning 在冻结模板内选择 variant override 或使用 `base`。Rust 只校验结构、catalog 归属
+  和冻结路由一致性，不重新实现主体识别或证据门槛；H/D 推荐模板不是 allowlist，routing
+  Prompt 要求 25 个模板在主体匹配且满足证据门槛时均可到达，full-pack 允许有明确目的差异的模板复用；
+  生图阶段逐项渲染 `scene_image_generation.toml`，最多 4 项 `JoinSet` 并发且继续
+  受 Provider semaphore 限制。至少一项成功时父任务成功并记录失败数，全部失败时
+  返回最低 item index 的规范化错误。Mock Local 只保留为底层测试替身，不伪装真实结果。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src-tauri/src/services/model_gateway*`
@@ -820,7 +874,15 @@ M7 真实场景生图闭环
 ### M7-T04 场景 UI 接真实 GenerationPort
 
 - 依赖：M7-T03、M3-T06。
-- 当前状态：部分完成。商品与服饰生成结果卡已接真实单图修改尺寸、下载和删除：尺寸浮层从当前 `image-edit` 配置按 provider + model 读取精确选项，默认选择最接近当前宽高比的尺寸；异步读取和提交都按操作归属隔离，关闭、切换图片或前一个修改完成时不能覆盖新目标或提前解除 loading。修改尺寸或 AI 改图时把当前展示图作为参考图，并携带原 Prompt 与 provider 原始 `size` 或微调指令创建真实 `image-edit` 任务，成功后在事务内校验目标图片身份与槽位并替换父任务原槽位，失败保留原图。商品与服饰单图重试的唯一 active output 同样在事务内更新或补齐父任务稳定槽位并隐藏子任务，使空槽重试结果可继续改尺寸、删除和恢复；商品/服饰单图重试、修改尺寸或 AI 改图子任务已经成功但归并失败时，前端会隐藏未归并子任务，避免重启后被历史恢复误当成有效结果。归并或删除旧派生结果时，展示资产只用于校验当前操作，事务会把同一 `parentTaskId + imageId + imageNo` 下仍处于 `queued` / `running` 的旧派生任务原子转为 `cancelled` 并隐藏，清理其无可见引用输出；执行器的 stage、结果持久化和终态回写均拒绝隐藏任务。下载保存当前资产的原始字节和扩展名，不经 Canvas 重编码。单图删除需二次确认；普通、失败结果卡和批量删除统一执行持久化命令，仅隐藏成功项，失败项保持可见和选中并提示错误；失败槽位即使没有 output asset，也会按稳定 `imageId` / `imageNo` 写删除 tombstone，事务会拒绝后续晚到重试结果重新占用该槽位。删除事务移除对应结果关系并仅软删除无可见引用的资产；若当前展示图来自旧单图重试或 AI 改图，同一事务会隐藏对应派生任务并清理其无可见引用的旧输出，避免 active 孤儿资产。历史恢复读取删除事件，不再恢复已成功删除的卡片。已覆盖前端交互、Runtime adapter、Rust 事务和 Provider request 单测；真实 OpenAI/火山引擎外网、macOS/Windows 系统保存对话框仍待手工验收。
+- 当前状态：场景页已接入真实 `createTask -> runTask(taskId) -> poll detail`，规划与
+  生图均不再使用 fake timer。结果卡只读取 generated assets，按当前结果槽派生完成、
+  部分失败或失败状态；历史可恢复和重新打开场景任务。场景结果复用既有下载、删除、
+  尺寸修改与稳定槽位归并能力；生成的人物或商品场景图会作为父任务结果进入生成历史
+  的“场景”筛选。实时结果和历史恢复都会把冻结参考图重建为首位只读“原图”卡；原图不
+  单独创建记录，也不计入生成数量、历史缩略图、选择、下载、长图或相册。history fallback
+  与并发历史查看回归已修复并通过 Vitest。相册只查看成功的 generated assets，并按图片固有
+  比例展示，不在图片外补浅色背景。真实 OpenAI/火山引擎外网、macOS/Windows 系统保存
+  对话框和真实桌面快速历史切换竞态仍待手工验收。
 - 主要文件：
   - `desktop/src/features/scenes/*`
   - `desktop/src/features/generation/*`
@@ -841,6 +903,16 @@ M7 真实场景生图闭环
 ### M7-T05 重试、取消、恢复闭环
 
 - 依赖：M7-T04。
+- 当前状态：场景父任务取消、中断恢复和单图重试已有实现；单图重试冻结原 item、参考资产
+  和稳定 `imageId/imageNo`，成功后原子归并父任务槽位并隐藏子任务。跨任务 `imageId` 作用域、
+  创建期间取消、重试任务取消、成功子任务归并期间 reset、重启后的 retry 结果恢复，以及恢复
+  记录删除时 planning task 关联问题均已修复并通过前端/Rust 回归。Prompt 或 catalog 版本
+  不匹配的旧任务仍可查看结果，但重试会明确要求重新规划；失败 retry 不覆盖已有成功父图。
+  React/WebView 重载时，仍为 `queued` / `running` 的场景父任务和 retry 会恢复轮询与取消追踪；
+  进程重启后已由 startup recovery 标记为 `interrupted` 的任务不会被重新启动。相关 child task
+  继续保留在删除关联中。用户开始另一轮普通场景请求时，旧恢复任务仍独立更新自己的历史
+  记录，但不得覆盖当前画布。
+  真实桌面快速新建、取消和重启重试竞态仍待手工验收。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src/features/history/*`
@@ -856,6 +928,109 @@ M7 真实场景生图闭环
   - 重启恢复不留下 running。
   - `make test`、`make cargo-check` 通过。
 - 退出条件：真实场景生图闭环可验收。
+
+### M7-T06 场景输出语义与 UI 合同对齐
+
+- 依赖：M7-T02、M7-T04。
+- 当前状态：H/D 叙事、摘要边界、固定图片包和 UI 合同已完成自动化验证；审核页不再展示
+  内部模板/variant，历史缩略图 fallback 不再使用原图。routing v3 / planning v10 的模板推荐
+  非白名单、合理复用、`base` variant、主体条件化及 system rules 精简合同也已有自动化证据；
+  25 模板真实语义可达性和付费 Provider 外网 smoke test 仍由人工验收。
+- 执行动作：
+  - 由 Prompt TOML 按 `visual`、`pain-point`、`emotional` 三种
+    `conversionDriver` 选择 H1-H5 主图叙事，Rust 不硬编码业务规则。
+  - D1-D9 固定对齐“首屏承接、痛点、机制、利益、步骤、场景、对比、信任、
+    FAQ/CTA”的通用 PDP 叙事；缺少证据时不得虚构包装、认证、评价、优惠或多 SKU。
+  - 模板、variant 和品类执行规则保存在 Prompt/catalog TOML 中，Rust 不硬编码业务文案。
+  - `single` 的 `imageNo/sortOrder/code/purpose/ratio` 来自冻结输入，`templateId` 由 routing
+    冻结；Rust 校验结构、catalog 归属和 planning 与冻结路由一致性，不承担业务模板或
+    variant 的语义选择。Style Lock、标题、Prompt、
+    负向约束和残留占位符继续严格校验，但 Prompt 与独立负向约束不要求逐字子串一致。
+  - routing v3 选择 conversion driver、视觉方向并为每项冻结模板；planning v10 不能改选模板，
+    只在冻结模板内选择 variant；
+    没有适用 override 时使用 `base`。H/D 只固定 code、purpose 和顺序，推荐模板不作 allowlist；
+    routing Prompt 要求 25 个模板均受主体与证据门槛约束且保持可达，真实语义仍待人工验收；
+    full-pack 允许合理复用模板。single 固定 `conversionDriver=visual`。商品摄影模板恢复多角度
+    与景别节奏；人物、空间、界面和创意
+    模板仍服从自身语言。棚拍、海报和信息图可轮换 Style Lock 定义的 HEX 背景，自然环境类
+    模板改为锁定环境材质、地点族、主色倾向和光线连续性。主体占比和详情文字密度仅应用于
+    匹配图型。短文案可基于参考图或用户输入中的证据生成，但不得从缺失输入猜测品牌、功能、
+    参数、效果、促销或认证；受众或平台缺失时使用中性、跨平台安全构图。
+  - 规划失败时返回场景配置页并保留参考图，通过 toast 展示归一化错误；Debug 诊断仅
+    增加有限 `validationReason` 分类，不输出模型原文、Prompt 或图片内容。
+  - `hero-pack`、`detail-pack`、`full-pack` 的固定 5/9/14 项在 Prompt 审核页不可删除
+    或拖拽；任一 Prompt 去除首尾空白后为空时禁用生图入口。
+  - 在“单张场景图、主图组、详情页组、完整图片包”四个标题后紧邻增加说明图标，
+    鼠标悬停或键盘聚焦时复用共享 Tooltip 分别解释 1/5/9/14 张输出数量和业务用途；
+    浮层通过 Portal 挂载到 `body`，不得被左侧滚动面板裁剪。
+  - 当前 `multi-product` 收窄为参考图中已有的同款多角度或同系列组合，对外文案改为
+    “多角度组合”；任意多 SKU 生成等待独立商品资产角色。
+  - 模板 executor、variant、文字与证据政策及原生视觉语言优先于跨图视觉方向；视觉方向
+    仅提供色板、光线和版式基线。D1-D9 信息职责由当前模板按自身构图语言表现，镜头、背景、
+    服装保真和字体策略按商品、人物、空间、界面或混合主体条件化应用。
+- 验收标准：
+  - 三种 `conversionDriver` 分别得到对应 H1-H5 序列，D1-D9 顺序稳定且完整。
+  - UI 不展示或提交场景模板、模板分类或视觉方向。
+  - 单图 planning 结果与冻结输入或路由不一致时由 Rust 拒绝，规划失败不会进入空审核页。
+  - 固定图片包不能删减，空 Prompt 不能启动任务。
+  - 四个 Tooltip 可通过鼠标悬停和键盘聚焦读取，文案准确描述数量和用途，且不被
+    左侧滚动面板裁剪。
+  - `make test`、`make frontend-build`、`make cargo-check`、`make check` 和
+    `git diff --check` 通过。
+- 退出条件：代码、定向测试和全量质量门均通过；完成前保持未勾选。
+
+### M7-T07 场景自动模板路由与必填补充信息
+
+- 依赖：M7-T02、M7-T06。
+- 当前状态：实现和自动化修复已完成；`make check` exit 0，覆盖 249 项 Vitest、frontend build、
+  cargo check 和 0 个高危 npm audit，Rust 全量 `cargo test` exit 0，lib 182/182 及全部
+  integration tests 通过。25 模板在真实参考图上的路由语义、付费 Provider A/B 和真实桌面
+  竞态仍待人工验收，因此本项保持未完成。
+- 执行动作：
+  - UI 删除场景模板、模板分类和视觉方向选择，只保留参考图、输出内容、输出尺寸与
+    必填补充信息；补充信息去除首尾空白后为空时禁止创建规划任务。
+  - 新增 `scene_template_routing.toml`，当前为 v3，但继续使用既有
+    `scene-prompt-planning` capability；不新增 capability、GenerationPort、数据库 schema、
+    migration 或依赖。
+  - 同一个 `prompt-plan` 任务先执行模板路由调用，再执行选中模板的完整规划调用；planning
+    使用 v10、catalog 使用 v5、generation 使用 v7。
+  - routing 调用只注入精简 routing index，选择 conversion driver、视觉方向与模板；planning
+    调用只注入路由实际选中的去重模板完整规则，在冻结模板内选择 variant。Rust 只拒绝结构、
+    catalog 归属、冻结路由一致性或 variant 归属不合法的结果，不维护主体/证据语义判定。
+  - 路由结果只驻留 executor 内存，不写 `generation_tasks`、SQLite、task events、诊断文件
+    或前端 DTO；最终规划通过校验后才允许持久化。
+  - 两次调用顺序复用既有 Provider semaphore；第一次失败、路由非法或任务已取消时不得
+    发起第二次调用。
+  - H/D 固定 code、purpose、数量和顺序，但推荐模板仅用于排序；routing Prompt 要求模型从
+    25 个模板中选择主体匹配且证据充分的模板，该语义效果仍待真实参考图人工验收。full-pack
+    可在不同 purpose 或构图角色下复用模板，不做
+    全局唯一校验；planning 未命中 variant override 时使用 `base`。
+  - 当前模板的原生视觉语言、executor、文字和证据政策优先于视觉方向；视觉方向只维护跨图
+    色板、光线和版式基线。详情职责及镜头、背景、服装、字体规则按模板和主体类型条件化执行。
+  - routing v3 区分交付物形式、画面语言和投放渠道；渠道词不能覆盖明确的信息图或详情形式。
+    planning v10 的 system rules 保留事实与证据、模板优先、Style Lock 核心、variant/base、
+    自包含 Prompt、摘要边界和安全注入；数量、code/purpose 顺序、字段、版本和冻结路由一致性
+    由 output format 与 Rust 校验。planning 输入只包含 code/purpose 和冻结模板完整配置，不含
+    routing 的 `recommendedTemplateIds`。
+- 验收标准：
+  - [x] 四种输出模式均无需用户选择模板或视觉方向，空补充信息不能提交。
+  - [x] routing 与 planning 在同一任务内按顺序调用同一 capability，并记录两个脱敏
+    invocation ID。
+  - [x] planning 请求只包含选中模板完整规则，不包含未选模板或完整 catalog。
+  - [x] single、5/9/14 项的 code、purpose、数量及模板/variant 归属通过校验；推荐模板不会
+    被当成 allowlist，full-pack 合理模板复用可通过。
+  - [ ] 25 个模板均有主体/证据充分时的可达用例，证据不足的受限模板会被拒绝。
+  - [x] 无适用 variant override 时规范化为 `base`，并拒绝不属于冻结模板的 variant。
+  - [ ] 模板视觉语言优先级、详情职责表达和商品/人物/空间/界面主体条件化规则已通过真实
+    参考图语义验收。
+  - [x] planning 请求不包含 `recommendedTemplateIds`；精简后的 system rules 不重复数量、
+    顺序、稳定 ID、版本和字段类型合同，Rust/output format 仍能拒绝非法结构。
+  - [x] routing 失败、结果非法或调用间取消时不执行 planning，也不写最终 output。
+  - [x] SQLite、task events、诊断和前端 DTO 不包含路由结果、raw Prompt、Base64、临时 URL
+    或 raw Provider 内容。
+  - [x] 定向 Vitest/Rust 测试、`make test`、`make frontend-build`、`make cargo-check`、
+    `make check` 和 `git diff --check` 通过。
+- 退出条件：上述未勾选验收项全部取得实现和验证证据后方可完成。
 
 ## 13. 横向验收清单
 
@@ -895,7 +1070,8 @@ M7 真实场景生图闭环
 
 - [ ] 商品详情图要求 confirmed PromptPlan。
 - [ ] 服饰试穿要求先完成 `clothing-scene-planning` 结构化规划。
-- [ ] 场景图 MVP 可无 `promptPlanId`。
+- [x] 场景图要求完成 `scene-prompt-planning` 并通过 `promptPlanId` 关联。
+- [x] 场景 H/D 叙事、可见字段边界、固定图片包和四模式 Tooltip 已通过自动化验证。
 - [ ] task 创建时保存 `PromptPlanSnapshot`。
 - [ ] 编辑原 plan 不影响历史 task。
 

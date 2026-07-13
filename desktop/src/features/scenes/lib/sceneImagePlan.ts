@@ -7,8 +7,6 @@ export type SceneConfigState = {
   outputMode: SceneOutputMode;
   ratio: "3:4" | "1:1" | "9:16";
   supplementalInfo: string;
-  selectedSceneTemplateId: string;
-  selectedVisualDirectionId: string;
 };
 
 export type SceneTemplate = {
@@ -19,30 +17,55 @@ export type SceneTemplate = {
   title: string;
 };
 
-export type SceneVisualDirection = {
-  description: string;
-  id: string;
-  title: string;
-};
-
 export type SceneImagePlan = {
   code: string;
   id: string;
+  imageNo: number;
+  negativeConstraints: string;
   prompt: string;
   promptSummary: string;
   purpose: string;
   ratio: string;
+  sortOrder: number;
   templateId: string;
   title: string;
+  variantId: string;
 };
+
+export type ScenePlanningSnapshot = {
+  campaignStyleLock: string;
+  conversionDriver: "visual" | "pain-point" | "emotional";
+  items: SceneImagePlan[];
+  templateCatalogVersion: string;
+};
+
+export const scenePlanningPromptVersion = "v10";
+export const sceneImageGenerationPromptVersion = "v7";
+export const sceneTemplateCatalogVersion = "v5";
 
 export const sceneRatios: SceneConfigState["ratio"][] = ["3:4", "1:1", "9:16"];
 
-export const sceneOutputModes: Array<{ label: string; value: SceneOutputMode }> = [
-  { label: "单张场景图", value: "single" },
-  { label: "主图组", value: "hero-pack" },
-  { label: "详情页组", value: "detail-pack" },
-  { label: "完整图片包", value: "full-pack" },
+export const sceneOutputModes: Array<{ label: string; tooltip: string; value: SceneOutputMode }> = [
+  {
+    label: "单张场景图（1 张）",
+    tooltip: "输出 1 张图片，AI 根据参考图和补充信息自动选择场景类型，适合补充单个明确用途的图片。",
+    value: "single",
+  },
+  {
+    label: "主图组（5 张）",
+    tooltip: "输出 H1–H5 共 5 张主图，覆盖首屏主视觉、卖点、场景、对比和行动引导。",
+    value: "hero-pack",
+  },
+  {
+    label: "详情页组（9 张）",
+    tooltip: "输出 D1–D9 共 9 张详情图，形成从首屏、痛点、机制到信任与 FAQ/CTA 的完整叙事。",
+    value: "detail-pack",
+  },
+  {
+    label: "完整图片包（14 张）",
+    tooltip: "输出 H1–H5 主图与 D1–D9 详情图，共 14 张，组成一套完整电商图片内容。",
+    value: "full-pack",
+  },
 ];
 
 export const sceneTemplates: SceneTemplate[] = [
@@ -103,7 +126,7 @@ export const sceneTemplates: SceneTemplate[] = [
     title: "模特展示",
   },
   {
-    description: "护肤、清洁、健身效果对比",
+    description: "仅在参考图或补充信息提供证据时展示前后差异",
     group: "信息说明图",
     id: "before-after",
     sourceTemplateId: "before-after",
@@ -131,21 +154,21 @@ export const sceneTemplates: SceneTemplate[] = [
     title: "创意概念",
   },
   {
-    description: "服装尺码对照、穿着建议",
+    description: "通用尺寸、规格、测量方法或使用步骤",
     group: "信息说明图",
     id: "size-spec",
     sourceTemplateId: "size-spec",
     title: "尺码说明",
   },
   {
-    description: "多款产品搭配、组合套装",
+    description: "仅组合参考图中已明确出现的商品或套装",
     group: "信息说明图",
     id: "multi-product",
     sourceTemplateId: "multi-product",
     title: "多品组合",
   },
   {
-    description: "抖音、淘宝直播间截图风格",
+    description: "无平台 Logo、虚假价格或销量的泛化直播画面",
     group: "内容营销图",
     id: "livestream",
     sourceTemplateId: "livestream",
@@ -201,7 +224,7 @@ export const sceneTemplates: SceneTemplate[] = [
     title: "轻奢氛围",
   },
   {
-    description: "手机、电脑产品样机展示",
+    description: "APP、网站或 SaaS 界面的手机与电脑设备样机",
     group: "特殊创意",
     id: "device-mockup",
     sourceTemplateId: "device-mockup",
@@ -223,109 +246,138 @@ export const sceneTemplates: SceneTemplate[] = [
   },
 ];
 
-export const visualDirections: SceneVisualDirection[] = [
-  { description: "干净留白，适合大多数商品", id: "minimal", title: "极简电商" },
-  { description: "高级 A+ 视觉和强层级信息图", id: "premium-a-plus", title: "高端 A+" },
-  { description: "真实生活场景，弱广告感", id: "lifestyle", title: "生活方式" },
-  { description: "手机拍摄质感，适合社媒", id: "ugc-real", title: "UGC 真实感" },
-  { description: "深色或柔和材质，高端氛围", id: "luxury", title: "轻奢氛围" },
-];
-
 export const defaultSceneConfig: SceneConfigState = {
   outputMode: "single",
   ratio: "3:4",
   referenceImages: [],
-  selectedSceneTemplateId: sceneTemplates[0].id,
-  selectedVisualDirectionId: visualDirections[0].id,
   supplementalInfo: "",
 };
 
-const heroPackDefinitions = [
-  { code: "H1", purpose: "一眼说明产品核心价值", templateId: "hero-image", title: "首屏主视觉" },
-  { code: "H2", purpose: "突出商品核心卖点", templateId: "infographic", title: "核心卖点图" },
-  { code: "H3", purpose: "展示典型使用场景", templateId: "lifestyle-scene", title: "使用场景图" },
-  { code: "H4", purpose: "展示方案或体验对比", templateId: "before-after", title: "对比选择图" },
-  { code: "H5", purpose: "收口优惠、保障或行动指令", templateId: "poster-banner", title: "CTA 收口图" },
-];
+const heroPackCodes = ["H1", "H2", "H3", "H4", "H5"] as const;
+const detailPackCodes = ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9"] as const;
 
-const detailPackDefinitions = [
-  { code: "D1", purpose: "承接首屏卖点", templateId: "infographic", title: "详情页首屏" },
-  { code: "D2", purpose: "放大用户痛点", templateId: "before-after", title: "痛点放大" },
-  { code: "D3", purpose: "说明产品机制", templateId: "infographic", title: "机制解释" },
-  { code: "D4", purpose: "展示 2-4 个核心利益", templateId: "infographic", title: "核心利益" },
-  { code: "D5", purpose: "降低使用理解成本", templateId: "size-spec", title: "使用步骤" },
-  { code: "D6", purpose: "覆盖典型使用场景", templateId: "lifestyle-scene", title: "场景覆盖" },
-  { code: "D7", purpose: "比较普通方案与本产品", templateId: "before-after", title: "对比选择" },
-  { code: "D8", purpose: "展示材质、包装或质检证据", templateId: "detail-macro", title: "信任背书" },
-  { code: "D9", purpose: "处理残留疑虑并引导行动", templateId: "poster-banner", title: "FAQ / 风险逆转 / CTA" },
-];
+const sceneTemplateIds = new Set(sceneTemplates.map((template) => template.sourceTemplateId));
+const unresolvedPlaceholderPattern = /\{\{[^{}]+\}\}/;
 
-export function createSceneImagePlans(config: SceneConfigState): SceneImagePlan[] {
-  const selectedTemplate =
-    sceneTemplates.find((template) => template.id === config.selectedSceneTemplateId) ?? sceneTemplates[0];
-  const selectedDirection =
-    visualDirections.find((direction) => direction.id === config.selectedVisualDirectionId) ?? visualDirections[0];
-
-  if (config.outputMode === "single") {
-    return [
-      createSceneImagePlan({
-        code: "S1",
-        config,
-        purpose: selectedTemplate.description,
-        templateId: selectedTemplate.sourceTemplateId,
-        title: selectedTemplate.title,
-        visualDirection: selectedTemplate.title,
-      }),
-    ];
+export function decodeScenePlanningOutput(output: unknown, outputMode: SceneOutputMode): ScenePlanningSnapshot {
+  const value = asRecord(output, "场景规划结果格式无效。");
+  const templateCatalogVersion = requiredString(value.templateCatalogVersion, "场景模板目录版本缺失。");
+  if (templateCatalogVersion !== sceneTemplateCatalogVersion) {
+    throw new Error(`场景模板目录版本不兼容：${templateCatalogVersion}。`);
+  }
+  const campaignStyleLock = requiredPossiblyEmptyString(value.campaignStyleLock, "统一风格锁定字段缺失。");
+  if (outputMode === "single" && campaignStyleLock) {
+    throw new Error("单张场景规划不应包含统一风格锁定。");
+  }
+  if (outputMode !== "single" && !campaignStyleLock) {
+    throw new Error("多图场景规划缺少统一风格锁定。");
+  }
+  const conversionDriver = requiredString(value.conversionDriver, "转化驱动力缺失。");
+  if (conversionDriver !== "visual" && conversionDriver !== "pain-point" && conversionDriver !== "emotional") {
+    throw new Error("场景规划返回了不支持的转化驱动力。");
+  }
+  if (!Array.isArray(value.items)) {
+    throw new Error("场景规划图片项缺失。");
   }
 
-  const definitions =
-    config.outputMode === "hero-pack"
-      ? heroPackDefinitions
-      : config.outputMode === "detail-pack"
-        ? detailPackDefinitions
-        : [...heroPackDefinitions, ...detailPackDefinitions];
+  const expectedDefinitions = expectedDefinitionsForMode(outputMode);
+  if (value.items.length !== expectedDefinitions.length) {
+    throw new Error(`场景规划应返回 ${expectedDefinitions.length} 张图片，实际返回 ${value.items.length} 张。`);
+  }
 
-  return definitions.map((definition) =>
-    createSceneImagePlan({
-      code: definition.code,
-      config,
-      purpose: definition.purpose,
-      templateId: definition.templateId,
-      title: definition.title,
-      visualDirection: selectedDirection.title,
-    }),
-  );
+  const seenImageIds = new Set<string>();
+  const items = value.items.map((item, index): SceneImagePlan => {
+    const itemValue = asRecord(item, `场景规划第 ${index + 1} 项格式无效。`);
+    const expectedCode = expectedDefinitions[index];
+    const code = requiredString(itemValue.code, `场景规划第 ${index + 1} 项编号缺失。`);
+    const id = requiredString(itemValue.imageId, `场景规划第 ${index + 1} 项图片 ID 缺失。`);
+    const imageNo = requiredInteger(itemValue.imageNo, `场景规划第 ${index + 1} 项图片序号无效。`);
+    const sortOrder = requiredInteger(itemValue.sortOrder, `场景规划第 ${index + 1} 项排序无效。`);
+    const templateId = requiredString(itemValue.templateId, `场景规划第 ${index + 1} 项模板缺失。`);
+    const variantId = requiredString(itemValue.variantId, `场景规划第 ${index + 1} 项变体缺失。`);
+    const prompt = requiredString(itemValue.prompt, `场景规划第 ${index + 1} 项 Prompt 缺失。`);
+    const promptSummary = requiredString(itemValue.promptSummary, `场景规划第 ${index + 1} 项摘要缺失。`);
+    const negativeConstraints = requiredString(
+      itemValue.negativeConstraints,
+      `场景规划第 ${index + 1} 项负向约束缺失。`,
+    );
+    if (code !== expectedCode || imageNo !== index + 1 || sortOrder !== index) {
+      throw new Error(`场景规划第 ${index + 1} 项顺序与 ${expectedCode} 合同不一致。`);
+    }
+    if (!sceneTemplateIds.has(templateId)) {
+      throw new Error(`场景规划第 ${index + 1} 项使用了未知模板 ${templateId}。`);
+    }
+    if (seenImageIds.has(id)) {
+      throw new Error(`场景规划存在重复图片 ID：${id}。`);
+    }
+    if (
+      unresolvedPlaceholderPattern.test(prompt) ||
+      unresolvedPlaceholderPattern.test(promptSummary) ||
+      unresolvedPlaceholderPattern.test(negativeConstraints)
+    ) {
+      throw new Error(`场景规划第 ${index + 1} 项仍包含未替换占位符。`);
+    }
+    seenImageIds.add(id);
+    const purpose = requiredString(itemValue.purpose, `场景规划第 ${index + 1} 项用途缺失。`);
+    const ratio = requiredString(itemValue.ratio, `场景规划第 ${index + 1} 项比例缺失。`);
+    const title = requiredString(itemValue.title, `场景规划第 ${index + 1} 项标题缺失。`);
+    const titleWithCode = title.startsWith(`${code} `) ? title : `${code} ${title}`;
+    return {
+      code,
+      id,
+      imageNo,
+      negativeConstraints,
+      prompt,
+      promptSummary,
+      purpose,
+      ratio,
+      sortOrder,
+      templateId,
+      title: titleWithCode,
+      variantId,
+    };
+  });
+
+  return { campaignStyleLock, conversionDriver, items, templateCatalogVersion };
 }
 
-function createSceneImagePlan({
-  code,
-  config,
-  purpose,
-  templateId,
-  title,
-  visualDirection,
-}: {
-  code: string;
-  config: SceneConfigState;
-  purpose: string;
-  templateId: string;
-  title: string;
-  visualDirection: string;
-}): SceneImagePlan {
-  const imageTitle = `${code} ${title}`;
-  const supplement = config.supplementalInfo.trim() || "用户未填写补充信息，按参考图主体和场景模板生成。";
-  const styleLock =
-    "统一风格锁定：整套图片保持一致的高级电商视觉系统；固定干净的暖白背景、深炭灰文字和一个与产品匹配的强调色；使用中性偏冷的棚拍光、现代几何无衬线字体、统一线宽的细线图标和圆角标签；保持充足留白；不要混用字体、不要随机背景、不要出现光线漂移。";
+function expectedDefinitionsForMode(outputMode: SceneOutputMode) {
+  if (outputMode === "single") {
+    return ["S1"];
+  }
+  if (outputMode === "hero-pack") {
+    return heroPackCodes;
+  }
+  if (outputMode === "detail-pack") {
+    return detailPackCodes;
+  }
+  return [...heroPackCodes, ...detailPackCodes];
+}
 
-  return {
-    code,
-    id: `${code.toLowerCase()}-${templateId}`,
-    prompt: `${styleLock}\n\n${imageTitle}。用途：${purpose}。视觉方向：${visualDirection}。输出比例：${config.ratio}。参考图数量：${config.referenceImages.length}。补充信息：${supplement}\n\n画面要求：产品主体清晰，产品占比数字化，留白至少 45%，图片内文字使用「」包裹，避免密集小字。\n\n不要添加：水印、假 logo、虚构认证、虚构销量、无依据功效、杂乱装饰、随机背景。`,
-    promptSummary: `${visualDirection} · ${purpose} · ${config.ratio}`,
-    purpose,
-    ratio: config.ratio,
-    templateId,
-    title: imageTitle,
-  };
+function asRecord(value: unknown, message: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, message: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(message);
+  }
+  return value.trim();
+}
+
+function requiredPossiblyEmptyString(value: unknown, message: string) {
+  if (typeof value !== "string") {
+    throw new Error(message);
+  }
+  return value.trim();
+}
+
+function requiredInteger(value: unknown, message: string) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(message);
+  }
+  return value;
 }

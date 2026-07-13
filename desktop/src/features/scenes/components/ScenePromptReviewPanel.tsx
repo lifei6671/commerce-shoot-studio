@@ -1,52 +1,35 @@
-import { Trash2 } from "lucide-react";
 import { Button } from "../../../shared/ui/button";
 import { cn } from "../../../shared/lib/cn";
 import type { SceneConfigState, SceneImagePlan } from "../lib/sceneImagePlan";
 
 type ScenePromptReviewPanelProps = {
+  campaignStyleLock: string;
   config: SceneConfigState;
   imageGenerating: boolean;
   onBack: () => void;
   onGenerateImages: (plans: SceneImagePlan[]) => void;
-  onPlansChange: (plans: SceneImagePlan[]) => void;
   planGenerating: boolean;
   plans: SceneImagePlan[];
 };
 
 export function ScenePromptReviewPanel({
+  campaignStyleLock,
   config,
   imageGenerating,
   onBack,
   onGenerateImages,
-  onPlansChange,
   planGenerating,
   plans,
 }: ScenePromptReviewPanelProps) {
-  const canGenerate = plans.length > 0 && !planGenerating && !imageGenerating;
-
-  function removePlan(planId: string) {
-    if (imageGenerating) {
-      return;
-    }
-
-    onPlansChange(plans.filter((plan) => plan.id !== planId));
-  }
-
-  function updatePrompt(planId: string, prompt: string) {
-    if (imageGenerating) {
-      return;
-    }
-
-    onPlansChange(plans.map((plan) => (plan.id === planId ? { ...plan, prompt } : plan)));
-  }
-
+  const hasEmptyPrompt = plans.some((plan) => !plan.prompt.trim());
+  const canGenerate = plans.length > 0 && !hasEmptyPrompt && !planGenerating && !imageGenerating;
   return (
     <aside
-      aria-label="场景方案与 Prompt"
+      aria-label="场景方案"
       className="relative z-40 flex min-h-0 flex-col bg-white/70 shadow-[inset_1px_0_0_rgba(255,255,255,0.72)] backdrop-blur-2xl"
     >
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.55)_transparent]">
-        <h2 className="text-[14px] font-semibold text-slate-950">场景方案与 Prompt</h2>
+        <h2 className="text-[14px] font-semibold text-slate-950">场景方案</h2>
 
         {planGenerating ? (
           <div className="mt-4 flex h-[330px] items-center justify-center rounded-[14px] bg-slate-100/80">
@@ -70,14 +53,16 @@ export function ScenePromptReviewPanel({
               </p>
             </div>
 
-            <div className="mt-3 rounded-[14px] border border-blue-100/80 bg-blue-50/70 p-4">
-              <h3 className="text-[13px] font-semibold text-slate-950">统一风格锁定</h3>
-              <p className="mt-2 text-[12px] leading-5 text-slate-600">
-                固定色板、现代无衬线字体、统一光线、统一信息标签、统一图标线宽，避免多图之间出现随机背景、字体混用或光线漂移。
-              </p>
-            </div>
+            {campaignStyleLock ? (
+              <div className="mt-3 rounded-[14px] border border-blue-100/80 bg-blue-50/70 p-4">
+                <h3 className="text-[13px] font-semibold text-slate-950">统一风格锁定</h3>
+                <p className="mt-2 text-[12px] leading-5 text-slate-600">
+                  {campaignStyleLock}
+                </p>
+              </div>
+            ) : null}
 
-            <h3 className="mt-5 text-[14px] font-semibold text-slate-950">图片 Prompt</h3>
+            <h3 className="mt-5 text-[14px] font-semibold text-slate-950">场景摘要</h3>
             <div className="mt-3 space-y-3">
               {plans.map((plan) => (
                 <article
@@ -92,26 +77,11 @@ export function ScenePromptReviewPanel({
                     <div className="min-w-0">
                       <h4 className="text-[13px] font-medium text-slate-950">{plan.title}</h4>
                       <p className="mt-1 text-[11px] leading-4 text-slate-500">
-                        {plan.promptSummary}
+                        {plan.ratio}
                       </p>
                     </div>
-                    <button
-                      aria-label={`删除 ${plan.title}`}
-                      className="grid size-7 shrink-0 place-items-center rounded-full text-slate-400 transition-colors hover:bg-white hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={imageGenerating}
-                      onClick={() => removePlan(plan.id)}
-                      type="button"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
                   </div>
-                  <textarea
-                    aria-label={`改写 ${plan.title} Prompt`}
-                    className="min-h-28 w-full resize-none bg-transparent text-[12px] leading-6 text-slate-600 outline-none [scrollbar-color:rgba(148,163,184,0.6)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
-                    disabled={imageGenerating}
-                    onChange={(event) => updatePrompt(plan.id, event.target.value)}
-                    value={plan.prompt}
-                  />
+                  <p className="text-[12px] leading-5 text-slate-600">{plan.promptSummary}</p>
                 </article>
               ))}
             </div>
@@ -139,7 +109,13 @@ export function ScenePromptReviewPanel({
           onClick={() => onGenerateImages(plans)}
           type="button"
         >
-          {imageGenerating ? "图片生成中" : plans.length > 0 ? "开始生成图片" : "请至少保留一张图片"}
+          {imageGenerating
+            ? "图片生成中"
+            : plans.length === 0
+              ? "请至少保留一张图片"
+              : hasEmptyPrompt
+                ? "场景方案不完整，请重新规划"
+                : "开始生成图片"}
         </Button>
       </div>
     </aside>

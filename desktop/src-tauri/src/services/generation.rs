@@ -106,6 +106,7 @@ impl GenerationService {
         input: CreateGenerationTaskInput,
     ) -> Result<GenerationTask, GenerationError> {
         validate_title(&input.title)?;
+        validate_persisted_task_input(input.workspace, input.input.as_ref())?;
         let database = open_database(workspace_directory)?;
         let idempotency_key = input.idempotency_key.unwrap_or_else(create_idempotency_key);
 
@@ -367,6 +368,53 @@ impl GenerationService {
                         .ok_or_else(|| {
                             GenerationError::Validation(
                                 "单图重试任务缺少有效结果图序号。".to_string(),
+                            )
+                        })?;
+                    (target_image_id, image_no, None)
+                }
+                ("image-generation", Some("scene-image-generation")) => {
+                    if replacement_input
+                        .get("singleImageRetry")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                    {
+                        return Err(GenerationError::Validation(
+                            "场景替换任务必须是专用单图重试任务。".to_string(),
+                        ));
+                    }
+                    let target_image_id = replacement_input
+                        .get("targetImageId")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            GenerationError::Validation(
+                                "场景单图重试任务缺少目标结果图标识。".to_string(),
+                            )
+                        })?;
+                    let items = replacement_input
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .filter(|items| items.len() == 1)
+                        .ok_or_else(|| {
+                            GenerationError::Validation(
+                                "场景单图重试任务必须且只能包含一个结果项。".to_string(),
+                            )
+                        })?;
+                    let item = &items[0];
+                    if item.get("imageId").and_then(serde_json::Value::as_str)
+                        != Some(target_image_id)
+                    {
+                        return Err(GenerationError::Validation(
+                            "场景单图重试任务目标结果图标识不一致。".to_string(),
+                        ));
+                    }
+                    let image_no = item
+                        .get("imageNo")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            GenerationError::Validation(
+                                "场景单图重试任务缺少有效结果图序号。".to_string(),
                             )
                         })?;
                     (target_image_id, image_no, None)
@@ -1398,6 +1446,20 @@ fn validate_title(title: &str) -> Result<(), GenerationError> {
     Ok(())
 }
 
+fn validate_persisted_task_input(
+    workspace: WorkspaceKind,
+    input: Option<&serde_json::Value>,
+) -> Result<(), GenerationError> {
+    if workspace == WorkspaceKind::Scene
+        && input.is_some_and(|value| value.get("userImages").is_some())
+    {
+        return Err(GenerationError::Validation(
+            "场景任务参考图只能通过 inputAssets 关联。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn serialize_optional_json(
     value: Option<serde_json::Value>,
 ) -> Result<Option<String>, GenerationError> {
@@ -1454,10 +1516,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DeleteGenerationResultImageInput, GenerationService, GenerationTaskQuery,
-        ReplaceGenerationResultImageInput,
+        CreateGenerationTaskInput, DeleteGenerationResultImageInput, GenerationService,
+        GenerationTaskQuery, ReplaceGenerationResultImageInput,
     };
-    use crate::domain::generation::GenerationError;
+    use crate::domain::generation::{GenerationError, GenerationTaskKind, WorkspaceKind};
     use crate::infrastructure::database::WorkspaceDatabase;
 
     struct TestWorkspace {
@@ -1488,6 +1550,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn create_scene_task_rejects_persisted_user_images_before_inserting() {
+        let workspace = TestWorkspace::new("scene-user-images-persistence");
+
+        let error = GenerationService::new()
+            .create_task(
+                workspace.path(),
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("scene-user-images-persistence".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::PromptPlan,
+                    title: "场景方案".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(json!({
+                        "kind": "scene-prompt-planning",
+                        "userImages": [{
+                            "role": "reference",
+                            "dataUrl": "data:image/png;base64,AA==",
+                        }],
+                    })),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect_err("Scene Base64 input must be rejected before persistence");
+
+        assert!(matches!(error, GenerationError::Validation(_)));
+        let task_count: i64 = workspace
+            .database()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .expect("查询任务数量");
+        assert_eq!(task_count, 0);
     }
 
     fn insert_task(database: &WorkspaceDatabase, task_id: &str, hidden: bool) {
@@ -1805,6 +1904,122 @@ mod tests {
             assert_eq!(visible.items.len(), 1);
             assert_eq!(visible.items[0].id, "original-task");
         }
+    }
+
+    #[test]
+    fn replace_result_image_merges_dedicated_scene_retry_into_parent_slot() {
+        let workspace = TestWorkspace::new("merge-scene-retry");
+        let database = workspace.database();
+        insert_task(&database, "scene-parent", false);
+        set_task_items(
+            &database,
+            "scene-parent",
+            json!([{ "imageId": "scene-item-2", "imageNo": 2, "sortOrder": 1 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "scene-retry",
+            "image-generation",
+            json!({
+                "kind": "scene-image-generation",
+                "parentTaskId": "scene-parent",
+                "targetImageId": "scene-item-2",
+                "singleImageRetry": true,
+                "items": [{
+                    "imageId": "scene-item-2",
+                    "imageNo": 2,
+                    "sortOrder": 0,
+                }],
+            }),
+        );
+        insert_asset(&database, "scene-retry-asset");
+        link_output(&database, "scene-retry", "scene-retry-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "scene-parent".into(),
+                    current_asset_id: None,
+                    displayed_asset_id: None,
+                    replacement_task_id: "scene-retry".into(),
+                    replacement_asset_id: "scene-retry-asset".into(),
+                },
+            )
+            .expect("场景单图重试结果应归并父任务稳定槽位");
+
+        let service = GenerationService::new();
+        let parent = service
+            .get_task_detail(workspace.path(), "scene-parent")
+            .expect("读取场景父任务");
+        assert_eq!(parent.output_assets.len(), 1);
+        assert_eq!(parent.output_assets[0].sort_order, 1);
+        assert_eq!(parent.output_assets[0].asset.id, "scene-retry-asset");
+        let retry = service
+            .get_task_detail(workspace.path(), "scene-retry")
+            .expect("读取隐藏后的场景重试任务");
+        assert!(retry.output_assets.is_empty());
+    }
+
+    #[test]
+    fn replace_result_image_rejects_scene_retry_with_mismatched_lineage() {
+        let workspace = TestWorkspace::new("reject-scene-retry-lineage");
+        let database = workspace.database();
+        insert_task(&database, "scene-parent", false);
+        set_task_items(
+            &database,
+            "scene-parent",
+            json!([{ "imageId": "scene-item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "scene-retry",
+            "image-generation",
+            json!({
+                "kind": "scene-image-generation",
+                "parentTaskId": "scene-parent",
+                "targetImageId": "different-item",
+                "singleImageRetry": true,
+                "items": [{
+                    "imageId": "scene-item-1",
+                    "imageNo": 1,
+                    "sortOrder": 0,
+                }],
+            }),
+        );
+        insert_asset(&database, "scene-retry-asset");
+        link_output(&database, "scene-retry", "scene-retry-asset", 0);
+        drop(database);
+
+        let error = GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "scene-parent".into(),
+                    current_asset_id: None,
+                    displayed_asset_id: None,
+                    replacement_task_id: "scene-retry".into(),
+                    replacement_asset_id: "scene-retry-asset".into(),
+                },
+            )
+            .expect_err("场景重试 targetImageId 与 item lineage 不一致必须拒绝");
+
+        assert!(error.to_string().contains("目标结果图标识不一致"));
+        let service = GenerationService::new();
+        assert!(service
+            .get_task_detail(workspace.path(), "scene-parent")
+            .unwrap()
+            .output_assets
+            .is_empty());
+        assert_eq!(
+            service
+                .get_task_detail(workspace.path(), "scene-retry")
+                .unwrap()
+                .output_assets
+                .len(),
+            1
+        );
     }
 
     #[test]

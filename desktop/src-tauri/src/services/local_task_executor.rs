@@ -27,13 +27,18 @@ use crate::services::model_gateway::{
     LeasedModelGatewayResult, ModelGatewayRequest, ModelGatewayResult, ModelGatewayService,
 };
 use crate::services::prompt_registry::{
-    render_prompt_for_roles, render_roleless_prompt, PromptTemplateId,
+    get_prompt_template, get_scene_output_mode_items, get_scene_template_catalog_version,
+    get_scene_template_execution_rules_for_variant, get_scene_template_executor_identity,
+    get_scene_visual_direction_rules, render_prompt_for_roles, render_roleless_prompt,
+    scene_template_routing_index, selected_scene_template_configs, PromptTemplateId,
+    SceneOutputModeItem,
 };
 
 const PROVIDER_RESULT_TIMEOUT_SECONDS: u64 = 30;
 const BACKGROUND_TASK_CONCURRENCY: usize = 4;
 const PRODUCT_DETAIL_ITEM_CONCURRENCY: usize = 4;
 const CLOTHING_TRYON_ITEM_CONCURRENCY: usize = 4;
+const SCENE_IMAGE_ITEM_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -525,6 +530,12 @@ fn execute_claimed_task(
     if is_clothing_tryon_generation_task(&task) {
         return execute_clothing_tryon_generation_task(workspace_directory, task);
     }
+    if is_scene_image_generation_task(&task) {
+        return execute_clothing_tryon_generation_task(workspace_directory, task);
+    }
+    if is_scene_prompt_planning_task(&task) {
+        return execute_scene_prompt_planning_task(workspace_directory, task);
+    }
 
     let leased_gateway_result = if task_requires_generated_asset(task.kind) {
         match invoke_single_real_image_model_for_task_leased(workspace_directory, &task) {
@@ -604,11 +615,178 @@ fn execute_claimed_task(
     })
 }
 
+fn execute_scene_prompt_planning_task(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+) -> Result<LocalTaskExecutionResult, GenerationError> {
+    execute_scene_prompt_planning_task_with_gateway(
+        workspace_directory,
+        task,
+        |capability_id, input| invoke_model_gateway(workspace_directory, capability_id, input),
+    )
+}
+
+fn execute_scene_prompt_planning_task_with_gateway<F>(
+    workspace_directory: &Path,
+    task: ClaimedTask,
+    mut invoke: F,
+) -> Result<LocalTaskExecutionResult, GenerationError>
+where
+    F: FnMut(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError>,
+{
+    let capability_id = capability_for_claimed_task(&task);
+    let task_input = match task_input_with_asset_reference_images(workspace_directory, &task) {
+        Ok(input) => input,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(TaskModelInvocationError::Input(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let routing_input = match scene_template_routing_gateway_input(&task_input) {
+        Ok(input) => input,
+        Err(source) => {
+            let error = normalize_model_gateway_task_error(TaskModelInvocationError::Input(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    if !task_is_running(workspace_directory, &task.id)? {
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: None,
+        });
+    }
+    let routing_result = match invoke(capability_id, routing_input) {
+        Ok(result) => result,
+        Err(source) => {
+            let error =
+                normalize_model_gateway_task_error(TaskModelInvocationError::Gateway(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: None,
+            });
+        }
+    };
+    let first_invocation_id = routing_result.invocation_id.clone();
+    let routing_output = match parse_structured_model_output(&routing_result)
+        .and_then(|output| normalize_scene_template_routing_output(&task_input, &output))
+    {
+        Ok(output) => output,
+        Err(source) => {
+            let error = normalized_persist_error_with_source(&task, &source);
+            write_task_execution_diagnostic(task_execution_error_diagnostic_with_source(
+                &task.id,
+                capability_id,
+                &error,
+                &source,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: Some(first_invocation_id),
+            });
+        }
+    };
+    if !task_is_running(workspace_directory, &task.id)? {
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: Some(first_invocation_id),
+        });
+    }
+
+    let mut routed_task = task.clone();
+    let mut routed_input = task_input.as_object().cloned().unwrap_or_default();
+    routed_input.insert("sceneTemplateRouting".to_string(), routing_output);
+    routed_task.input = serde_json::Value::Object(routed_input);
+    let planning_input = match scene_prompt_planning_gateway_input(&routed_task.input) {
+        Ok(input) => input,
+        Err(source) => {
+            let error = normalized_persist_error_with_source(&task, &source);
+            write_task_execution_diagnostic(task_execution_error_diagnostic_with_source(
+                &task.id,
+                capability_id,
+                &error,
+                &source,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: Some(first_invocation_id),
+            });
+        }
+    };
+    let planning_result = match invoke(capability_id, planning_input) {
+        Ok(result) => result,
+        Err(source) => {
+            let error =
+                normalize_model_gateway_task_error(TaskModelInvocationError::Gateway(source));
+            write_task_execution_diagnostic(task_execution_error_diagnostic(
+                &task.id,
+                capability_id,
+                &error,
+            ));
+            mark_task_failed(workspace_directory, &task.id, &error)?;
+            return Ok(LocalTaskExecutionResult {
+                task_id: task.id,
+                invocation_id: Some(first_invocation_id),
+            });
+        }
+    };
+    if let Err(source) =
+        persist_structured_model_output(workspace_directory, &routed_task, &planning_result)
+    {
+        let error = normalized_persist_error_with_source(&task, &source);
+        write_task_execution_diagnostic(task_execution_error_diagnostic_with_source(
+            &task.id,
+            capability_id,
+            &error,
+            &source,
+        ));
+        mark_task_failed(workspace_directory, &task.id, &error)?;
+        return Ok(LocalTaskExecutionResult {
+            task_id: task.id,
+            invocation_id: Some(first_invocation_id),
+        });
+    }
+    let invocation_ids = vec![
+        first_invocation_id.clone(),
+        planning_result.invocation_id.clone(),
+    ];
+    mark_task_succeeded(workspace_directory, &task, &invocation_ids, None)?;
+    Ok(LocalTaskExecutionResult {
+        task_id: task.id,
+        invocation_id: Some(first_invocation_id),
+    })
+}
+
 async fn execute_claimed_task_async(
     workspace_directory: &Path,
     task: ClaimedTask,
 ) -> Result<LocalTaskExecutionResult, GenerationError> {
-    if !is_clothing_tryon_generation_task(&task) {
+    if !is_itemized_image_generation_task(&task) {
         return execute_claimed_task_in_blocking_worker(workspace_directory, task).await;
     }
     let capability_id = capability_for_claimed_task(&task);
@@ -881,10 +1059,67 @@ fn task_execution_error_diagnostic(
         "taskId": task_id,
         "capabilityId": capability_id,
         "errorCode": error.code,
+        "validationReason": validation_reason_for_diagnostic(error),
         "retryable": error.retryable,
         "providerStatusCode": error.provider_status_code,
         "providerErrorCode": error.provider_error_code,
     })
+}
+
+fn task_execution_error_diagnostic_with_source(
+    task_id: &str,
+    capability_id: &str,
+    error: &NormalizedTaskError,
+    source: &GenerationError,
+) -> serde_json::Value {
+    let mut diagnostic = task_execution_error_diagnostic(task_id, capability_id, error);
+    if error.code == "SCENE_PROMPT_PLAN_OUTPUT_INVALID" {
+        diagnostic["validationReason"] = validation_reason_for_source(source)
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null);
+    }
+    diagnostic
+}
+
+fn validation_reason_for_diagnostic(error: &NormalizedTaskError) -> Option<&'static str> {
+    if error.code != "SCENE_PROMPT_PLAN_OUTPUT_INVALID" {
+        return None;
+    }
+    Some(scene_validation_reason(&error.message))
+}
+
+fn validation_reason_for_source(source: &GenerationError) -> Option<&'static str> {
+    match source {
+        GenerationError::Validation(message) => Some(scene_validation_reason(message)),
+        _ => None,
+    }
+}
+
+fn scene_validation_reason(message: &str) -> &'static str {
+    for (marker, reason) in [
+        ("不是有效 JSON", "invalid-json"),
+        ("templateCatalogVersion", "catalog-version"),
+        ("conversionDriver", "conversion-driver"),
+        ("campaignStyleLock", "campaign-style-lock"),
+        ("items 数量", "item-count"),
+        ("imageId", "image-id"),
+        ("imageNo", "image-number"),
+        ("sortOrder", "sort-order"),
+        (" code ", "item-code"),
+        ("purpose", "item-purpose"),
+        ("variantId", "variant-id"),
+        ("变体", "variant-id"),
+        ("templateId", "template-id"),
+        ("未知场景模板 ID", "template-id"),
+        (" ratio ", "item-ratio"),
+        ("negativeConstraints", "negative-constraints"),
+        ("占位符", "unresolved-placeholder"),
+    ] {
+        if message.contains(marker) {
+            return reason;
+        }
+    }
+    "other-scene-contract"
 }
 
 fn is_product_detail_image_task(task: &ClaimedTask) -> bool {
@@ -910,6 +1145,32 @@ fn is_clothing_tryon_generation_task(task: &ClaimedTask) -> bool {
         && task.kind == GenerationTaskKind::ImageGeneration
         && task.input.get("kind").and_then(serde_json::Value::as_str)
             == Some("clothing-tryon-generation")
+}
+
+fn is_scene_prompt_planning_task(task: &ClaimedTask) -> bool {
+    task.workspace == WorkspaceKind::Scene
+        && task.kind == GenerationTaskKind::PromptPlan
+        && task.input.get("kind").and_then(serde_json::Value::as_str)
+            == Some("scene-prompt-planning")
+}
+
+fn is_scene_image_generation_task(task: &ClaimedTask) -> bool {
+    task.workspace == WorkspaceKind::Scene
+        && task.kind == GenerationTaskKind::ImageGeneration
+        && task.input.get("kind").and_then(serde_json::Value::as_str)
+            == Some("scene-image-generation")
+}
+
+fn is_itemized_image_generation_task(task: &ClaimedTask) -> bool {
+    is_clothing_tryon_generation_task(task) || is_scene_image_generation_task(task)
+}
+
+fn itemized_image_concurrency(task: &ClaimedTask) -> usize {
+    if is_scene_image_generation_task(task) {
+        SCENE_IMAGE_ITEM_CONCURRENCY
+    } else {
+        CLOTHING_TRYON_ITEM_CONCURRENCY
+    }
 }
 
 fn task_is_running(workspace_directory: &Path, task_id: &str) -> Result<bool, GenerationError> {
@@ -1259,7 +1520,7 @@ fn invoke_gateway_inputs_for_task<F>(
 where
     F: Fn(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError> + Sync,
 {
-    if is_clothing_tryon_generation_task(task) {
+    if is_itemized_image_generation_task(task) {
         return invoke_clothing_tryon_inputs_for_task(
             workspace_directory,
             task,
@@ -1293,7 +1554,7 @@ where
     let mut failed_item_count = 0usize;
     let mut first_item_error: Option<(usize, TaskModelInvocationError)> = None;
 
-    for batch in product_detail_input_batches(item_count, CLOTHING_TRYON_ITEM_CONCURRENCY) {
+    for batch in product_detail_input_batches(item_count, itemized_image_concurrency(task)) {
         if !task_is_running(workspace_directory, &task.id)
             .map_err(TaskModelInvocationError::Local)?
         {
@@ -1332,7 +1593,7 @@ where
                         .unwrap_or_else(|_| ClothingTryonItemExecution::Failed {
                             index,
                             error: TaskModelInvocationError::Local(GenerationError::Validation(
-                                "服饰出图子任务执行失败。".to_string(),
+                                "图片生成子任务执行失败。".to_string(),
                             )),
                         })
                 })
@@ -1349,8 +1610,8 @@ where
                 ClothingTryonItemExecution::Failed { index, error } => {
                     let normalized = normalize_model_gateway_task_error(error.clone());
                     eprintln!(
-                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
-                        task.id, index, normalized.message
+                        "[local-task-executor] itemized image generation failed task_id={} capability_id={} item_index={} error={}",
+                        task.id, capability_id, index, normalized.message
                     );
                     insert_task_item_model_failed_event(
                         workspace_directory,
@@ -1388,7 +1649,7 @@ where
                 results.push(gateway_result);
             }
             Ok(_) => {
-                let error = GenerationError::Validation("服饰出图未返回可保存的图片。".to_string());
+                let error = GenerationError::Validation("图片生成未返回可保存的图片。".to_string());
                 insert_task_item_failed_event(workspace_directory, &task.id, index, error.clone())
                     .map_err(TaskModelInvocationError::Local)?;
                 remember_lowest_index_item_error(
@@ -1418,7 +1679,7 @@ where
     {
         return Err(first_item_error.map(|(_, error)| error).unwrap_or_else(|| {
             TaskModelInvocationError::Local(GenerationError::Validation(
-                "服饰出图任务没有成功保存任何图片。".to_string(),
+                "图片生成任务没有成功保存任何图片。".to_string(),
             ))
         }));
     }
@@ -1441,7 +1702,7 @@ async fn invoke_clothing_tryon_inputs_for_task_async(
     let mut failed_item_count = 0usize;
     let mut first_item_error: Option<(usize, TaskModelInvocationError)> = None;
 
-    for batch in product_detail_input_batches(item_count, CLOTHING_TRYON_ITEM_CONCURRENCY) {
+    for batch in product_detail_input_batches(item_count, itemized_image_concurrency(task)) {
         if !task_is_running(workspace_directory, &task.id)
             .map_err(TaskModelInvocationError::Local)?
         {
@@ -1494,16 +1755,16 @@ async fn invoke_clothing_tryon_inputs_for_task_async(
                 Err(error) => {
                     let index = worker_indexes.remove(&error.id()).ok_or_else(|| {
                         TaskModelInvocationError::Local(GenerationError::Validation(
-                            "服饰出图子任务异常退出且无法定位子项。".to_string(),
+                            "图片生成子任务异常退出且无法定位子项。".to_string(),
                         ))
                     })?;
                     let item_error = TaskModelInvocationError::Local(GenerationError::Validation(
-                        "服饰出图子任务异常退出。".to_string(),
+                        "图片生成子任务异常退出。".to_string(),
                     ));
                     let normalized = normalize_model_gateway_task_error(item_error.clone());
                     eprintln!(
-                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
-                        task.id, index, normalized.message
+                        "[local-task-executor] itemized image generation failed task_id={} capability_id={} item_index={} error={}",
+                        task.id, capability_id, index, normalized.message
                     );
                     insert_task_item_model_failed_event(
                         workspace_directory,
@@ -1528,8 +1789,8 @@ async fn invoke_clothing_tryon_inputs_for_task_async(
                 AsyncClothingTryonItemExecution::Failed { index, error } => {
                     let normalized = normalize_model_gateway_task_error(error.clone());
                     eprintln!(
-                        "[local-task-executor] clothing tryon item failed task_id={} item_index={} error={}",
-                        task.id, index, normalized.message
+                        "[local-task-executor] itemized image generation failed task_id={} capability_id={} item_index={} error={}",
+                        task.id, capability_id, index, normalized.message
                     );
                     insert_task_item_model_failed_event(
                         workspace_directory,
@@ -1560,7 +1821,7 @@ async fn invoke_clothing_tryon_inputs_for_task_async(
     {
         return Err(first_item_error.map(|(_, error)| error).unwrap_or_else(|| {
             TaskModelInvocationError::Local(GenerationError::Validation(
-                "服饰出图任务没有成功保存任何图片。".to_string(),
+                "图片生成任务没有成功保存任何图片。".to_string(),
             ))
         }));
     }
@@ -1583,6 +1844,8 @@ fn execute_clothing_tryon_item_provider_call<F>(
 where
     F: Fn(&str, serde_json::Value) -> Result<ModelGatewayResult, ModelConfigError> + Sync,
 {
+    let requires_single_output =
+        input.get("kind").and_then(serde_json::Value::as_str) == Some("scene-image-generation");
     match task_is_running(workspace_directory, task_id) {
         Ok(true) => {}
         Ok(false) => return ClothingTryonItemExecution::Skipped,
@@ -1618,6 +1881,12 @@ where
             };
         }
     };
+    if let Err(error) = ensure_item_gateway_image_count(&gateway_result, requires_single_output) {
+        return ClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(error),
+        };
+    }
     match update_stage(
         workspace_directory,
         task_id,
@@ -1649,6 +1918,8 @@ async fn execute_clothing_tryon_item_provider_call_async(
     index: usize,
     item_count: usize,
 ) -> AsyncClothingTryonItemExecution {
+    let requires_single_output =
+        input.get("kind").and_then(serde_json::Value::as_str) == Some("scene-image-generation");
     match task_is_running(workspace_directory, task_id) {
         Ok(true) => {}
         Ok(false) => return AsyncClothingTryonItemExecution::Skipped,
@@ -1693,6 +1964,14 @@ async fn execute_clothing_tryon_item_provider_call_async(
             };
         }
     };
+    if let Err(error) =
+        ensure_item_gateway_image_count(leased_gateway_result.result(), requires_single_output)
+    {
+        return AsyncClothingTryonItemExecution::Failed {
+            index,
+            error: TaskModelInvocationError::Local(error),
+        };
+    }
     match update_stage(
         workspace_directory,
         task_id,
@@ -1737,7 +2016,7 @@ async fn execute_clothing_tryon_item_provider_call_async(
         Ok((Ok(Some(_)), _)) => AsyncClothingTryonItemExecution::Failed {
             index,
             error: TaskModelInvocationError::Local(GenerationError::Validation(
-                "服饰出图未返回可保存的图片。".to_string(),
+                "图片生成未返回可保存的图片。".to_string(),
             )),
         },
         Ok((Err(error), _)) => AsyncClothingTryonItemExecution::Failed {
@@ -1747,10 +2026,31 @@ async fn execute_clothing_tryon_item_provider_call_async(
         Err(_) => AsyncClothingTryonItemExecution::Failed {
             index,
             error: TaskModelInvocationError::Local(GenerationError::Validation(
-                "服饰出图结果持久化子任务异常退出。".to_string(),
+                "图片生成结果持久化子任务异常退出。".to_string(),
             )),
         },
     }
+}
+
+fn ensure_item_gateway_image_count(
+    gateway_result: &ModelGatewayResult,
+    requires_single_output: bool,
+) -> Result<(), GenerationError> {
+    if !requires_single_output {
+        return Ok(());
+    }
+    let image_count = gateway_result
+        .output_json
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if image_count != 1 {
+        return Err(GenerationError::Validation(
+            "场景单项生图必须且只能返回 1 张图片。".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn invoke_model_gateway(
@@ -1801,9 +2101,13 @@ fn task_gateway_inputs(
     task: &ClaimedTask,
 ) -> Result<Vec<serde_json::Value>, GenerationError> {
     let task_input = task_input_with_asset_reference_images(workspace_directory, task)?;
+    if is_scene_prompt_planning_task(task) {
+        return scene_template_routing_gateway_input(&task_input).map(|input| vec![input]);
+    }
     if is_clothing_scene_planning_task(task) {
         return clothing_scene_planning_gateway_input(&task_input).map(|input| vec![input]);
     }
+
     if is_clothing_base_model_generation_task(task) {
         return clothing_base_model_gateway_input(&task_input).map(|input| vec![input]);
     }
@@ -1821,6 +2125,20 @@ fn task_gateway_inputs(
             .iter()
             .enumerate()
             .map(|(index, item)| clothing_tryon_item_gateway_input(&task_input, item, index))
+            .collect();
+    }
+    if is_scene_image_generation_task(task) {
+        validate_scene_generation_snapshot(&task_input)?;
+        let items = task_input
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| GenerationError::Validation("场景生图任务缺少 items。".to_string()))?;
+        return items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                scene_image_generation_item_gateway_input(&task_input, item, index)
+            })
             .collect();
     }
     if task.workspace == WorkspaceKind::Product && task.kind == GenerationTaskKind::ImageGeneration
@@ -1843,6 +2161,352 @@ fn task_gateway_inputs(
     }
 
     Ok(vec![task_input])
+}
+
+fn validate_scene_planning_task_input(
+    task_input: &serde_json::Value,
+) -> Result<(&str, &str, String, &str), GenerationError> {
+    let expected_planning_version = get_prompt_template(PromptTemplateId::ScenePromptPlanning)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?
+        .version;
+    let planning_version = required_string(
+        task_input,
+        "planningPromptVersion",
+        "场景规划任务缺少 planningPromptVersion。",
+    )?;
+    if planning_version != expected_planning_version {
+        return Err(GenerationError::Validation(
+            "场景规划任务 Prompt 版本不受支持，必须重新规划。".to_string(),
+        ));
+    }
+    let expected_catalog_version = get_scene_template_catalog_version()
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let catalog_version = required_string(
+        task_input,
+        "templateCatalogVersion",
+        "场景规划任务缺少 templateCatalogVersion。",
+    )?;
+    if catalog_version != expected_catalog_version {
+        return Err(GenerationError::Validation(
+            "场景规划任务模板目录版本不受支持，必须重新规划。".to_string(),
+        ));
+    }
+    let output_mode = required_string(task_input, "outputMode", "场景规划任务缺少 outputMode。")?;
+    if !matches!(
+        output_mode,
+        "single" | "hero-pack" | "detail-pack" | "full-pack"
+    ) {
+        return Err(GenerationError::Validation(
+            "场景规划任务 outputMode 无效。".to_string(),
+        ));
+    }
+    let ratio = required_string(task_input, "ratio", "场景规划任务缺少 ratio。")?;
+    if !matches!(ratio, "3:4" | "1:1" | "9:16") {
+        return Err(GenerationError::Validation(
+            "场景规划任务 ratio 仅支持 3:4、1:1 或 9:16。".to_string(),
+        ));
+    }
+    let supplemental_info = required_string(
+        task_input,
+        "supplementalInfo",
+        "请填写补充信息，让 AI 判断场景需求。",
+    )?;
+    Ok((
+        output_mode,
+        ratio,
+        scene_reference_image_roles(task_input)?,
+        supplemental_info,
+    ))
+}
+
+fn scene_template_routing_gateway_input(
+    task_input: &serde_json::Value,
+) -> Result<serde_json::Value, GenerationError> {
+    let (output_mode, ratio, reference_image_roles, supplemental_info) =
+        validate_scene_planning_task_input(task_input)?;
+    let drivers = if output_mode == "single" {
+        vec!["visual"]
+    } else {
+        vec!["visual", "pain-point", "emotional"]
+    };
+    let expected_by_driver = drivers
+        .iter()
+        .map(|driver| {
+            get_scene_output_mode_items(output_mode, driver, "")
+                .map(|items| (*driver, items))
+                .map_err(|source| GenerationError::Validation(source.to_string()))
+        })
+        .collect::<Result<Vec<_>, GenerationError>>()?;
+    let output_mode_rules = render_scene_output_mode_rules(&expected_by_driver);
+    let template_routing_index = scene_template_routing_index()
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let replacement_pairs = [
+        ("{{referenceImageRoles}}", reference_image_roles.as_str()),
+        ("{{outputMode}}", output_mode),
+        ("{{ratio}}", ratio),
+        ("{{supplementalInfo}}", supplemental_info),
+        ("{{outputModeRules}}", output_mode_rules.as_str()),
+        ("{{templateRoutingIndex}}", template_routing_index.as_str()),
+    ];
+    let prompt = rendered_task_prompt(PromptTemplateId::SceneTemplateRouting, &replacement_pairs)?;
+    let mut input = task_input.as_object().cloned().unwrap_or_default();
+    input.insert("prompt".to_string(), prompt);
+    input.insert("maxOutputTokens".to_string(), json!(1800));
+    Ok(serde_json::Value::Object(input))
+}
+
+fn scene_prompt_planning_gateway_input(
+    task_input: &serde_json::Value,
+) -> Result<serde_json::Value, GenerationError> {
+    let (output_mode, ratio, reference_image_roles, supplemental_info) =
+        validate_scene_planning_task_input(task_input)?;
+    let routing = task_input
+        .get("sceneTemplateRouting")
+        .ok_or_else(|| GenerationError::Validation("场景规划任务缺少模板路由结果。".to_string()))?;
+    let conversion_driver = required_string(
+        routing,
+        "conversionDriver",
+        "场景模板路由结果缺少 conversionDriver。",
+    )?;
+    let expected_items = scene_expected_items(task_input, output_mode, conversion_driver)?;
+    let template_ids = expected_items
+        .iter()
+        .filter_map(|item| item.routed_template_id.as_deref())
+        .collect::<Vec<_>>();
+    let selected_template_configs = selected_scene_template_configs(&template_ids)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let output_mode_rules = render_scene_planning_output_mode_rules(&expected_items)?;
+    let routed_visual_direction = routing
+        .get("visualDirectionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let visual_direction_rules =
+        get_scene_visual_direction_rules(output_mode, routed_visual_direction)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let replacement_pairs = [
+        ("{{referenceImageRoles}}", reference_image_roles.as_str()),
+        ("{{outputMode}}", output_mode),
+        ("{{ratio}}", ratio),
+        ("{{supplementalInfo}}", supplemental_info),
+        ("{{routedConversionDriver}}", conversion_driver),
+        ("{{routedVisualDirection}}", visual_direction_rules.as_str()),
+        (
+            "{{selectedSceneTemplateConfigs}}",
+            selected_template_configs.as_str(),
+        ),
+        ("{{outputModeRules}}", output_mode_rules.as_str()),
+    ];
+    let prompt = rendered_task_prompt(PromptTemplateId::ScenePromptPlanning, &replacement_pairs)?;
+
+    let mut input = task_input.as_object().cloned().unwrap_or_default();
+    input.insert("prompt".to_string(), prompt);
+    input.insert("maxOutputTokens".to_string(), json!(6000));
+    Ok(serde_json::Value::Object(input))
+}
+
+fn render_scene_output_mode_rules(
+    expected_by_driver: &[(&str, Vec<SceneOutputModeItem>)],
+) -> String {
+    expected_by_driver
+        .iter()
+        .map(|(driver, items)| {
+            let lines = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    format!(
+                        "imageNo={}，sortOrder={}，code={}，purpose={}，recommendedTemplateIds={}",
+                        index + 1,
+                        index,
+                        item.code,
+                        item.purpose,
+                        item.recommended_template_ids.join(",")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("conversionDriver={driver}\n{lines}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_scene_planning_output_mode_rules(
+    expected_items: &[SceneOutputModeItem],
+) -> Result<String, GenerationError> {
+    expected_items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let routed_template_id = item.routed_template_id.as_deref().ok_or_else(|| {
+                GenerationError::Validation(format!("场景规划第 {} 项缺少冻结模板。", index + 1))
+            })?;
+            Ok(format!(
+                "imageNo={}，sortOrder={}，code={}，purpose={}，routedTemplateId={}",
+                index + 1,
+                index,
+                item.code,
+                item.purpose,
+                routed_template_id
+            ))
+        })
+        .collect::<Result<Vec<_>, GenerationError>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn scene_image_generation_item_gateway_input(
+    task_input: &serde_json::Value,
+    item: &serde_json::Value,
+    index: usize,
+) -> Result<serde_json::Value, GenerationError> {
+    let confirmed_user_prompt = required_string(item, "prompt", "场景生图 item 缺少 prompt。")?;
+    let template_id = required_string(item, "templateId", "场景生图 item 缺少 templateId。")?;
+    let scene_identity = get_scene_template_executor_identity(template_id)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let ratio = required_string(item, "ratio", "场景生图 item 缺少 ratio。")?;
+    let provider_size = task_input
+        .get("providerSize")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| task_input.get("size").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(ratio);
+    let replacement_pairs = [
+        ("{{sceneIdentity}}", scene_identity),
+        ("{{confirmedUserPrompt}}", confirmed_user_prompt),
+        ("{{ratio}}", ratio),
+        ("{{providerSize}}", provider_size),
+    ];
+    let prompt = rendered_task_prompt(PromptTemplateId::SceneImageGeneration, &replacement_pairs)?;
+
+    let mut input = task_input.as_object().cloned().unwrap_or_default();
+    input.insert("items".to_string(), json!([item.clone()]));
+    input.insert("currentItem".to_string(), item.clone());
+    input.insert("itemIndex".to_string(), json!(index));
+    input.insert("ratio".to_string(), json!(ratio));
+    input.insert("prompt".to_string(), prompt);
+    input.insert("maxOutputTokens".to_string(), json!(2000));
+    Ok(serde_json::Value::Object(input))
+}
+
+fn rendered_task_prompt(
+    template_id: PromptTemplateId,
+    replacement_pairs: &[(&str, &str)],
+) -> Result<serde_json::Value, GenerationError> {
+    let messages = render_prompt_for_roles(template_id)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?
+        .into_iter()
+        .map(|message| {
+            let content = replace_prompt_placeholders(message.content, replacement_pairs);
+            ensure_no_prompt_placeholder(&content)?;
+            Ok(json!({ "role": message.role, "content": content }))
+        })
+        .collect::<Result<Vec<_>, GenerationError>>()?;
+    let roleless_prompt = replace_prompt_placeholders(
+        render_roleless_prompt(template_id)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?,
+        replacement_pairs,
+    );
+    ensure_no_prompt_placeholder(&roleless_prompt)?;
+    Ok(json!({
+        "messages": messages,
+        "rolelessPrompt": roleless_prompt,
+    }))
+}
+
+fn ensure_no_prompt_placeholder(value: &str) -> Result<(), GenerationError> {
+    if value.contains("{{") || value.contains("}}") {
+        return Err(GenerationError::Validation(
+            "场景 Prompt 渲染后仍包含未替换占位符。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn scene_reference_image_roles(task_input: &serde_json::Value) -> Result<String, GenerationError> {
+    let images = task_input
+        .get("userImages")
+        .and_then(serde_json::Value::as_array)
+        .filter(|images| (1..=3).contains(&images.len()))
+        .ok_or_else(|| {
+            GenerationError::Validation("场景任务必须包含 1 至 3 张参考图。".to_string())
+        })?;
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let role = image
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| matches!(*value, "source" | "reference"))
+                .ok_or_else(|| {
+                    GenerationError::Validation(format!(
+                        "场景任务第 {} 张参考图 role 无效。",
+                        index + 1
+                    ))
+                })?;
+            Ok(format!(
+                "参考图 {}：主体视觉事实源（role={role}）",
+                index + 1
+            ))
+        })
+        .collect::<Result<Vec<_>, GenerationError>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn scene_expected_items(
+    task_input: &serde_json::Value,
+    output_mode: &str,
+    conversion_driver: &str,
+) -> Result<Vec<SceneOutputModeItem>, GenerationError> {
+    let mut expected = get_scene_output_mode_items(output_mode, conversion_driver, "")
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let Some(routing) = task_input.get("sceneTemplateRouting") else {
+        return Ok(expected);
+    };
+    let routed_driver = required_string(
+        routing,
+        "conversionDriver",
+        "场景模板路由结果缺少 conversionDriver。",
+    )?;
+    if routed_driver != conversion_driver {
+        return Err(GenerationError::Validation(
+            "场景模板路由 conversionDriver 与规划不一致。".to_string(),
+        ));
+    }
+    let selections = routing
+        .get("selections")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            GenerationError::Validation("场景模板路由结果缺少 selections。".to_string())
+        })?;
+    if selections.len() != expected.len() {
+        return Err(GenerationError::Validation(format!(
+            "场景模板路由应返回 {} 项。",
+            expected.len()
+        )));
+    }
+    for (index, (item, selection)) in expected.iter_mut().zip(selections).enumerate() {
+        let code = required_string(selection, "code", "场景模板路由 selection 缺少 code。")?;
+        if code != item.code {
+            return Err(GenerationError::Validation(format!(
+                "场景模板路由第 {} 项编号必须为 {}。",
+                index + 1,
+                item.code
+            )));
+        }
+        let template_id = required_string(
+            selection,
+            "templateId",
+            "场景模板路由 selection 缺少 templateId。",
+        )?;
+        get_scene_template_executor_identity(template_id)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?;
+        item.routed_template_id = Some(template_id.to_string());
+    }
+    Ok(expected)
 }
 
 fn clothing_scene_planning_gateway_input(
@@ -2286,6 +2950,29 @@ fn task_input_with_asset_reference_images(
     workspace_directory: &Path,
     task: &ClaimedTask,
 ) -> Result<serde_json::Value, GenerationError> {
+    let scene_task = is_scene_prompt_planning_task(task) || is_scene_image_generation_task(task);
+    if scene_task {
+        if task.input.get("userImages").is_some() {
+            return Err(GenerationError::Validation(
+                "场景任务参考图只能通过 inputAssets 关联。".to_string(),
+            ));
+        }
+        if !(1..=3).contains(&task.input_assets.len()) {
+            return Err(GenerationError::Validation(
+                "场景任务必须关联 1 至 3 张参考图资产。".to_string(),
+            ));
+        }
+        if task
+            .input_assets
+            .iter()
+            .any(|asset| asset.role != "reference")
+        {
+            return Err(GenerationError::Validation(
+                "场景任务只接受 role=reference 的参考图资产。".to_string(),
+            ));
+        }
+    }
+
     let mut reference_assets = task
         .input_assets
         .iter()
@@ -2295,6 +2982,10 @@ fn task_input_with_asset_reference_images(
         .collect::<Vec<_>>();
     if reference_assets.is_empty() {
         return Ok(task.input.clone());
+    }
+
+    if scene_task {
+        reference_assets.sort_by_key(|asset| asset.sort_order);
     }
 
     let clothing_task =
@@ -2757,7 +3448,7 @@ fn persist_staged_generation_results(
                 )?;
                 if available != 1 {
                     return Err(GenerationError::Validation(
-                        "服饰出图暂存资产不可用。".to_string(),
+                        "图片生成暂存资产不可用。".to_string(),
                     ));
                 }
                 transaction.execute(
@@ -2902,6 +3593,23 @@ fn persist_structured_model_output(
     task: &ClaimedTask,
     gateway_result: &ModelGatewayResult,
 ) -> Result<(), GenerationError> {
+    persist_structured_model_output_with_before_write(
+        workspace_directory,
+        task,
+        gateway_result,
+        || {},
+    )
+}
+
+fn persist_structured_model_output_with_before_write<F>(
+    workspace_directory: &Path,
+    task: &ClaimedTask,
+    gateway_result: &ModelGatewayResult,
+    before_write: F,
+) -> Result<(), GenerationError>
+where
+    F: FnOnce(),
+{
     let mut output = parse_structured_model_output(gateway_result)?;
     if is_clothing_scene_planning_task(task) {
         normalize_selected_clothing_scene_names(task, &mut output);
@@ -2910,6 +3618,8 @@ fn persist_structured_model_output(
             "modelFeatures": output["modelFeatures"].clone(),
             "scenes": output["scenes"].clone(),
         });
+    } else if is_scene_prompt_planning_task(task) {
+        output = normalize_scene_prompt_plan_output(task, &output)?;
     }
     if !update_stage(
         workspace_directory,
@@ -2920,24 +3630,31 @@ fn persist_structured_model_output(
     )? {
         return Ok(());
     }
+    before_write();
     let output_json = serde_json::to_string(&output)?;
     let database = WorkspaceDatabase::open(workspace_directory)?;
-    database.connection().execute(
+    let transaction = database.connection().unchecked_transaction()?;
+    let updated = transaction.execute(
         "
         UPDATE generation_tasks
         SET output_json = ?1,
             updated_at = datetime('now')
-        WHERE id = ?2
+        WHERE id = ?2 AND status = 'running' AND hidden_at IS NULL
         ",
         params![output_json, task.id],
     )?;
-    insert_task_event(
-        &database,
+    if updated == 0 {
+        transaction.commit()?;
+        return Ok(());
+    }
+    insert_task_event_on_connection(
+        &transaction,
         &task.id,
         "task.output-saved",
         Some(GenerationTaskStage::SavingResult),
         Some(json!({ "invocation_id": gateway_result.invocation_id })),
     )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -2959,6 +3676,522 @@ fn parse_structured_model_output(
         ));
     }
     Ok(gateway_result.output_json.clone())
+}
+
+fn normalize_scene_template_routing_output(
+    task_input: &serde_json::Value,
+    output: &serde_json::Value,
+) -> Result<serde_json::Value, GenerationError> {
+    let expected_catalog_version = get_scene_template_catalog_version()
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let catalog_version = required_string(
+        output,
+        "catalogVersion",
+        "场景模板路由结果缺少 catalogVersion。",
+    )?;
+    if catalog_version != expected_catalog_version {
+        return Err(GenerationError::Validation(format!(
+            "场景模板路由目录版本不匹配：期望 {expected_catalog_version}。"
+        )));
+    }
+    let output_mode = required_string(task_input, "outputMode", "场景规划任务缺少 outputMode。")?;
+    let conversion_driver = required_string(
+        output,
+        "conversionDriver",
+        "场景模板路由结果缺少 conversionDriver。",
+    )?;
+    if output_mode == "single" {
+        if conversion_driver != "visual" {
+            return Err(GenerationError::Validation(
+                "单张场景模板路由 conversionDriver 必须为 visual。".to_string(),
+            ));
+        }
+    } else if !matches!(conversion_driver, "visual" | "pain-point" | "emotional") {
+        return Err(GenerationError::Validation(
+            "场景模板路由 conversionDriver 无效。".to_string(),
+        ));
+    }
+    let visual_direction_id = output
+        .get("visualDirectionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if output_mode == "single" {
+        if !visual_direction_id.is_empty() {
+            return Err(GenerationError::Validation(
+                "单张场景模板路由不应返回 visualDirectionId。".to_string(),
+            ));
+        }
+    } else {
+        get_scene_visual_direction_rules(output_mode, visual_direction_id)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    }
+    let expected = get_scene_output_mode_items(output_mode, conversion_driver, "")
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let selections = output
+        .get("selections")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            GenerationError::Validation("场景模板路由结果缺少 selections。".to_string())
+        })?;
+    if selections.len() != expected.len() {
+        return Err(GenerationError::Validation(format!(
+            "场景模板路由应返回 {} 项。",
+            expected.len()
+        )));
+    }
+    let mut normalized = Vec::with_capacity(selections.len());
+    for (index, (selection, expected_item)) in selections.iter().zip(&expected).enumerate() {
+        let code = required_string(selection, "code", "场景模板路由 selection 缺少 code。")?;
+        if code != expected_item.code {
+            return Err(GenerationError::Validation(format!(
+                "场景模板路由第 {} 项编号必须为 {}。",
+                index + 1,
+                expected_item.code
+            )));
+        }
+        let template_id = required_string(
+            selection,
+            "templateId",
+            "场景模板路由 selection 缺少 templateId。",
+        )?;
+        get_scene_template_executor_identity(template_id)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?;
+        normalized.push(json!({
+            "code": code,
+            "templateId": template_id,
+        }));
+    }
+    Ok(json!({
+        "catalogVersion": catalog_version,
+        "conversionDriver": conversion_driver,
+        "visualDirectionId": visual_direction_id,
+        "selections": normalized,
+    }))
+}
+
+fn normalize_scene_prompt_plan_output(
+    task: &ClaimedTask,
+    output: &serde_json::Value,
+) -> Result<serde_json::Value, GenerationError> {
+    let expected_planning_version = get_prompt_template(PromptTemplateId::ScenePromptPlanning)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?
+        .version;
+    let planning_version = required_string(
+        &task.input,
+        "planningPromptVersion",
+        "场景规划任务缺少 planningPromptVersion。",
+    )?;
+    if planning_version != expected_planning_version {
+        return Err(GenerationError::Validation(
+            "场景规划任务 Prompt 版本不受支持，必须重新规划。".to_string(),
+        ));
+    }
+    let catalog_version = required_string(
+        output,
+        "templateCatalogVersion",
+        "场景规划结果缺少 templateCatalogVersion。",
+    )?;
+    let expected_catalog_version = get_scene_template_catalog_version()
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    if catalog_version != expected_catalog_version {
+        return Err(GenerationError::Validation(format!(
+            "场景规划结果模板目录版本不匹配：期望 {expected_catalog_version}。"
+        )));
+    }
+    let model_conversion_driver = required_string(
+        output,
+        "conversionDriver",
+        "场景规划结果缺少 conversionDriver。",
+    )?;
+    if !matches!(
+        model_conversion_driver,
+        "visual" | "pain-point" | "emotional"
+    ) {
+        return Err(GenerationError::Validation(
+            "场景规划结果 conversionDriver 无效。".to_string(),
+        ));
+    }
+    let output_mode = required_string(&task.input, "outputMode", "场景规划任务缺少 outputMode。")?;
+    let routing = task
+        .input
+        .get("sceneTemplateRouting")
+        .ok_or_else(|| GenerationError::Validation("场景规划任务缺少模板路由结果。".to_string()))?;
+    let conversion_driver = required_string(
+        routing,
+        "conversionDriver",
+        "场景模板路由结果缺少 conversionDriver。",
+    )?;
+    if model_conversion_driver != conversion_driver {
+        return Err(GenerationError::Validation(
+            "场景规划结果不得改写路由冻结的 conversionDriver。".to_string(),
+        ));
+    }
+    let campaign_style_lock = output
+        .get("campaignStyleLock")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| {
+            GenerationError::Validation("场景规划结果缺少 campaignStyleLock。".to_string())
+        })?;
+    if output_mode == "single" && !campaign_style_lock.is_empty() {
+        return Err(GenerationError::Validation(
+            "单张场景规划不应生成 campaignStyleLock。".to_string(),
+        ));
+    }
+    if output_mode != "single" && campaign_style_lock.is_empty() {
+        return Err(GenerationError::Validation(
+            "多图场景规划结果缺少 campaignStyleLock。".to_string(),
+        ));
+    }
+    ensure_no_prompt_placeholder(campaign_style_lock)?;
+    let expected_items = scene_expected_items(&task.input, output_mode, conversion_driver)?;
+    let ratio = required_string(&task.input, "ratio", "场景规划任务缺少 ratio。")?;
+    let mut items = output
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| GenerationError::Validation("场景规划结果缺少 items 数组。".to_string()))?;
+    if output_mode == "single" && items.len() == 1 {
+        normalize_single_scene_item_metadata(&mut items[0], &expected_items[0], ratio)?;
+    }
+    validate_scene_items(&items, &expected_items, ratio, "场景规划结果")?;
+    validate_scene_prompts_include_style_lock(
+        &items,
+        campaign_style_lock,
+        output_mode,
+        "场景规划结果",
+    )?;
+    let normalized_items = items
+        .iter()
+        .map(normalize_scene_item)
+        .collect::<Result<Vec<_>, GenerationError>>()?;
+
+    Ok(json!({
+        "templateCatalogVersion": catalog_version,
+        "conversionDriver": conversion_driver,
+        "campaignStyleLock": campaign_style_lock,
+        "items": normalized_items,
+    }))
+}
+
+fn normalize_single_scene_item_metadata(
+    item: &mut serde_json::Value,
+    expected_item: &SceneOutputModeItem,
+    ratio: &str,
+) -> Result<(), GenerationError> {
+    let object = item.as_object_mut().ok_or_else(|| {
+        GenerationError::Validation("场景规划结果 items[0] 格式无效。".to_string())
+    })?;
+    object.insert("imageNo".to_string(), json!(1));
+    object.insert("sortOrder".to_string(), json!(0));
+    object.insert("code".to_string(), json!(expected_item.code.as_str()));
+    object.insert("purpose".to_string(), json!(expected_item.purpose.as_str()));
+    object.insert("ratio".to_string(), json!(ratio));
+    Ok(())
+}
+
+fn normalize_scene_item(item: &serde_json::Value) -> Result<serde_json::Value, GenerationError> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| GenerationError::Validation("场景规划结果 item 格式无效。".to_string()))?;
+    let mut normalized = serde_json::Map::new();
+    for field in [
+        "imageId",
+        "imageNo",
+        "sortOrder",
+        "code",
+        "title",
+        "purpose",
+        "templateId",
+        "variantId",
+        "ratio",
+        "promptSummary",
+        "prompt",
+        "negativeConstraints",
+    ] {
+        let value = object.get(field).ok_or_else(|| {
+            GenerationError::Validation(format!("场景规划结果 item 缺少 {field}。"))
+        })?;
+        normalized.insert(field.to_string(), value.clone());
+    }
+    Ok(serde_json::Value::Object(normalized))
+}
+
+fn validate_scene_generation_snapshot(
+    task_input: &serde_json::Value,
+) -> Result<(), GenerationError> {
+    let planning_version = get_prompt_template(PromptTemplateId::ScenePromptPlanning)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?
+        .version;
+    let generation_version = get_prompt_template(PromptTemplateId::SceneImageGeneration)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?
+        .version;
+    for (field, expected) in [
+        ("planningPromptVersion", planning_version),
+        ("generationPromptVersion", generation_version),
+    ] {
+        let actual = required_string(task_input, field, &format!("场景生图任务缺少 {field}。"))?;
+        if actual != expected {
+            return Err(GenerationError::Validation(format!(
+                "场景生图任务 {field} 版本不受支持。"
+            )));
+        }
+    }
+    let catalog_version = required_string(
+        task_input,
+        "templateCatalogVersion",
+        "场景生图任务缺少 templateCatalogVersion。",
+    )?;
+    let expected_catalog_version = get_scene_template_catalog_version()
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    if catalog_version != expected_catalog_version {
+        return Err(GenerationError::Validation(
+            "场景生图任务模板目录版本不匹配，必须重新规划。".to_string(),
+        ));
+    }
+    let conversion_driver = required_string(
+        task_input,
+        "conversionDriver",
+        "场景生图任务缺少 conversionDriver。",
+    )?;
+    if !matches!(conversion_driver, "visual" | "pain-point" | "emotional") {
+        return Err(GenerationError::Validation(
+            "场景生图任务 conversionDriver 无效。".to_string(),
+        ));
+    }
+    let ratio = required_string(task_input, "ratio", "场景生图任务缺少 ratio。")?;
+    let items = task_input
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| !items.is_empty())
+        .ok_or_else(|| GenerationError::Validation("场景生图任务缺少 items。".to_string()))?;
+    let output_mode = required_string(task_input, "outputMode", "场景生图任务缺少 outputMode。")?;
+    if !matches!(
+        output_mode,
+        "single" | "hero-pack" | "detail-pack" | "full-pack"
+    ) {
+        return Err(GenerationError::Validation(
+            "场景生图任务 outputMode 无效。".to_string(),
+        ));
+    }
+    if output_mode == "single" && conversion_driver != "visual" {
+        return Err(GenerationError::Validation(
+            "单张场景生图任务 conversionDriver 必须为 visual。".to_string(),
+        ));
+    }
+    let campaign_style_lock = task_input
+        .get("campaignStyleLock")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| {
+            GenerationError::Validation("场景生图任务缺少 campaignStyleLock。".to_string())
+        })?;
+    if output_mode == "single" && !campaign_style_lock.is_empty() {
+        return Err(GenerationError::Validation(
+            "单张场景生图任务不应携带 campaignStyleLock。".to_string(),
+        ));
+    }
+    if output_mode != "single" && campaign_style_lock.is_empty() {
+        return Err(GenerationError::Validation(
+            "多图场景生图任务缺少 campaignStyleLock。".to_string(),
+        ));
+    }
+    ensure_no_prompt_placeholder(campaign_style_lock)?;
+    let single_image_retry = task_input
+        .get("singleImageRetry")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let expected_items = scene_expected_items(task_input, output_mode, conversion_driver)?;
+    if single_image_retry {
+        if items.len() != 1 {
+            return Err(GenerationError::Validation(
+                "场景单图重试必须且只能包含 1 个 item。".to_string(),
+            ));
+        }
+        validate_scene_retry_item(&items[0], &expected_items, ratio)
+    } else {
+        validate_scene_items(items, &expected_items, ratio, "场景生图任务")?;
+        validate_scene_prompts_include_style_lock(
+            items,
+            campaign_style_lock,
+            output_mode,
+            "场景生图任务",
+        )?;
+        Ok(())
+    }
+}
+
+fn validate_scene_retry_item(
+    item: &serde_json::Value,
+    expected_items: &[SceneOutputModeItem],
+    ratio: &str,
+) -> Result<(), GenerationError> {
+    let code = required_string(item, "code", "场景单图重试 item 缺少 code。")?;
+    let (parent_index, expected_item) = expected_items
+        .iter()
+        .enumerate()
+        .find(|(_, expected)| expected.code == code)
+        .ok_or_else(|| {
+            GenerationError::Validation(format!("场景单图重试 code={code} 不属于父任务输出模式。"))
+        })?;
+    let expected_image_no = parent_index + 1;
+    let image_no = item
+        .get("imageNo")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GenerationError::Validation("场景单图重试 imageNo 无效。".to_string()))?;
+    if image_no != expected_image_no as u64 {
+        return Err(GenerationError::Validation(format!(
+            "场景单图重试 imageNo 必须为 {expected_image_no}。"
+        )));
+    }
+    let sort_order = item
+        .get("sortOrder")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| GenerationError::Validation("场景单图重试 sortOrder 无效。".to_string()))?;
+    if sort_order != 0 {
+        return Err(GenerationError::Validation(
+            "场景单图重试 sortOrder 必须为 0。".to_string(),
+        ));
+    }
+    let image_id = required_string(item, "imageId", "场景单图重试 item 缺少 imageId。")?;
+    ensure_no_prompt_placeholder(image_id)?;
+    validate_scene_item_content(item, expected_item, ratio, "场景单图重试 item")
+}
+
+fn validate_scene_prompts_include_style_lock(
+    items: &[serde_json::Value],
+    campaign_style_lock: &str,
+    output_mode: &str,
+    context: &str,
+) -> Result<(), GenerationError> {
+    if output_mode == "single" {
+        return Ok(());
+    }
+    for (index, item) in items.iter().enumerate() {
+        let prompt = required_string(
+            item,
+            "prompt",
+            &format!("{context} items[{index}] 缺少 prompt。"),
+        )?;
+        if !prompt.trim_start().starts_with(campaign_style_lock) {
+            return Err(GenerationError::Validation(format!(
+                "{context} items[{index}] prompt 必须以完整 Campaign Style Lock 开头。"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_scene_items(
+    items: &[serde_json::Value],
+    expected_items: &[SceneOutputModeItem],
+    ratio: &str,
+    context: &str,
+) -> Result<(), GenerationError> {
+    if items.len() != expected_items.len() {
+        return Err(GenerationError::Validation(format!(
+            "{context} items 数量必须为 {}。",
+            expected_items.len()
+        )));
+    }
+    let mut image_ids = std::collections::HashSet::new();
+    for (index, (item, expected_item)) in items.iter().zip(expected_items).enumerate() {
+        let item_context = format!("{context} items[{index}]");
+        let image_id = required_string(item, "imageId", &format!("{item_context} 缺少 imageId。"))?;
+        if !image_ids.insert(image_id) {
+            return Err(GenerationError::Validation(format!(
+                "{context} imageId 必须唯一。"
+            )));
+        }
+        let image_no = item
+            .get("imageNo")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                GenerationError::Validation(format!("{item_context} imageNo 必须是正整数。"))
+            })?;
+        if image_no != (index + 1) as u64 {
+            return Err(GenerationError::Validation(format!(
+                "{item_context} imageNo 必须为 {}。",
+                index + 1
+            )));
+        }
+        let sort_order = item
+            .get("sortOrder")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                GenerationError::Validation(format!("{item_context} sortOrder 必须是非负整数。"))
+            })?;
+        if sort_order != index as u64 {
+            return Err(GenerationError::Validation(format!(
+                "{item_context} sortOrder 必须为 {index}。"
+            )));
+        }
+        let code = required_string(item, "code", &format!("{item_context} 缺少 code。"))?;
+        if code != expected_item.code {
+            return Err(GenerationError::Validation(format!(
+                "{item_context} code 必须为 {}。",
+                expected_item.code
+            )));
+        }
+        validate_scene_item_content(item, expected_item, ratio, &item_context)?;
+    }
+    Ok(())
+}
+
+fn validate_scene_item_content(
+    item: &serde_json::Value,
+    expected_item: &SceneOutputModeItem,
+    ratio: &str,
+    item_context: &str,
+) -> Result<(), GenerationError> {
+    let purpose = required_string(item, "purpose", &format!("{item_context} 缺少 purpose。"))?;
+    if purpose != expected_item.purpose {
+        return Err(GenerationError::Validation(format!(
+            "{item_context} purpose 必须为配置定义的用途：{}。",
+            expected_item.purpose
+        )));
+    }
+    let template_id = required_string(
+        item,
+        "templateId",
+        &format!("{item_context} 缺少 templateId。"),
+    )?;
+    if let Some(routed_template_id) = expected_item.routed_template_id.as_deref() {
+        if template_id != routed_template_id {
+            return Err(GenerationError::Validation(format!(
+                "{item_context} templateId 必须等于路由冻结模板 {routed_template_id}。"
+            )));
+        }
+    } else {
+        get_scene_template_executor_identity(template_id)
+            .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    }
+    for field in [
+        "title",
+        "purpose",
+        "variantId",
+        "promptSummary",
+        "prompt",
+        "negativeConstraints",
+    ] {
+        let value = required_string(item, field, &format!("{item_context} 缺少 {field}。"))?;
+        ensure_no_prompt_placeholder(value)?;
+    }
+    let variant_id = required_string(
+        item,
+        "variantId",
+        &format!("{item_context} 缺少 variantId。"),
+    )?;
+    get_scene_template_execution_rules_for_variant(template_id, variant_id)
+        .map_err(|source| GenerationError::Validation(source.to_string()))?;
+    let item_ratio = required_string(item, "ratio", &format!("{item_context} 缺少 ratio。"))?;
+    if item_ratio != ratio {
+        return Err(GenerationError::Validation(format!(
+            "{item_context} ratio 必须与任务 ratio 一致。"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_clothing_scene_plan_output(
@@ -3538,6 +4771,17 @@ fn normalized_persist_error(task: &ClaimedTask) -> NormalizedTaskError {
         };
     }
 
+    if is_scene_prompt_planning_task(task) {
+        return NormalizedTaskError {
+            code: "SCENE_PROMPT_PLAN_OUTPUT_INVALID".to_string(),
+            message: "场景规划结果不是有效结构化 JSON，或未满足图片序列合同，请重试。".to_string(),
+            retryable: true,
+            stage: Some(GenerationTaskStage::Failed),
+            provider_status_code: None,
+            provider_error_code: None,
+        };
+    }
+
     NormalizedTaskError {
         code: "DOWNLOAD_RESULT_FAILED".to_string(),
         message: "生成结果下载或保存失败，请稍后重试。".to_string(),
@@ -3736,6 +4980,9 @@ fn capability_for_task(workspace: WorkspaceKind, kind: GenerationTaskKind) -> &'
 }
 
 fn capability_for_claimed_task(task: &ClaimedTask) -> &'static str {
+    if is_scene_prompt_planning_task(task) {
+        return "scene-prompt-planning";
+    }
     if is_clothing_scene_planning_task(task) {
         return "clothing-scene-planning";
     }
@@ -3781,20 +5028,26 @@ mod tests {
     use super::{
         capability_for_claimed_task, claim_next_queued_task, claim_queued_task_by_id,
         clothing_base_model_gateway_input, clothing_scene_planning_gateway_input,
-        clothing_tryon_item_gateway_input, downloaded_image_mime_type, execute_claimed_task,
-        invoke_gateway_inputs_for_task, mark_task_failed, mark_task_succeeded,
-        normalize_model_gateway_task_error, normalize_selected_clothing_scene_names,
-        normalized_persist_error, normalized_persist_error_with_source, parse_listing_copy_output,
+        clothing_tryon_item_gateway_input, downloaded_image_mime_type,
+        ensure_item_gateway_image_count, execute_claimed_task,
+        execute_scene_prompt_planning_task_with_gateway, invoke_gateway_inputs_for_task,
+        mark_task_failed, mark_task_succeeded, normalize_model_gateway_task_error,
+        normalize_scene_prompt_plan_output, normalize_scene_template_routing_output,
+        normalize_selected_clothing_scene_names, normalized_persist_error,
+        normalized_persist_error_with_source, parse_listing_copy_output,
         persist_generated_gateway_result_outputs,
         persist_generated_gateway_result_outputs_with_before_link,
         persist_product_detail_staged_results, persist_staged_generation_results,
-        persist_structured_model_output, product_detail_input_batches,
-        product_detail_item_gateway_input, product_detail_output_sort_order_start,
-        remember_lowest_index_item_error, supervise_async_task_execution,
-        task_execution_error_diagnostic, task_gateway_inputs,
-        task_input_with_asset_reference_images, task_is_running, update_stage,
-        validate_clothing_scene_plan_output, ClaimedTask, LocalTaskExecutionResult,
-        TaskModelInvocationError, BACKGROUND_TASK_CONCURRENCY, CLOTHING_TRYON_ITEM_CONCURRENCY,
+        persist_structured_model_output, persist_structured_model_output_with_before_write,
+        product_detail_input_batches, product_detail_item_gateway_input,
+        product_detail_output_sort_order_start, remember_lowest_index_item_error,
+        scene_image_generation_item_gateway_input, scene_prompt_planning_gateway_input,
+        scene_template_routing_gateway_input, supervise_async_task_execution,
+        task_execution_error_diagnostic, task_execution_error_diagnostic_with_source,
+        task_gateway_inputs, task_input_with_asset_reference_images, task_is_running, update_stage,
+        validate_clothing_scene_plan_output, validate_scene_generation_snapshot, ClaimedTask,
+        ClaimedTaskInputAsset, LocalTaskExecutionResult, TaskModelInvocationError,
+        BACKGROUND_TASK_CONCURRENCY, CLOTHING_TRYON_ITEM_CONCURRENCY,
         PRODUCT_DETAIL_ITEM_CONCURRENCY,
     };
     use crate::domain::assets::AssetKind;
@@ -3812,6 +5065,10 @@ mod tests {
     };
     use crate::services::model_config::ModelConfigError;
     use crate::services::model_gateway::ModelGatewayResult;
+    use crate::services::prompt_registry::{
+        get_prompt_template, get_scene_output_mode_items, get_scene_template_catalog_version,
+        PromptTemplateId,
+    };
     use crate::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
     use std::fs;
     use std::ops::Range;
@@ -3821,6 +5078,1079 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
+
+    fn scene_snapshot_item(
+        definition: &crate::services::prompt_registry::SceneOutputModeItem,
+        parent_index: usize,
+        sort_order: usize,
+        ratio: &str,
+    ) -> serde_json::Value {
+        let variant_id = scene_test_variant_id(&definition.recommended_template_ids[0]);
+        json!({
+            "imageId": format!("scene-image-{}", parent_index + 1),
+            "imageNo": parent_index + 1,
+            "sortOrder": sort_order,
+            "code": definition.code,
+            "title": format!("图片 {}", parent_index + 1),
+            "purpose": definition.purpose,
+            "templateId": definition.recommended_template_ids[0],
+            "variantId": variant_id,
+            "ratio": ratio,
+            "promptSummary": "保持参考主体一致并执行当前场景构图。",
+            "prompt": "固定暖白背景、统一棚拍光与无衬线字体。保持参考主体一致，执行当前场景、构图、镜头和光线。负向约束：禁止虚构认证",
+            "negativeConstraints": "禁止虚构认证",
+        })
+    }
+
+    fn scene_test_variant_id(template_id: &str) -> &'static str {
+        match template_id {
+            "hero-image" => "luxury",
+            "lifestyle-scene" => "morning",
+            "flat-lay" => "minimal",
+            "detail-macro" => "texture",
+            "poster-banner" => "minimal",
+            "social-media" => "instagram",
+            "ugc-style" => "unboxing",
+            "model-showcase" => "fashion-full",
+            "before-after" => "simple",
+            "packaging" => "unboxing",
+            "infographic" => "feature-grid",
+            "creative-concept" => "minimal-art",
+            "size-spec" => "technical",
+            "multi-product" => "lineup",
+            "livestream" => "setup",
+            "try-on-virtual" => "studio-editorial",
+            "exploded-view" => "minimal",
+            "ghost-mannequin" => "white-clean",
+            "multi-angle-grid" => "angle-view",
+            "magazine-editorial" => "fashion-cover",
+            "seasonal-campaign" => "four-seasons",
+            "luxury-atmospherics" => "golden-luxe",
+            "device-mockup" => "single-laptop",
+            "storefront" => "exterior",
+            "sports-campaign" => "product-hero",
+            _ => panic!("missing scene test variant for {template_id}"),
+        }
+    }
+
+    fn scene_generation_snapshot(
+        output_mode: &str,
+        conversion_driver: &str,
+        items: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        json!({
+            "kind": "scene-image-generation",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "generationPromptVersion": get_prompt_template(PromptTemplateId::SceneImageGeneration).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "campaignStyleLock": "固定暖白背景、统一棚拍光与无衬线字体",
+            "conversionDriver": conversion_driver,
+            "outputMode": output_mode,
+            "ratio": "1:1",
+            "items": items,
+        })
+    }
+
+    fn import_scene_reference_assets(
+        workspace_dir: &Path,
+        count: usize,
+    ) -> Vec<GenerationTaskInputAssetInput> {
+        let paths = (0..count)
+            .map(|index| {
+                let path = workspace_dir.join(format!("scene-reference-{index}.png"));
+                fs::write(&path, transparent_png_bytes()).expect("scene reference should write");
+                path.to_string_lossy().to_string()
+            })
+            .collect::<Vec<_>>();
+        AssetService::new()
+            .import_images(
+                workspace_dir,
+                ImportImagesInput {
+                    kind: AssetKind::Source,
+                    paths,
+                },
+            )
+            .expect("scene references should import")
+            .into_iter()
+            .enumerate()
+            .map(|(index, asset)| GenerationTaskInputAssetInput {
+                asset_id: asset.id,
+                role: "reference".to_string(),
+                sort_order: index as i64,
+            })
+            .collect()
+    }
+
+    fn claimed_scene_reference_assets(
+        assets: &[GenerationTaskInputAssetInput],
+    ) -> Vec<ClaimedTaskInputAsset> {
+        assets
+            .iter()
+            .map(|asset| ClaimedTaskInputAsset {
+                asset_id: asset.asset_id.clone(),
+                role: asset.role.clone(),
+                sort_order: asset.sort_order,
+            })
+            .collect()
+    }
+
+    fn scene_test_routing(
+        output_mode: &str,
+        conversion_driver: &str,
+        single_template_id: Option<&str>,
+    ) -> serde_json::Value {
+        let definitions = get_scene_output_mode_items(output_mode, conversion_driver, "")
+            .expect("scene output sequence should load");
+        let selections = definitions
+            .iter()
+            .map(|definition| {
+                let template_id = single_template_id
+                    .unwrap_or_else(|| definition.recommended_template_ids[0].as_str());
+                json!({ "code": definition.code, "templateId": template_id })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "catalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "conversionDriver": conversion_driver,
+            "visualDirectionId": if output_mode == "single" { "" } else { "minimal" },
+            "selections": selections,
+        })
+    }
+
+    #[test]
+    fn scene_routing_is_compact_and_final_planning_only_injects_the_routed_template() {
+        let mut input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "保留商品原有蓝色包装",
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+        });
+
+        let routing_input = scene_template_routing_gateway_input(&input)
+            .expect("scene routing input should render");
+        let routing_prompt = routing_input["prompt"].to_string();
+        assert!(routing_prompt.contains("模板 ID：hero-image"));
+        assert!(routing_prompt.contains("模板 ID：magazine-editorial"));
+        assert!(routing_prompt.contains("明确触发短语"));
+        assert!(!routing_prompt.contains("构图结构："));
+        assert!(!routing_prompt.contains("风格变体："));
+        assert!(!routing_prompt.contains("Anti-AI 规则："));
+
+        input["sceneTemplateRouting"] = scene_test_routing("single", "visual", Some("flat-lay"));
+        let gateway_input = scene_prompt_planning_gateway_input(&input)
+            .expect("scene planning input should render");
+        let roleless_prompt = gateway_input["prompt"]["rolelessPrompt"]
+            .as_str()
+            .expect("scene planning roleless prompt should render");
+        let prompt = gateway_input
+            .get("prompt")
+            .expect("rendered prompt should exist")
+            .to_string();
+
+        assert!(prompt.contains("模板 ID：flat-lay"));
+        assert!(prompt.contains("主体视觉事实源"));
+        assert!(!prompt.contains("模板 ID：hero-image"));
+        assert!(!prompt.contains("{{"));
+        assert!(!prompt.contains("}}"));
+        assert!(prompt.contains("视觉方向不参与规划"));
+        assert!(!prompt.contains("极简电商："));
+        assert!(prompt.contains("冻结转化驱动力：visual"));
+        assert!(!prompt.contains("冻结转化驱动力：pain-point"));
+        assert!(!prompt.contains("冻结转化驱动力：emotional"));
+        assert!(roleless_prompt.contains("code=S1"));
+        assert!(roleless_prompt.contains("purpose=根据参考图与用户需求自动匹配并执行一个场景模板"));
+        assert!(!roleless_prompt.contains("recommendedTemplateIds"));
+        assert!(!roleless_prompt.contains("hero-image,poster-banner"));
+        assert!(roleless_prompt.contains("routedTemplateId=flat-lay"));
+    }
+
+    #[test]
+    fn scene_infographic_planning_keeps_museum_brief_and_only_injects_infographic_rules() {
+        let supplemental_info = "用于小红书发布的文化器物详情信息图；保留器形、铜锈、磨损、兽耳衔环等可见细节；使用四个 callout；不要推断年代、馆藏、尺寸、用途和铭文。";
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": supplemental_info,
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+            "sceneTemplateRouting": scene_test_routing("single", "visual", Some("infographic")),
+        });
+
+        let gateway_input = scene_prompt_planning_gateway_input(&input)
+            .expect("scene infographic planning input should render");
+        let messages = gateway_input["prompt"]["messages"]
+            .as_array()
+            .expect("planning messages should render");
+        let user_prompt = messages[1]["content"]
+            .as_str()
+            .expect("planning user prompt should render");
+
+        assert_eq!(messages.len(), 2);
+        assert!(user_prompt.contains(supplemental_info));
+        assert!(user_prompt.contains("模板 ID：infographic"));
+        assert!(user_prompt.contains("E-commerce infographic"));
+        assert!(user_prompt.contains("4-6 个"));
+        assert!(user_prompt.contains("文化器物"));
+        assert!(!user_prompt.contains("模板 ID：social-media"));
+        assert!(!user_prompt.contains("暖自动白平衡"));
+        assert!(user_prompt.contains("code=S1"));
+        assert!(user_prompt.contains("routedTemplateId=infographic"));
+    }
+
+    #[test]
+    fn scene_planning_rejects_stale_prompt_version_before_provider_call() {
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": "v5",
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "生成极简平铺图",
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+        });
+
+        let error = scene_template_routing_gateway_input(&input)
+            .expect_err("stale planning prompt must require a new plan");
+
+        assert!(error.to_string().contains("必须重新规划"));
+    }
+
+    #[test]
+    fn scene_routing_requires_non_blank_supplemental_info() {
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "   ",
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+        });
+
+        let error = scene_template_routing_gateway_input(&input)
+            .expect_err("blank supplemental info must fail before provider call");
+
+        assert!(error.to_string().contains("请填写补充信息"));
+    }
+
+    #[test]
+    fn scene_routing_rejects_stale_catalog_before_provider_call() {
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": "v3",
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "生成杂志人物大片",
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+        });
+
+        let error = scene_template_routing_gateway_input(&input)
+            .expect_err("stale catalog must require a new plan");
+
+        assert!(error.to_string().contains("模板目录版本不受支持"));
+    }
+
+    #[test]
+    fn scene_routing_output_freezes_only_canonical_selection_fields() {
+        let input = json!({
+            "outputMode": "single",
+        });
+        let output = json!({
+            "catalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "conversionDriver": "visual",
+            "visualDirectionId": "",
+            "selections": [{
+                "code": "S1",
+                "templateId": "magazine-editorial",
+                "analysis": "不得进入第二次规划输入",
+                "prompt": "不得由路由阶段生成 prompt",
+            }],
+            "candidateTemplates": ["hero-image"],
+        });
+
+        let normalized = normalize_scene_template_routing_output(&input, &output)
+            .expect("valid routing should normalize");
+
+        assert_eq!(normalized.as_object().map(|value| value.len()), Some(4));
+        assert_eq!(
+            normalized["selections"][0]
+                .as_object()
+                .map(|value| value.len()),
+            Some(2)
+        );
+        assert!(normalized.get("candidateTemplates").is_none());
+        assert!(normalized["selections"][0].get("analysis").is_none());
+        assert!(normalized["selections"][0].get("prompt").is_none());
+    }
+
+    #[test]
+    fn scene_routing_accepts_any_catalog_template_for_any_pack_slot() {
+        let definitions = get_scene_output_mode_items("hero-pack", "visual", "")
+            .expect("hero sequence should load");
+        let routed_templates = [
+            "sports-campaign",
+            "device-mockup",
+            "try-on-virtual",
+            "hero-image",
+            "social-media",
+        ];
+        let output = json!({
+            "catalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "conversionDriver": "visual",
+            "visualDirectionId": "minimal",
+            "selections": definitions
+                .iter()
+                .zip(routed_templates)
+                .map(|(definition, template_id)| json!({
+                    "code": definition.code,
+                    "templateId": template_id,
+                }))
+                .collect::<Vec<_>>(),
+        });
+
+        let normalized =
+            normalize_scene_template_routing_output(&json!({ "outputMode": "hero-pack" }), &output)
+                .expect("slot recommendations must not reject another catalog template");
+
+        assert_eq!(normalized["selections"][0]["templateId"], "sports-campaign");
+        assert_eq!(normalized["selections"][1]["templateId"], "device-mockup");
+        assert_eq!(normalized["selections"][2]["templateId"], "try-on-virtual");
+    }
+
+    #[test]
+    fn scene_planning_task_calls_router_then_planner_and_persists_only_final_plan() {
+        let workspace_dir = initialized_workspace("scene-two-pass-planning");
+        let input_assets = import_scene_reference_assets(&workspace_dir, 1);
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "把参考人物做成时尚杂志大片",
+        });
+        let created = GenerationService::new()
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("scene-two-pass-planning".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::PromptPlan,
+                    title: "场景方案".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(input.clone()),
+                    prompt_plan_snapshot: None,
+                    input_assets: input_assets.clone(),
+                },
+            )
+            .expect("scene planning task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&created.id],
+            )
+            .expect("task should enter provider stage");
+        drop(database);
+        let task = ClaimedTask {
+            id: created.id.clone(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input,
+            input_assets: claimed_scene_reference_assets(&input_assets),
+        };
+        let mut prompts = Vec::new();
+        let mut call_index = 0usize;
+
+        let result = execute_scene_prompt_planning_task_with_gateway(
+            &workspace_dir,
+            task,
+            |capability_id, gateway_input| {
+                prompts.push(gateway_input["prompt"].to_string());
+                call_index += 1;
+                let output_json = if call_index == 1 {
+                    json!({
+                        "catalogVersion": get_scene_template_catalog_version().expect("catalog"),
+                        "conversionDriver": "visual",
+                        "visualDirectionId": "",
+                        "selections": [{
+                            "code": "S1",
+                            "templateId": "magazine-editorial",
+                            "analysis": "只可驻留内存",
+                        }],
+                    })
+                } else {
+                    json!({
+                        "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+                        "conversionDriver": "visual",
+                        "campaignStyleLock": "",
+                        "items": [{
+                            "imageId": "scene-magazine-1",
+                            "imageNo": 1,
+                            "sortOrder": 0,
+                            "code": "S1",
+                            "title": "人物时尚杂志大片",
+                            "purpose": "根据参考图与用户需求自动匹配并执行一个场景模板",
+                            "templateId": "magazine-editorial",
+                            "variantId": "fashion-cover",
+                            "ratio": "3:4",
+                            "promptSummary": "参考人物以杂志封面构图呈现。",
+                            "prompt": "Preserve the reference person and create a fashion editorial cover composition. Negative constraints: do not change identity or clothing.",
+                            "negativeConstraints": "Do not change identity or clothing.",
+                        }],
+                    })
+                };
+                Ok(ModelGatewayResult {
+                    invocation_id: format!("scene-pass-{call_index}"),
+                    capability_id: capability_id.to_string(),
+                    provider_profile_id: "test-provider".to_string(),
+                    model: "test-model".to_string(),
+                    output_json,
+                    output_text: None,
+                })
+            },
+        )
+        .expect("two-pass planning should execute");
+
+        assert_eq!(result.invocation_id.as_deref(), Some("scene-pass-1"));
+        assert_eq!(call_index, 2);
+        assert!(prompts[0].contains("模板 ID：hero-image"));
+        assert!(prompts[0].contains("模板 ID：magazine-editorial"));
+        assert!(prompts[1].contains("模板 ID：magazine-editorial"));
+        assert!(!prompts[1].contains("模板 ID：hero-image"));
+        let detail = GenerationService::new()
+            .get_task_detail(&workspace_dir, &created.id)
+            .expect("scene task should reload");
+        assert_eq!(detail.task.status, GenerationTaskStatus::Succeeded);
+        let output = detail.output.expect("final scene plan should persist");
+        assert_eq!(output["items"][0]["templateId"], "magazine-editorial");
+        assert!(output.get("selections").is_none());
+        assert!(output.get("analysis").is_none());
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        let (persisted_input, event_details): (String, String) = database
+            .connection()
+            .query_row(
+                "SELECT generation_tasks.input_json, COALESCE(GROUP_CONCAT(task_events.detail_json, ''), '') FROM generation_tasks LEFT JOIN task_events ON task_events.task_id = generation_tasks.id WHERE generation_tasks.id = ?1 GROUP BY generation_tasks.id",
+                [&created.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("persisted scene task should query");
+        assert!(!persisted_input.contains("sceneTemplateRouting"));
+        assert!(!event_details.contains("sceneTemplateRouting"));
+        assert!(!event_details.contains("只可驻留内存"));
+        drop(database);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn scene_planning_output_does_not_persist_after_cancellation_between_stage_and_write() {
+        let workspace_dir = initialized_workspace("scene-plan-cancelled-before-output-write");
+        let persisted_input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "把参考人物做成时尚杂志大片",
+        });
+        let created = GenerationService::new()
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("scene-plan-cancelled-before-output-write".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::PromptPlan,
+                    title: "场景方案".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(persisted_input.clone()),
+                    prompt_plan_snapshot: None,
+                    input_assets: Vec::new(),
+                },
+            )
+            .expect("scene planning task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&created.id],
+            )
+            .expect("task should enter provider stage");
+        drop(database);
+
+        let mut routed_input = persisted_input.as_object().cloned().unwrap();
+        routed_input.insert(
+            "sceneTemplateRouting".to_string(),
+            scene_test_routing("single", "visual", Some("magazine-editorial")),
+        );
+        let task = ClaimedTask {
+            id: created.id.clone(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: serde_json::Value::Object(routed_input),
+            input_assets: Vec::new(),
+        };
+        let gateway_result = ModelGatewayResult {
+            invocation_id: "scene-plan-cancelled".to_string(),
+            capability_id: "scene-prompt-planning".to_string(),
+            provider_profile_id: "test-provider".to_string(),
+            model: "test-model".to_string(),
+            output_text: None,
+            output_json: json!({
+                "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+                "conversionDriver": "visual",
+                "campaignStyleLock": "",
+                "items": [{
+                    "imageId": "scene-magazine-1",
+                    "imageNo": 1,
+                    "sortOrder": 0,
+                    "code": "S1",
+                    "title": "人物时尚杂志大片",
+                    "purpose": "根据参考图与用户需求自动匹配并执行一个场景模板",
+                    "templateId": "magazine-editorial",
+                    "variantId": "fashion-cover",
+                    "ratio": "3:4",
+                    "promptSummary": "参考人物以杂志封面构图呈现。",
+                    "prompt": "Preserve the reference person and create a fashion editorial cover composition.",
+                    "negativeConstraints": "Do not change identity or clothing.",
+                }],
+            }),
+        };
+
+        persist_structured_model_output_with_before_write(
+            &workspace_dir,
+            &task,
+            &gateway_result,
+            || {
+                let database =
+                    WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+                database
+                    .connection()
+                    .execute(
+                        "UPDATE generation_tasks SET status = 'cancelled', stage = 'failed' WHERE id = ?1",
+                        [&created.id],
+                    )
+                    .expect("task should cancel before output write");
+            },
+        )
+        .expect("late output should be ignored");
+
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+        let (output_json, output_saved_events): (Option<String>, i64) = database
+            .connection()
+            .query_row(
+                "SELECT generation_tasks.output_json, COUNT(task_events.id) FROM generation_tasks LEFT JOIN task_events ON task_events.task_id = generation_tasks.id AND task_events.event_type = 'task.output-saved' WHERE generation_tasks.id = ?1 GROUP BY generation_tasks.id",
+                [&created.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("cancelled task output should query");
+        assert!(output_json.is_none());
+        assert_eq!(output_saved_events, 0);
+        drop(database);
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn scene_planning_task_does_not_call_planner_after_cancellation() {
+        let workspace_dir = initialized_workspace("scene-routing-cancelled");
+        let input_assets = import_scene_reference_assets(&workspace_dir, 1);
+        let input = json!({
+            "kind": "scene-prompt-planning",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "outputMode": "single",
+            "ratio": "3:4",
+            "supplementalInfo": "生成杂志人物大片",
+        });
+        let created = GenerationService::new()
+            .create_task(
+                &workspace_dir,
+                CreateGenerationTaskInput {
+                    idempotency_key: Some("scene-routing-cancelled".to_string()),
+                    workspace: WorkspaceKind::Scene,
+                    kind: GenerationTaskKind::PromptPlan,
+                    title: "场景方案".to_string(),
+                    prompt_plan_id: None,
+                    input: Some(input.clone()),
+                    prompt_plan_snapshot: None,
+                    input_assets: input_assets.clone(),
+                },
+            )
+            .expect("scene planning task should create");
+        let database = WorkspaceDatabase::open(&workspace_dir).expect("database should open");
+        database
+            .connection()
+            .execute(
+                "UPDATE generation_tasks SET status = 'running', stage = 'calling-provider' WHERE id = ?1",
+                [&created.id],
+            )
+            .expect("task should enter provider stage");
+        drop(database);
+        let task = ClaimedTask {
+            id: created.id.clone(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input,
+            input_assets: claimed_scene_reference_assets(&input_assets),
+        };
+        let mut call_count = 0usize;
+
+        execute_scene_prompt_planning_task_with_gateway(
+            &workspace_dir,
+            task,
+            |capability_id, _| {
+                call_count += 1;
+                let database =
+                    WorkspaceDatabase::open(&workspace_dir).expect("database should reopen");
+                database
+                    .connection()
+                    .execute(
+                        "UPDATE generation_tasks SET status = 'cancelled', stage = 'failed' WHERE id = ?1",
+                        [&created.id],
+                    )
+                    .expect("task should cancel after routing");
+                Ok(ModelGatewayResult {
+                    invocation_id: "scene-route-cancelled".to_string(),
+                    capability_id: capability_id.to_string(),
+                    provider_profile_id: "test-provider".to_string(),
+                    model: "test-model".to_string(),
+                    output_json: json!({
+                        "catalogVersion": get_scene_template_catalog_version().expect("catalog"),
+                        "conversionDriver": "visual",
+                        "visualDirectionId": "",
+                        "selections": [{ "code": "S1", "templateId": "magazine-editorial" }],
+                    }),
+                    output_text: None,
+                })
+            },
+        )
+        .expect("cancelled task should stop cleanly");
+
+        assert_eq!(call_count, 1);
+        let detail = GenerationService::new()
+            .get_task_detail(&workspace_dir, &created.id)
+            .expect("cancelled task should reload");
+        assert_eq!(detail.task.status, GenerationTaskStatus::Cancelled);
+        assert!(detail.output.is_none());
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn scene_plan_output_is_strictly_validated_and_normalized() {
+        let task = ClaimedTask {
+            id: "scene-plan-task".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({
+                "kind": "scene-prompt-planning",
+                "outputMode": "hero-pack",
+                "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+                "ratio": "1:1",
+                "sceneTemplateRouting": scene_test_routing("hero-pack", "visual", None),
+            }),
+            input_assets: Vec::new(),
+        };
+        let catalog_version =
+            get_scene_template_catalog_version().expect("scene catalog should load");
+        let definitions = get_scene_output_mode_items("hero-pack", "visual", "")
+            .expect("hero sequence should load");
+        let items = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| {
+                let variant_id = scene_test_variant_id(&definition.recommended_template_ids[0]);
+                json!({
+                    "imageId": format!("scene-image-{}", index + 1),
+                    "imageNo": index + 1,
+                    "sortOrder": index,
+                    "code": definition.code,
+                    "title": format!("图片 {}", index + 1),
+                    "purpose": definition.purpose,
+                    "templateId": definition.recommended_template_ids[0],
+                    "variantId": variant_id,
+                    "ratio": "1:1",
+                    "promptSummary": "保持商品主体一致并完成当前图片用途。",
+                    "prompt": "固定暖白背景、统一棚拍光与无衬线字体。Preserve the subject and do not invent certifications.",
+                    "negativeConstraints": "Do not fabricate certifications; keep the subject unchanged.",
+                    "analysis": "不得持久化的 item 分析",
+                    "rawPrompt": "不得持久化的原始 Prompt",
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = json!({
+            "templateCatalogVersion": catalog_version,
+            "conversionDriver": "visual",
+            "campaignStyleLock": "固定暖白背景、统一棚拍光与无衬线字体",
+            "items": items,
+            "modelAnalysis": "不得持久化的模型分析",
+        });
+
+        let normalized = normalize_scene_prompt_plan_output(&task, &output)
+            .expect("valid scene plan should normalize");
+
+        assert_eq!(normalized["items"].as_array().map(Vec::len), Some(5));
+        assert!(normalized.get("modelAnalysis").is_none());
+        assert_eq!(normalized.as_object().map(|value| value.len()), Some(4));
+        for item in normalized["items"].as_array().unwrap() {
+            assert_eq!(item.as_object().map(|value| value.len()), Some(12));
+            assert!(item.get("analysis").is_none());
+            assert!(item.get("rawPrompt").is_none());
+        }
+
+        let mut misplaced_style_lock = output.clone();
+        let prompt = misplaced_style_lock["items"][0]["prompt"]
+            .as_str()
+            .expect("prompt")
+            .to_string();
+        misplaced_style_lock["items"][0]["prompt"] = json!(format!("先写其它视觉指令。{prompt}"));
+        let error = normalize_scene_prompt_plan_output(&task, &misplaced_style_lock)
+            .expect_err("style lock must be the first prompt section");
+        assert!(error.to_string().contains("Campaign Style Lock 开头"));
+
+        let mut changed_routed_template = output.clone();
+        changed_routed_template["items"][0]["templateId"] = json!("sports-campaign");
+        changed_routed_template["items"][0]["variantId"] = json!("product-hero");
+        let error = normalize_scene_prompt_plan_output(&task, &changed_routed_template)
+            .expect_err("planning must preserve the in-memory routed template");
+        assert!(error.to_string().contains("必须等于路由冻结模板"));
+    }
+
+    #[test]
+    fn scene_plan_output_rejects_wrong_sequence_and_placeholders() {
+        let task = ClaimedTask {
+            id: "invalid-scene-plan-task".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({
+                "kind": "scene-prompt-planning",
+                "outputMode": "single",
+                "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+                "ratio": "3:4",
+                "sceneTemplateRouting": scene_test_routing("single", "visual", Some("flat-lay")),
+            }),
+            input_assets: Vec::new(),
+        };
+        let output = json!({
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "conversionDriver": "visual",
+            "campaignStyleLock": "",
+            "items": [{
+                "imageId": "scene-image-1",
+                "imageNo": 1,
+                "sortOrder": 0,
+                "code": "H1",
+                "title": "单张图",
+                "purpose": "展示商品",
+                "templateId": "flat-lay",
+                "variantId": "minimal",
+                "ratio": "3:4",
+                "promptSummary": "平铺展示参考主体。",
+                "prompt": "仍有 {{placeholder}}",
+                "negativeConstraints": "禁止水印",
+            }],
+        });
+
+        let error = normalize_scene_prompt_plan_output(&task, &output)
+            .expect_err("unresolved placeholder should fail");
+
+        assert!(error.to_string().contains("未替换占位符"));
+    }
+
+    #[test]
+    fn scene_single_plan_freezes_deterministic_metadata_from_user_input() {
+        let task = ClaimedTask {
+            id: "single-scene-plan-task".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({
+                "kind": "scene-prompt-planning",
+                "outputMode": "single",
+                "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+                "ratio": "3:4",
+                "sceneTemplateRouting": scene_test_routing("single", "visual", Some("magazine-editorial")),
+            }),
+            input_assets: Vec::new(),
+        };
+        let output = json!({
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "conversionDriver": "visual",
+            "campaignStyleLock": "",
+            "items": [{
+                "imageId": "scene-person-editorial",
+                "imageNo": 7,
+                "sortOrder": 9,
+                "code": "single-image",
+                "title": "人物杂志场景",
+                "purpose": "模型改写过的杂志人物展示用途",
+                "templateId": "magazine-editorial",
+                "variantId": "fashion-cover",
+                "ratio": "1:1",
+                "promptSummary": "参考人物以杂志编辑姿态置于复古场景中。",
+                "prompt": "保持参考人物身份与服装一致，使用杂志编辑构图和克制轮廓光。负向约束：禁止改变人物身份、服装图案和已有文字",
+                "negativeConstraints": "禁止改变人物身份、服装图案和已有文字",
+            }],
+        });
+
+        let normalized = normalize_scene_prompt_plan_output(&task, &output)
+            .expect("single plan metadata should come from the frozen user selection");
+        let item = &normalized["items"][0];
+
+        assert_eq!(item["imageNo"], 1);
+        assert_eq!(item["sortOrder"], 0);
+        assert_eq!(item["code"], "S1");
+        assert_eq!(
+            item["purpose"],
+            "根据参考图与用户需求自动匹配并执行一个场景模板"
+        );
+        assert_eq!(item["templateId"], "magazine-editorial");
+        assert_eq!(item["ratio"], "3:4");
+        assert_eq!(item["prompt"], output["items"][0]["prompt"]);
+        assert_eq!(normalized["conversionDriver"], "visual");
+    }
+
+    #[test]
+    fn scene_generation_snapshot_renders_configured_item_prompt() {
+        let input = json!({
+            "kind": "scene-image-generation",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "generationPromptVersion": get_prompt_template(PromptTemplateId::SceneImageGeneration).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "campaignStyleLock": "",
+            "conversionDriver": "visual",
+            "outputMode": "single",
+            "ratio": "3:4",
+            "userImages": [{
+                "role": "source",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+            "items": [{
+                "imageId": "scene-image-1",
+                "imageNo": 1,
+                "sortOrder": 0,
+                "code": "S1",
+                "title": "平铺摆拍",
+                "purpose": "根据参考图与用户需求自动匹配并执行一个场景模板",
+                "templateId": "flat-lay",
+                "variantId": "minimal",
+                "ratio": "3:4",
+                "promptSummary": "以极简平铺方式展示参考主体。",
+                "prompt": "按确认方案以极简平铺构图展示商品并保持主体一致。负向约束：禁止随机文字",
+                "negativeConstraints": "禁止随机文字",
+            }],
+        });
+
+        validate_scene_generation_snapshot(&input).expect("snapshot should validate");
+        let gateway_input =
+            scene_image_generation_item_gateway_input(&input, &input["items"][0], 0)
+                .expect("generation prompt should render");
+        let prompt = gateway_input["prompt"].to_string();
+
+        assert!(prompt.contains("你是一名静物平铺摄影师"));
+        assert!(prompt.contains("按确认方案以极简平铺构图展示商品"));
+        assert!(!prompt.contains("固定暖白背景"));
+        assert!(!prompt.contains("平铺摆拍"));
+        assert!(!prompt.contains("{{"));
+        assert!(!prompt.contains("}}"));
+
+        let mut invalid_driver = input.clone();
+        invalid_driver["conversionDriver"] = json!("emotional");
+        let error = validate_scene_generation_snapshot(&invalid_driver)
+            .expect_err("single generation must use the canonical visual driver");
+        assert!(error.to_string().contains("必须为 visual"));
+
+        let mut stale_planning = input.clone();
+        stale_planning["planningPromptVersion"] = json!("v5");
+        let error = validate_scene_generation_snapshot(&stale_planning)
+            .expect_err("immediate previous planning version must not execute");
+        assert!(error
+            .to_string()
+            .contains("planningPromptVersion 版本不受支持"));
+    }
+
+    #[test]
+    fn scene_generation_snapshot_accepts_catalog_template_outside_slot_recommendations() {
+        let definitions = get_scene_output_mode_items("hero-pack", "visual", "").unwrap();
+        let mut items = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| scene_snapshot_item(definition, index, index, "1:1"))
+            .collect::<Vec<_>>();
+        items[0]["templateId"] = json!("sports-campaign");
+        items[0]["variantId"] = json!("product-hero");
+        let input = scene_generation_snapshot("hero-pack", "visual", items);
+
+        validate_scene_generation_snapshot(&input)
+            .expect("generation snapshot has no route and should accept any catalog template");
+    }
+
+    #[test]
+    fn scene_retry_accepts_catalog_template_outside_slot_recommendations() {
+        let definitions = get_scene_output_mode_items("hero-pack", "visual", "").unwrap();
+        let mut item = scene_snapshot_item(&definitions[0], 0, 0, "1:1");
+        item["templateId"] = json!("device-mockup");
+        item["variantId"] = json!("single-laptop");
+        let mut input = scene_generation_snapshot("hero-pack", "visual", vec![item]);
+        input["singleImageRetry"] = json!(true);
+
+        validate_scene_generation_snapshot(&input)
+            .expect("retry snapshot has no route and should accept any catalog template");
+    }
+
+    #[test]
+    fn scene_magazine_generation_applies_one_variant_and_allows_person_direction() {
+        let input = json!({
+            "kind": "scene-image-generation",
+            "planningPromptVersion": get_prompt_template(PromptTemplateId::ScenePromptPlanning).unwrap().version,
+            "generationPromptVersion": get_prompt_template(PromptTemplateId::SceneImageGeneration).unwrap().version,
+            "templateCatalogVersion": get_scene_template_catalog_version().expect("catalog"),
+            "campaignStyleLock": "",
+            "conversionDriver": "visual",
+            "outputMode": "single",
+            "ratio": "3:4",
+            "userImages": [{
+                "role": "reference",
+                "dataUrl": "data:image/png;base64,AA==",
+            }],
+            "items": [{
+                "imageId": "scene-magazine-1",
+                "imageNo": 1,
+                "sortOrder": 0,
+                "code": "S1",
+                "title": "人物杂志大片",
+                "purpose": "根据参考图与用户需求自动匹配并执行一个场景模板",
+                "templateId": "magazine-editorial",
+                "variantId": "fashion-cover",
+                "ratio": "3:4",
+                "promptSummary": "参考人物以自信的四分之三身姿态呈现杂志大片。",
+                "prompt": "保持参考人物身份与服装事实，调整为自信 3/4 身编辑姿态并使用完整杂志构图和灯光。负向约束：禁止换人、换脸和改变服装款式",
+                "negativeConstraints": "禁止换人、换脸和改变服装款式",
+            }],
+        });
+
+        validate_scene_generation_snapshot(&input).expect("magazine snapshot should validate");
+        let gateway_input =
+            scene_image_generation_item_gateway_input(&input, &input["items"][0], 0)
+                .expect("magazine generation prompt should render");
+        let system_prompt = gateway_input["prompt"]["messages"][0]["content"]
+            .as_str()
+            .expect("system prompt");
+        let user_prompt = gateway_input["prompt"]["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt");
+
+        assert_eq!(
+            system_prompt,
+            "你是一名杂志编辑摄影师。\n直接生成一张图片，不返回文字。"
+        );
+        assert!(user_prompt.contains("保持参考人物身份与服装事实"));
+        assert!(!user_prompt.contains("上一步"));
+        assert!(!user_prompt.contains("本阶段"));
+        assert!(!user_prompt.contains("Campaign Style Lock"));
+        assert!(!user_prompt.contains("当前场景个性化执行规则"));
+        assert!(!user_prompt.contains("选定变体规则"));
+        assert!(!user_prompt.contains("beauty-cover"));
+        assert!(!user_prompt.contains("fragrance-editorial"));
+        assert!(!user_prompt.contains("minimal-editorial"));
+    }
+
+    #[test]
+    fn scene_single_retry_preserves_hero_parent_item_identity() {
+        let definitions = get_scene_output_mode_items("hero-pack", "pain-point", "").unwrap();
+        let parent_index = 2;
+        let item = scene_snapshot_item(&definitions[parent_index], parent_index, 0, "1:1");
+        let mut input = scene_generation_snapshot("hero-pack", "pain-point", vec![item]);
+        input["singleImageRetry"] = json!(true);
+
+        validate_scene_generation_snapshot(&input)
+            .expect("hero item retry should validate against its parent sequence");
+
+        input["items"][0]["imageNo"] = json!(1);
+        assert!(validate_scene_generation_snapshot(&input)
+            .expect_err("retry must keep parent image number")
+            .to_string()
+            .contains("imageNo 必须为 3"));
+    }
+
+    #[test]
+    fn scene_single_retry_preserves_full_pack_detail_item_identity() {
+        let definitions = get_scene_output_mode_items("full-pack", "emotional", "").unwrap();
+        let parent_index = 8;
+        assert_eq!(definitions[parent_index].code, "D4");
+        let item = scene_snapshot_item(&definitions[parent_index], parent_index, 0, "1:1");
+        let mut input = scene_generation_snapshot("full-pack", "emotional", vec![item]);
+        input["singleImageRetry"] = json!(true);
+
+        validate_scene_generation_snapshot(&input)
+            .expect("full-pack detail item retry should validate against its parent sequence");
+
+        input["items"][0]["templateId"] = json!("unknown-template");
+        assert!(validate_scene_generation_snapshot(&input)
+            .expect_err("retry template must still exist in the catalog")
+            .to_string()
+            .contains("未知场景模板 ID"));
+    }
+
+    #[test]
+    fn scene_full_pack_accepts_duplicate_template_ids() {
+        let definitions = get_scene_output_mode_items("full-pack", "visual", "").unwrap();
+        let mut items = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| scene_snapshot_item(definition, index, index, "1:1"))
+            .collect::<Vec<_>>();
+        items[5]["templateId"] = items[0]["templateId"].clone();
+        items[5]["variantId"] = items[0]["variantId"].clone();
+        items[5]["prompt"] = items[0]["prompt"].clone();
+        let input = scene_generation_snapshot("full-pack", "visual", items);
+
+        validate_scene_generation_snapshot(&input)
+            .expect("full pack recommendations must not force globally unique templates");
+    }
+
+    #[test]
+    fn scene_item_gateway_result_requires_exactly_one_image() {
+        let result = ModelGatewayResult {
+            invocation_id: "scene-multiple-images".to_string(),
+            capability_id: "scene-image-generation".to_string(),
+            provider_profile_id: "mock-local".to_string(),
+            model: "mock-scene-image-v1".to_string(),
+            output_json: json!({
+                "images": [
+                    { "dataUrl": "data:image/png;base64,AA==" },
+                    { "dataUrl": "data:image/png;base64,AA==" },
+                ],
+            }),
+            output_text: None,
+        };
+
+        let error = ensure_item_gateway_image_count(&result, true)
+            .expect_err("scene item should reject multiple images");
+
+        assert!(error.to_string().contains("必须且只能返回 1 张图片"));
+        ensure_item_gateway_image_count(&result, false)
+            .expect("other itemized capabilities keep their existing behavior");
+    }
 
     #[tokio::test]
     async fn async_task_supervisor_marks_panics_failed_without_persisting_panic_payload() {
@@ -4613,8 +6943,79 @@ mod tests {
         assert_eq!(diagnostic["taskId"], "task_clothing_retry");
         assert_eq!(diagnostic["capabilityId"], "clothing-tryon-generation");
         assert_eq!(diagnostic["errorCode"], "VALIDATION_ERROR");
+        assert!(diagnostic["validationReason"].is_null());
         assert!(!serialized.contains("raw prompt marker"));
         assert!(!serialized.contains("sk-task-diagnostic-secret"));
+    }
+
+    #[test]
+    fn scene_task_diagnostic_reports_only_safe_validation_category() {
+        let diagnostic = task_execution_error_diagnostic(
+            "task_scene_plan",
+            "scene-prompt-planning",
+            &NormalizedTaskError {
+                code: "SCENE_PROMPT_PLAN_OUTPUT_INVALID".to_string(),
+                message: "场景规划结果校验失败：items[0] purpose 必须为内部配置；raw-secret-marker"
+                    .to_string(),
+                retryable: true,
+                stage: Some(GenerationTaskStage::Failed),
+                provider_status_code: None,
+                provider_error_code: None,
+            },
+        );
+        let serialized = diagnostic.to_string();
+
+        assert_eq!(diagnostic["validationReason"], "item-purpose");
+        assert!(!serialized.contains("raw-secret-marker"));
+        assert!(!serialized.contains("内部配置"));
+
+        let missing_negative_constraints = task_execution_error_diagnostic(
+            "task_scene_plan",
+            "scene-prompt-planning",
+            &NormalizedTaskError {
+                code: "SCENE_PROMPT_PLAN_OUTPUT_INVALID".to_string(),
+                message: "场景规划结果校验失败：items[0] 缺少 negativeConstraints。".to_string(),
+                retryable: true,
+                stage: Some(GenerationTaskStage::Failed),
+                provider_status_code: None,
+                provider_error_code: None,
+            },
+        );
+        assert_eq!(
+            missing_negative_constraints["validationReason"],
+            "negative-constraints"
+        );
+    }
+
+    #[test]
+    fn scene_persist_error_does_not_include_model_owned_validation_fragment() {
+        let task = ClaimedTask {
+            id: "task_scene_invalid_template".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({ "kind": "scene-prompt-planning" }),
+            input_assets: Vec::new(),
+        };
+        let source = GenerationError::Validation(
+            "场景规划结果 items[0] templateId 未知：raw-model-template-marker".to_string(),
+        );
+
+        let error = normalized_persist_error_with_source(&task, &source);
+
+        assert_eq!(error.code, "SCENE_PROMPT_PLAN_OUTPUT_INVALID");
+        assert_eq!(
+            error.message,
+            "场景规划结果不是有效结构化 JSON，或未满足图片序列合同，请重试。"
+        );
+        assert!(!error.message.contains("raw-model-template-marker"));
+        let diagnostic = task_execution_error_diagnostic_with_source(
+            &task.id,
+            "scene-prompt-planning",
+            &error,
+            &source,
+        );
+        assert_eq!(diagnostic["validationReason"], "template-id");
+        assert!(!diagnostic.to_string().contains("raw-model-template-marker"));
     }
 
     #[test]
@@ -6363,6 +8764,102 @@ mod tests {
         assert!(!detail.input.unwrap().to_string().contains("data:image/"));
 
         remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn scene_task_input_requires_reference_asset_relations() {
+        for (kind, task_kind) in [
+            ("scene-prompt-planning", GenerationTaskKind::PromptPlan),
+            (
+                "scene-image-generation",
+                GenerationTaskKind::ImageGeneration,
+            ),
+        ] {
+            let task = ClaimedTask {
+                id: format!("task-{kind}"),
+                workspace: WorkspaceKind::Scene,
+                kind: task_kind,
+                input: json!({
+                    "kind": kind,
+                    "userImages": [{ "role": "reference" }],
+                }),
+                input_assets: Vec::new(),
+            };
+
+            let error = task_input_with_asset_reference_images(Path::new("/tmp"), &task)
+                .expect_err("persisted userImages must not replace input asset relations");
+            assert_eq!(
+                error.to_string(),
+                "场景任务参考图只能通过 inputAssets 关联。"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_task_input_injects_one_to_three_reference_assets() {
+        let workspace_dir = initialized_workspace("scene-input-reference-assets");
+        let input_assets = import_scene_reference_assets(&workspace_dir, 3);
+        let task = ClaimedTask {
+            id: "task-scene-reference-assets".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({ "kind": "scene-prompt-planning" }),
+            input_assets: claimed_scene_reference_assets(&input_assets),
+        };
+
+        let provider_input = task_input_with_asset_reference_images(&workspace_dir, &task)
+            .expect("scene reference assets should be injected in memory");
+        let user_images = provider_input["userImages"]
+            .as_array()
+            .expect("provider input should contain userImages");
+
+        assert_eq!(user_images.len(), 3);
+        assert!(user_images.iter().all(|image| image["role"] == "reference"));
+        assert!(user_images.iter().all(|image| image["dataUrl"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("data:image/png;base64,"))));
+        assert!(task.input.get("userImages").is_none());
+
+        remove_workspace(&workspace_dir);
+    }
+
+    #[test]
+    fn scene_task_input_rejects_wrong_role_or_too_many_reference_assets() {
+        let source_asset = ClaimedTaskInputAsset {
+            asset_id: "asset-source".to_string(),
+            role: "source".to_string(),
+            sort_order: 0,
+        };
+        let wrong_role_task = ClaimedTask {
+            id: "task-scene-source-role".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::PromptPlan,
+            input: json!({ "kind": "scene-prompt-planning" }),
+            input_assets: vec![source_asset],
+        };
+        let error = task_input_with_asset_reference_images(Path::new("/tmp"), &wrong_role_task)
+            .expect_err("scene assets must use the reference role");
+        assert_eq!(
+            error.to_string(),
+            "场景任务只接受 role=reference 的参考图资产。"
+        );
+
+        let too_many_task = ClaimedTask {
+            id: "task-scene-too-many-references".to_string(),
+            workspace: WorkspaceKind::Scene,
+            kind: GenerationTaskKind::ImageGeneration,
+            input: json!({ "kind": "scene-image-generation" }),
+            input_assets: (0..4)
+                .map(|index| ClaimedTaskInputAsset {
+                    asset_id: format!("asset-{index}"),
+                    role: "reference".to_string(),
+                    sort_order: index,
+                })
+                .collect(),
+        };
+        let error = task_input_with_asset_reference_images(Path::new("/tmp"), &too_many_task)
+            .expect_err("scene tasks must not send more than three references");
+        assert_eq!(error.to_string(), "场景任务必须关联 1 至 3 张参考图资产。");
     }
 
     #[test]

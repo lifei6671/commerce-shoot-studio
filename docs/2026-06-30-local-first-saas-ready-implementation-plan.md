@@ -556,8 +556,66 @@ MVP 适用范围：
 - 服饰试穿支持最多 5 张服装参考图和 1 张模特图；runtime 必须先把唯一模特图规范化为第 1 张参考图 A，再将 1–5 张服装图依次映射为 B-F，随后渲染 system、user、output 和 `rolelessPrompt`。`clothing_tryon_generation.toml` 的 `negative_prompt` 以“负向约束”并入真实发送的 Prompt。
 - 基准模特年龄 UI 使用婴儿、儿童、青少年、青年、中年、老年短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整年龄阶段描述，user message 与 `rolelessPrompt` 保持一致；未知历史年龄值原样保留。
 - 基准模特人群 UI 使用欧美白人、中国人、东亚人、东南亚人、非裔、中东人、拉丁裔短标签；`generation_tasks.input_json` 仍只保存短标签，runtime 在渲染 Prompt 时注入对应的完整族裔描述，user message 与 `rolelessPrompt` 保持一致；未知历史人群值原样保留。
-- 场景图第一版采用单阶段流程：直接用 `SceneImageGenerationInput.intent` 创建任务，不强制要求 `promptPlanId`。
-- 场景图片包计划可以作为后续增强能力加入，但不能阻塞 M7 的真实场景生图闭环。
+- 场景菜单采用两阶段 `GenerationPort` 链路：先创建 `scene-prompt-planning`
+  图生文任务，基于 1-3 张参考图和场景配置输出 1/5/9/14 项结构化方案；
+  用户审核后再创建一个父 `scene-image-generation` 图生图任务逐项执行。
+  同一个规划任务内部串行执行两次同 capability 调用：先由
+  `scene_template_routing.toml` 使用精简 routing index 选择 conversion driver、视觉方向和
+  模板，再由 `scene_prompt_planning.toml` 只注入选中模板的完整规则生成最终方案并选择 variant。
+  生图 Prompt 和 25 个模板目录分别来自 `scene_image_generation.toml` 和
+  `scene_template_catalog.toml`，业务 Prompt 不硬编码在 Rust 中。
+  当前版本为 routing `v3`、planning `v10`、generation `v7`、catalog `v5`。catalog 已逐项恢复原
+  25 模板的 variant ID、品类执行规则以及安全化后的镜头、光线、姿态、情绪和
+  Anti-AI 语义；固定 8K、真实品牌、平台数据、示例原文与无证据功效不迁入。
+  父任务通过 `promptPlanId` 关联规划任务，并冻结 planning/generation Prompt 版本、
+  catalog 版本、Campaign Style Lock 和最终 `items[]`。
+  UI 不再展示或提交场景模板、模板分类或视觉方向；用户只选择输出内容和尺寸、上传参考图，
+  并填写必填补充信息。补充信息为空时不得创建规划任务。`hero-pack` 的 H1-H5 由
+  `visual/pain-point/emotional` 转化驱动力选择对应叙事，D1-D9 固定为
+  “首屏承接 → 痛点 → 机制 → 利益 → 步骤 → 场景 → 对比 → 信任 → FAQ/CTA”。
+  图片包的 5/9/14 项是固定 runtime 合同，不允许删除或拖拽。第二步为每项输出独立
+  `variantId`、给用户查看的 `promptSummary` 和不展示的完整可执行 Prompt；审核页只展示
+  场景摘要，不允许直接编辑隐藏 Prompt。输出内容四个标题复用共享 Tooltip 图标说明实际数量和用途。
+  父生图任务及其成功、部分失败或失败结果进入生成历史的“场景”分类；
+  打开实时或历史场景结果时，由冻结参考资产重建首位“原图”卡，但该卡不单独创建生成
+  记录，也不计入生成数量、历史缩略图、选择、下载、长图预览或图片相册。生成的人物/商品
+  场景图仍作为历史缩略图和相册内容；相册按图片固有比例展示，不在图片外补浅色背景。
+  当前资产角色仍表示同一商品的多角度参考，因此 `multi-product` 仅允许表达参考图中
+  已存在的同款/同系列组合，不承诺任意多 SKU 生成。
+  规划 item 通过独立 `variantId` 冻结唯一变体；planning 在冻结模板内选择 variant，Rust 只
+  校验结构、catalog 归属和冻结路由一致性。完整 Prompt 已在规划阶段应用模板、变体、品类和
+  负向规则。参考图按商品、人物、空间、界面或组合主体
+  解释，不再把人物一律标记为商品；人物型模板必须保持身份和身体比例，只有服装本身是
+  商品参考或用户要求保留时才锁定现有服装，其它场景可按模板受控调整造型、姿态、视线和
+  表情。Campaign Style Lock 不得承载具体主体事实。
+  最终生图 TOML 是薄执行器：Rust 按当前 `templateId` 从 catalog 读取场景专业身份，
+  然后只把该身份、完整 Prompt、参考图和尺寸交给 Provider，不出现流程阶段说明，也不追加
+  Style Lock、模板执行规则、标题、用途或独立负向约束。single 不生成 Style Lock，
+  多图的 Style Lock 已原样包含在每条完整 Prompt 中。
+  routing v3 为每个固定 code/purpose 冻结一个 `templateId`，planning v10 不得改选路由模板，
+  并只在该模板内选择唯一 variant override；没有适用 override 时使用统一 `base` 语义。single 的
+  conversion driver 由 runtime 固定为 visual。H/D 的推荐模板只是排序提示，不是 allowlist；
+  routing Prompt 要求 25 个 catalog 模板在主体匹配且满足证据门槛时均可到达；该语义可达性
+  和证据判断不由 Rust 重复实现，真实参考图效果仍待人工验收。full-pack 允许相同模板承担不同
+  业务目的或构图角色，不为机械去重牺牲用户意图、主体匹配或证据安全。商品摄影模板按
+  原 Skill 形成多角度与景别节奏；人物、空间、界面和创意模板仍服从自身语言，不机械凑齐
+  商品镜头。棚拍、海报和信息图可在 Style Lock 的 HEX 背景内轮换，自然环境类模板锁定
+  环境材质、地点族、主色倾向和光线连续性。主体占比和详情文字密度只应用于匹配图型。
+  短文案可基于参考图或用户输入中的证据生成；品牌、功能、参数、效果、促销和认证仍不得
+  猜测。路由结果只存在于 executor 内存，不写入
+  `generation_tasks`、SQLite、task events、诊断文件或前端 DTO；持久层只保存通过冻结路由
+  一致性校验后的最终规划结果。模板 executor、variant、文字和证据政策以及原生视觉语言
+  优先于跨图视觉方向；视觉方向只提供色板、光线和版式基线。D1-D9 的信息职责必须通过
+  当前模板自身的构图语言表达，不强制套用统一信息图骨架；镜头、背景、服装保真和字体策略
+  按商品、人物、空间、界面或混合主体条件化应用。两次调用复用既有 `scene-prompt-planning` capability、
+  GenerationPort 和 Provider 并发限制，不新增 port、capability、数据库 schema 或 migration。
+  routing v3 先识别交付物形式、再识别画面语言和投放渠道；渠道词不能覆盖更明确的信息图、
+  详情屏或结构标注形式。planning v10 为 infographic 恢复结构化布局、HEX 色板、移动端字号、
+  4-6 个证据型 callout、主体占比、留白和文化器物事实边界。single 仍不生成 Style Lock，但
+  单项完整 Prompt 不得省略当前模板所需的视觉系统。
+  planning v10 精简 system rules：只保留事实与证据、模板优先、Style Lock 核心、variant/base、
+  自包含 Prompt、摘要边界和注入安全；确定性结构由 output format 与 Rust 校验。第二次调用
+  只发送 code/purpose 与冻结模板，不发送 routing 的 `recommendedTemplateIds`。
 
 确认规则：
 
@@ -680,6 +738,7 @@ export type ModelCapability = {
     | "listing-copy"
     | "prompt-plan"
     | "product-selling-points"
+    | "scene-prompt-planning"
     | "viral-style-analysis"
     | "scene-image-generation"
     | "product-detail-generation"
@@ -702,7 +761,14 @@ export type ModelCapability = {
 
 local mode 下限制来自本地 ProviderProfile；remote mode 下限制来自 SaaS 后端。UI 不要硬编码图片数量、比例和输入数量限制。
 
-`clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation` 是 real-provider-only 能力：`mock-local` 默认配置只用于模型配置和自动化测试，不得让 `CapabilityPort.available` 返回 `true`。基准模特能力固定 `maxInputAssets = 0`、`supportedAspectRatios = ["2:3"]`、`maxImageCount = 1`；服饰规划和试穿最多接收 5 张服装图加 1 张模特图，并只声明服饰 UI 当前支持的 `3:4`、`1:1`、`9:16` 比例。
+`clothing-scene-planning`、`clothing-base-model-generation`、
+`clothing-tryon-generation`、`scene-prompt-planning` 和
+`scene-image-generation` 是 real-provider-only 能力：`mock-local` 默认配置只用于
+模型配置和自动化测试，不得让 `CapabilityPort.available` 返回 `true`。场景规划和
+场景生图都最多接收 3 张参考图，并声明当前 UI 支持的 `3:4`、`1:1`、`9:16`
+比例；前者类别为 `image-to-text`，后者为 `image-to-image`。基准模特能力固定
+`maxInputAssets = 0`、`supportedAspectRatios = ["2:3"]`、`maxImageCount = 1`；
+服饰规划和试穿最多接收 5 张服装图加 1 张模特图。
 
 `PromptPlanPort` 是面向业务流程的生成方案端口，不等同于模型路由能力；当前 local runtime 同时公开 `prompt-plan` 作为 `ModelCapability`，用于模型配置、可用性计算和内部模型调用。页面仍只通过 `PromptPlanPort` 创建、编辑和确认方案，不直接读取 provider、model、baseUrl 或 Prompt 模板。
 
@@ -733,8 +799,14 @@ export type LocalModelConfigView = {
 - `executionMode` 表示出参模式。`auto` 由 adapter 根据响应自动识别。
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
 - `baseUrl` 是单机模式下内置 provider profile 的可持久化配置；Mock Local 固定为 `mock://local`，其他 provider 的 React 页面允许编辑，但 Rust runtime 只接受无凭据、无查询参数的 HTTPS 地址。保存后用于连接探测和真实调用，且 Base URL 变化必须使连接状态回到 `untested`。
-- OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；纯文生图暂仅支持 `clothing-base-model-generation`，固定生成 2:3 纵向基准模特图且不接收参考图。图生图覆盖 `clothing-tryon-generation` 与 `image-edit`，统一使用 `/v1/images/edits` 的 `multipart/form-data`：仅接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，不裁剪或转码输入图。保存配置、Provider 连接探测和历史配置执行都强制解析该 endpoint，不允许旧 `/v1/responses` 回写。上述行为只在本地 HTTP/单元测试中验证，尚未验证真实 OpenAI 外网调用。需要商品参考图或保持任意用户比例的 `scene-image-generation` / `product-detail-generation` 仍不对 OpenAI 开放；Responses `image_generation` 工具链路仍待后续切片。
-- `ModelConfigPort.listImageSizeOptions("image-edit")` 根据当前默认配置的 provider + model 返回受支持尺寸。OpenAI `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini` 返回方形、竖向、横向三组精确像素值；`doubao-seedream-5-0-pro-260628` 返回官方 1K/2K 八种宽高比（包含 21:9）的精确像素值，其他已登记 Seedream 模型继续返回对应 2K/4K 精确像素值。未知模型返回空列表，不在前端猜测。
+- OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；
+  `scene-prompt-planning` 走 Responses 并按 `input_image` + `input_text` 发送参考图，
+  `scene-image-generation`、`clothing-tryon-generation` 与 `image-edit` 统一使用
+  `/v1/images/edits` 的 `multipart/form-data`。图片编辑仅接受 PNG、JPEG、WebP，
+  按 1:1、横向、竖向映射目标尺寸，不裁剪或转码输入图。保存配置、Provider
+  连接探测和历史配置执行都强制解析对应 endpoint。上述行为只在本地 HTTP/单元测试中
+  验证，尚未验证真实 OpenAI 外网调用。
+- `ModelConfigPort.listImageSizeOptions("image-edit")` 根据当前默认配置的 provider + model 返回受支持尺寸。OpenAI `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini` 返回方形、竖向、横向三组精确像素值；`doubao-seedream-5-0-pro-260628` 返回官方 1K/2K 八种宽高比（包含 21:9）的精确像素值；Seedream 5.0 / 5.0 Lite 的 2K `3:4`、`9:16`、`16:9` 分别映射为 `1728x2304`、`1440x2560`、`2560x1440`，4.5 / 4.0 保留各自登记的旧 2K/4K 表。未知模型返回空列表，不在前端猜测。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
 - API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。
@@ -758,7 +830,7 @@ struct ResolvedModelConfig {
 
 `ResolvedModelConfig` 只能存在于 Rust runtime 内存中，不能序列化给前端。
 
-当前 timeout 策略为：火山引擎的 `clothing-base-model-generation`、`scene-image-generation`、`product-detail-generation`、`clothing-tryon-generation`、`image-edit` 图片调用使用 300 秒；`prompt-plan` 使用 300 秒；OpenAI 的 `clothing-tryon-generation` / `image-edit` 保持 60 秒；`clothing-scene-planning` 使用 90 秒，其余同步能力使用 90 秒。火山图片连接探测同样使用 300 秒，图生文探测保持 60 秒；Seedream 5.0 Pro 探测使用 `1K`。前端任务无进展窗口使用 360 秒，长于最长 Provider timeout 并预留结果持久化时间；queued 未启动窗口不变。
+当前 timeout 策略为：火山引擎的 `clothing-base-model-generation`、`scene-image-generation`、`product-detail-generation`、`clothing-tryon-generation`、`image-edit` 图片调用使用 300 秒；`prompt-plan` 使用 300 秒；OpenAI 的 `clothing-tryon-generation` / `image-edit` 保持 60 秒；`clothing-scene-planning` 使用 90 秒，其余同步能力使用 90 秒。火山图片连接探测同样使用 300 秒，图生文探测保持 60 秒；Seedream 5.0 Pro 探测使用 `1K`，真实场景任务未显式指定尺寸时按冻结比例选择 `2K` 档。前端任务无进展窗口使用 360 秒，长于最长 Provider timeout 并预留结果持久化时间；queued 未启动窗口不变。
 
 ### 6.4 ProviderProfileView
 
@@ -1013,23 +1085,35 @@ export type ModelInvocationInput =
 export type SceneImageGenerationInput = {
   idempotencyKey?: string;
   capability: "scene-image-generation";
-  category: "text-to-image" | "image-to-image";
-  inputAssetIds?: string[];
-  intent: {
-    workspace: "scene";
-    outputMode: "single" | "hero-pack" | "detail-pack" | "full-pack";
-    aspectRatio: "1:1" | "3:4" | "9:16";
-    sceneType?: string;
-    visualDirection?: string;
-    productSellingPoints?: string[];
-    userSupplement?: string;
-  };
-  options?: {
-    imageCount?: number;
-  };
+  category: "image-to-image";
+  inputAssetIds: string[];
+  promptPlanId: string;
+  planningPromptVersion: "v10";
+  generationPromptVersion: "v7";
+  templateCatalogVersion: "v5";
+  campaignStyleLock: string;
+  ratio: "1:1" | "3:4" | "9:16";
+  items: Array<{
+    imageId: string;
+    imageNo: number;
+    sortOrder: number;
+    code: string;
+    title: string;
+    purpose: string;
+    templateId: string;
+    variantId: string;
+    ratio: "1:1" | "3:4" | "9:16";
+    promptSummary: string;
+    prompt: string;
+    negativeConstraints: string;
+  }>;
 };
 
-`SceneImageGenerationInput` 不包含 `promptPlanId` 是明确设计：MVP 场景图走单阶段结构化 intent。商品详情图要求先确认 PromptPlan；服饰菜单可先通过 `clothing-base-model-generation` 生成基准模特，再通过 `clothing-scene-planning` 任务生成场景/动作规划，最后创建 `clothing-tryon-generation` 资产任务。
+场景图要求先完成 `scene-prompt-planning` 并由用户审核场景摘要，再创建
+`SceneImageGenerationInput`。参考图只通过任务 `inputAssets(role=reference)` 关联；
+渲染后的 system/user/roleless Prompt 仅存在于调用内存和显式 debug 输出中，
+不写任务、SQLite、事件或诊断文件。版本不匹配的旧任务仍可查看已有结果，
+但单图重试必须重新规划。
 
 export type ProductDetailGenerationInput = {
   idempotencyKey?: string;
@@ -1778,7 +1862,7 @@ custom-disabled
 - 导入 workspace 中的 provider 配置必须二次确认。
 - 本地调试诊断日志只记录 provider profile、脱敏后的 Base URL origin、请求/响应状态、机器可读的 `elapsedMs`、人类可读的 `elapsed` 总耗时、响应长度、脱敏后的响应结构摘要和经清理的 Provider error code；禁止保存或打印 Provider raw response body、Authorization、Cookie、raw header、API Key 或用户配置的 Base URL / endpoint 原始路径，raw response 也不得进入 SQLite、`task_events`、导出包或前端 DTO。
 - 真实模型调用默认不打印 raw Prompt。`make dev` 会为 Debug 构建设置 `COMMERCE_SHOOT_STUDIO_DEBUG_PROMPTS=1`，将 system、user、roleless Prompt 和归一化模型结果摘要输出到终端 `stderr` 供本地调试；结果摘要必须剔除图片数据、URL、header、凭据和 secret。其它 Debug 启动方式需显式设置该变量。这些输出不写入 `model-gateway-diagnostics.jsonl`、SQLite、`task_events`、导出包或前端 DTO，且 Release 构建编译期禁用。
-- 当前通用执行器分支（不含商品详情图逐项执行路径）在 HTTP 调用前遇到任务校验、资产读取或模型配置失败时，会在终端输出 `task_execution_error` 脱敏摘要；摘要只含 task、capability、错误码、重试标记和归一化 Provider 状态，不含原始输入、Prompt、图片、密钥或原始错误文本。商品详情图逐项执行路径尚未统一接入该摘要。
+- 当前通用执行器分支（不含商品详情图逐项执行路径）在 HTTP 调用前遇到任务校验、资产读取或模型配置失败时，会在终端输出 `task_execution_error` 脱敏摘要；摘要只含 task、capability、错误码、重试标记、归一化 Provider 状态，以及场景规划失败时的有限 `validationReason` 分类，不含原始输入、Prompt、图片、密钥或原始错误文本。商品详情图逐项执行路径尚未统一接入该摘要。
 
 ### 10.5 Adapter 接口
 
@@ -2135,6 +2219,46 @@ Local 到 SaaS 迁移边界：
 
 目标：完成第一条真实图片生成链路，并通过资产、历史、错误和重试闭环验收。
 
+当前兼容性修复切片（已实现并通过自动化验证）：
+
+- 将 H1-H5 从单一固定模板序列改成由 `conversionDriver` 驱动的三套主图叙事。
+- 将 D1-D9 对齐通用 PDP 叙事，避免无事实源时强制生成包装、多品、评价或优惠。
+- 模板与 variant 的业务规则由 Prompt/catalog TOML 提供，Rust 不硬编码业务文案。
+- 单图规划的稳定序号、编号、用途和比例来自冻结输入，模板由 routing 冻结；Rust 校验结构、
+  catalog 归属和 planning 与冻结路由一致性，不承担业务模板、variant 或证据门槛的语义选择。
+  Style Lock、标题、Prompt 和负向约束仍须非空且无残留占位符，但 Prompt 与独立负向约束
+  不做逐字子串匹配，允许模型使用等价措辞。
+- 场景规划失败后返回配置页并保留参考图，不展示空 Prompt 审核页。
+- 固定图片包在 Prompt 审核页不可删除或排序，空 Prompt 不得创建生图任务。
+- 输出内容四种模式的标题提供共享 Tooltip 说明其 1/5/9/14 数量和用途。
+- `multi-product` 暂时收窄到参考图已有的同款多角度/同系列组合。
+
+本切片已修复前端 Scene 相关回归，以及后端 Prompt、参考资产、脱敏、variant/routing、
+Scene `input.userImages` 入库前拒绝和显式尺寸/冻结比例一致性问题。`make check` 已通过，包含
+249 项 Vitest、frontend build、cargo check 和 0 个高危 npm audit；Rust 全量 `cargo test`
+已通过，lib 182/182 且全部
+integration tests 成功。付费真实 Provider 外网 smoke test 与真实桌面快速新建、历史切换、
+重启重试竞态仍由人工验收。
+
+当前自动路由切片（自动化合同已验证，真实语义完成前不得标记完成）：
+
+- UI 删除模板、模板分类和视觉方向选择；补充信息改为必填，空值不能创建规划任务。
+- 一个 `scene-prompt-planning` 任务内部依次执行 routing v3 和 planning v10，两次调用共用
+  `scene-prompt-planning` capability。
+- 第一次只读取精简 routing index；第二次只读取路由选中的去重模板完整规则，并校验
+  conversion driver、视觉方向和模板与冻结路由一致，并校验 planning 选择的 variant 属于冻结模板。
+- H/D 只固定 code、purpose 与顺序，推荐模板不作为 allowlist；routing Prompt 要求 25 个模板
+  在主体匹配且证据充分时均可路由。主体识别与证据门槛是模型行为约束，Rust 不维护第二套
+  业务判定；真实参考图语义仍待人工验收。full-pack 允许有明确目的差异的模板复用，variant
+  无适用 override 时使用 `base`。
+- 模板原生视觉语言优先于跨图视觉方向基线；详情信息职责和镜头、背景、服装、字体规则按
+  当前模板与主体类型条件化执行。
+- planning system rules 只保留模型行为规则；数量、顺序、字段和版本由 Rust/output format
+  保证。planning 只注入 code/purpose 与冻结模板，不注入 recommendedTemplateIds。
+- 路由结果仅驻留内存，不进入 SQLite、task events、诊断或前端 DTO。
+- catalog 升级为 v5，generation 使用 v7；不新增 capability、GenerationPort、schema、
+  migration 或依赖。
+
 任务：
 
 - `GenerationService` 调 `ModelGatewayPort`。
@@ -2232,7 +2356,8 @@ PromptPlan：
 - 商品详情图要求 confirmed PromptPlan。
 - 服饰 AI 生成模特使用独立的 `clothing-base-model-generation` 文生图 capability，并支持婴儿、儿童、青少年、青年、中年、老年年龄阶段。
 - 服饰试穿要求先完成 `clothing-scene-planning` 结构化规划。
-- 场景图 MVP 可不传 `promptPlanId`，直接用结构化 intent 创建任务。
+- 场景图必须先完成 `scene-prompt-planning`，再由父生图任务通过 `promptPlanId`
+  关联规划任务并冻结版本与用户确认方案。
 
 Task：
 

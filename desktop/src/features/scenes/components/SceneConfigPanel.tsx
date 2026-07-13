@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { ImageUp } from "lucide-react";
+import { CircleHelp, ImageUp } from "lucide-react";
 import { Button } from "../../../shared/ui/button";
 import { ControlGroup } from "../../../shared/ui/control-group";
 import { ImageUploadGrid } from "../../../shared/ui/image-upload-grid";
@@ -7,24 +6,15 @@ import { TextAreaPanel } from "../../../shared/ui/textarea-panel";
 import { UploadDropzone } from "../../../shared/ui/upload-dropzone";
 import { cn } from "../../../shared/lib/cn";
 import { useToast } from "../../../shared/ui/toast";
+import { Tooltip } from "../../../shared/ui/tooltip";
 import { selectProductImages, type ProductImageAsset } from "../../generation/lib/productImagePicker";
 import {
   type SceneConfigState,
   sceneOutputModes,
   sceneRatios,
-  sceneTemplates,
-  visualDirections,
 } from "../lib/sceneImagePlan";
 
 const maxReferenceImageCount = 3;
-const sceneTemplateGroups = ["基础商品图", "场景氛围图", "内容营销图", "信息说明图", "特殊创意"] as const;
-const sceneTemplateGroupLabels: Record<(typeof sceneTemplateGroups)[number], string> = {
-  内容营销图: "内容营销",
-  场景氛围图: "场景氛围",
-  基础商品图: "基础商品",
-  特殊创意: "特殊创意",
-  信息说明图: "信息说明",
-};
 
 type SceneConfigPanelProps = {
   config: SceneConfigState;
@@ -34,19 +24,13 @@ type SceneConfigPanelProps = {
 
 export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConfigPanelProps) {
   const { showToast } = useToast();
-  const [activeSceneTemplateGroup, setActiveSceneTemplateGroup] =
-    useState<(typeof sceneTemplateGroups)[number]>("基础商品图");
   const hasReferenceImages = config.referenceImages.length > 0;
-  const usesSceneTemplate = config.outputMode === "single";
-  const visibleSceneTemplates = sceneTemplates.filter((template) => template.group === activeSceneTemplateGroup);
-  const hasTarget = usesSceneTemplate
-    ? Boolean(config.selectedSceneTemplateId)
-    : Boolean(config.selectedVisualDirectionId);
-  const canGenerate = hasReferenceImages && hasTarget;
+  const hasSupplementalInfo = config.supplementalInfo.trim().length > 0;
+  const canGenerate = hasReferenceImages && hasSupplementalInfo;
   const ctaLabel = !hasReferenceImages
     ? "请上传参考图"
-    : !hasTarget
-      ? "请选择场景"
+    : !hasSupplementalInfo
+      ? "请填写补充信息"
       : "生成图片方案";
 
   function updateConfig(patch: Partial<SceneConfigState>) {
@@ -107,20 +91,27 @@ export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConf
         <ControlGroup title="输出内容">
           <div className="grid grid-cols-2 gap-2">
             {sceneOutputModes.map((mode) => (
-              <button
-                aria-pressed={config.outputMode === mode.value}
+              <div
                 className={cn(
-                  "h-8 rounded-control border px-2 text-[12px] font-medium transition-all duration-200",
+                  "relative flex h-8 items-center justify-center gap-1 rounded-control border transition-all duration-200",
                   config.outputMode === mode.value
                     ? "border-blue-100 bg-white text-app-blue shadow-control"
                     : "border-white/70 bg-slate-100/70 text-slate-700 hover:bg-white",
                 )}
                 key={mode.value}
-                onClick={() => updateConfig({ outputMode: mode.value })}
-                type="button"
               >
-                {mode.label}
-              </button>
+                <button
+                  aria-label={mode.label}
+                  aria-pressed={config.outputMode === mode.value}
+                  className="absolute inset-0 rounded-control text-[12px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-app-blue/35"
+                  onClick={() => updateConfig({ outputMode: mode.value })}
+                  type="button"
+                />
+                <span className="pointer-events-none relative truncate text-[12px] font-medium">{mode.label}</span>
+                <Tooltip ariaLabel={`查看${mode.label}输出说明`} content={mode.tooltip}>
+                  <CircleHelp aria-hidden="true" className="size-3.5" />
+                </Tooltip>
+              </div>
             ))}
           </div>
         </ControlGroup>
@@ -146,75 +137,27 @@ export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConf
           </div>
         </ControlGroup>
 
-        <ControlGroup title="补充信息" hint="可选">
+        <ControlGroup title="补充信息" hint="必填">
           <TextAreaPanel
+            aria-describedby="scene-supplemental-info-help"
+            aria-label="补充信息"
+            aria-required="true"
             onChange={(event) => updateConfig({ supplementalInfo: event.target.value })}
-            placeholder={"建议补充产品名称、核心卖点、目标人群、使用场景、风格偏好或禁用元素。"}
+            placeholder="请描述希望生成的场景、用途、主体保留要求、风格偏好或禁用元素。"
+            required
             value={config.supplementalInfo}
           />
-        </ControlGroup>
-
-        <ControlGroup title={usesSceneTemplate ? "场景类型" : "视觉方向"} hint="单选">
-          {usesSceneTemplate ? (
-            <div className="space-y-3">
-              <div
-                aria-label="场景分类"
-                className="grid grid-cols-5 gap-0.5 rounded-control bg-slate-100/70 p-1 shadow-[inset_0_1px_1px_rgba(15,23,42,0.05)]"
-                role="tablist"
-              >
-                {sceneTemplateGroups.map((group) => {
-                  const selected = activeSceneTemplateGroup === group;
-
-                  return (
-                    <button
-                      aria-controls={`scene-template-panel-${group}`}
-                      aria-selected={selected}
-                      className={cn(
-                        "h-7 min-w-0 truncate rounded-[9px] px-0.5 text-[11px] font-semibold transition-all",
-                        selected ? "bg-white text-slate-950 shadow-control" : "text-slate-500 hover:text-slate-900",
-                      )}
-                      id={`scene-template-tab-${group}`}
-                      key={group}
-                      onClick={() => setActiveSceneTemplateGroup(group)}
-                      role="tab"
-                      type="button"
-                    >
-                      {sceneTemplateGroupLabels[group]}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div
-                aria-labelledby={`scene-template-tab-${activeSceneTemplateGroup}`}
-                className="grid grid-cols-2 gap-2"
-                id={`scene-template-panel-${activeSceneTemplateGroup}`}
-                role="tabpanel"
-              >
-                {visibleSceneTemplates.map((template) => (
-                  <SceneRadioTile
-                    checked={config.selectedSceneTemplateId === template.id}
-                    description={template.description}
-                    key={template.id}
-                    label={template.title}
-                    onSelect={() => updateConfig({ selectedSceneTemplateId: template.id })}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              {visualDirections.map((direction) => (
-                <SceneRadioTile
-                  checked={config.selectedVisualDirectionId === direction.id}
-                  description={direction.description}
-                  key={direction.id}
-                  label={direction.title}
-                  onSelect={() => updateConfig({ selectedVisualDirectionId: direction.id })}
-                />
-              ))}
-            </div>
-          )}
+          <div
+            aria-label="补充信息填写示例"
+            className="mt-2 px-1 text-[11px] leading-[18px] text-slate-500"
+            id="scene-supplemental-info-help"
+          >
+            <p>推荐写法：用途 + 场景环境 + 主体保留 + 风格光线 + 禁用元素</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              <li>小红书首图；暖调咖啡馆窗边、自然晨光；商品外观和 Logo 不变；画面简洁，不要文字。</li>
+              <li>电商详情页；雨后城市夜景、霓虹倒影；人物五官与服装不变；高级电影感，不要路人。</li>
+            </ul>
+          </div>
         </ControlGroup>
       </div>
 
@@ -234,47 +177,6 @@ export function SceneConfigPanel({ config, onChange, onGeneratePlan }: SceneConf
         </Button>
       </div>
     </aside>
-  );
-}
-
-function SceneRadioTile({
-  checked,
-  description,
-  label,
-  onSelect,
-}: {
-  checked: boolean;
-  description: string;
-  label: string;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      aria-checked={checked}
-      aria-label={label}
-      className={cn(
-        "group min-h-[74px] rounded-[14px] border p-3 text-left transition-all duration-200 active:scale-[0.99]",
-        checked
-          ? "border-blue-100 bg-white text-slate-950 shadow-control"
-          : "border-white/70 bg-slate-100/70 text-slate-700 hover:bg-white",
-      )}
-      onClick={onSelect}
-      role="radio"
-      type="button"
-    >
-      <span className="flex items-center gap-2 text-[12px] font-semibold">
-        <span
-          className={cn(
-            "grid size-4 place-items-center rounded-full border",
-            checked ? "border-app-blue bg-app-blue" : "border-slate-300 bg-white",
-          )}
-        >
-          {checked ? <span className="size-1.5 rounded-full bg-white" /> : null}
-        </span>
-        {label}
-      </span>
-      <span className="mt-1.5 block text-[11px] leading-4 text-slate-500">{description}</span>
-    </button>
   );
 }
 

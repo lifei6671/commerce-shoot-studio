@@ -230,7 +230,8 @@ M7 真实场景生图闭环
 - 用户可为内置 provider profile 的本地模型配置修改并持久化 Base URL；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。连接探测和真实调用使用该持久化地址。React 页面不提供 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别继续使用已保存的 endpoint path 或 provider profile 默认值。
 - DeepSeek 当前只开放文生文能力。
 - OpenAI-compatible 文生文默认走 `/chat/completions`。
-- OpenAI 图生图的 `clothing-tryon-generation` 与 `image-edit` 固定走 `/v1/images/edits` 的 `multipart/form-data`；只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，输入图不裁剪、不转码。保存配置、Provider 连接探测和历史配置执行都必须强制解析该 endpoint，不能回写旧 `/v1/responses`；当前仅有本地 HTTP/单元测试证据，未验证真实 OpenAI 外网调用。
+- OpenAI 的 `scene-prompt-planning` 固定走 `/v1/responses`，图片理解输入按官方 `input_image` + `input_text` 结构组织。
+- OpenAI 图生图的 `scene-image-generation`、`clothing-tryon-generation` 与 `image-edit` 固定走 `/v1/images/edits` 的 `multipart/form-data`；只接受 PNG、JPEG、WebP，按 1:1、横向、竖向映射目标尺寸，输入图不裁剪、不转码。保存配置、Provider 连接探测和历史配置执行都必须强制解析该 endpoint，不能回写旧 `/v1/responses`；上述场景规划与图生图行为当前仅有本地 HTTP/单元测试证据，未验证真实 OpenAI 外网调用。
 - 火山引擎文生图和图生图使用 Ark `/api/v3/images/generations`；图生图测试图片可用很小的 base64 图片。连接探测必须按精确 Seedream 模型能力构造参数：`doubao-seedream-5-0-pro-260628` 不支持组图和流式字段，禁止发送 `sequential_image_generation`、`sequential_image_generation_options`、`stream`，并使用 `1K` 降低探测耗时和费用；Seedream 5.0 Lite、4.5、4.0 使用单图非流式探测，发送 `sequential_image_generation: "disabled"`、`stream: false` 且不发送组图 options；未登记模型使用不含这些可选字段的最小请求，不猜测能力。单张参考图发送字符串，多张参考图发送数组。火山引擎文生图/图生图连接探测和真实图片调用使用 300 秒总超时，图生文探测保持 60 秒；OpenAI 图片调用仍使用既有时限。前端生成任务无进展窗口为 360 秒，必须长于最长 Provider timeout，queued 未启动窗口保持不变。
 - 火山引擎图生文使用 Ark `/api/v3/responses`，图片理解输入按官方 `input_image` + `input_text` 结构组织。
 - React 页面不要让用户自由编辑真实执行 endpoint；Rust runtime 对 OpenAI / 火山引擎的特殊图像能力强制解析内置 endpoint，其他类别使用已保存的 endpoint path 或 provider profile 默认值。
@@ -287,3 +288,24 @@ M7 真实场景生图闭环
 - provider 可用性持久化在 `model_configs.connection_status` 等字段中；连接指纹包含 provider、模型、Base URL、执行模式、endpointPath 和 secret version，修改 API Key、模型、Base URL 或接入路径后会自动回到 `untested`。
 - M6 的 deterministic `ModelGatewayService` 基础已建立，可对 7 个 capability 返回 mock 输出，不触发真实 Provider 调用。
 - 下一步继续 M6/M7：真实 Provider HTTP adapter 依赖确认、ModelGateway invocation 表、LocalTaskExecutor 接 mock gateway、Windows 文件名规则、历史页 UI 对接。涉及素材库 UI、历史页 UI、导入交互或初始化失败恢复入口等 UI 交互时必须先确认方案。
+<!-- TRELLIS:START -->
+# Trellis Instructions
+
+These instructions are for AI assistants working in this project.
+
+This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
+
+- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
+- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
+- `.trellis/workspace/` — per-developer journals and session traces
+- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
+
+If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
+
+If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
+- `.agents/skills/` — reusable Trellis skills
+- `.codex/agents/` — optional custom subagents
+
+Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
+
+<!-- TRELLIS:END -->

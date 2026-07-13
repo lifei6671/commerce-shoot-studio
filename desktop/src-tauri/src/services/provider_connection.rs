@@ -9,7 +9,7 @@ use crate::infrastructure::providers::openai_images::build_openai_image_edit_mul
 
 pub(crate) const VOLCENGINE_SEEDREAM_5_PRO_MODEL: &str = "doubao-seedream-5-0-pro-260628";
 
-fn supports_seedream_single_image_probe_options(model: &str) -> bool {
+pub(crate) fn supports_seedream_single_image_options(model: &str) -> bool {
     matches!(
         model,
         "doubao-seedream-5-0-lite-260128"
@@ -192,7 +192,7 @@ fn provider_probe_body(probe: &ProviderConnectionProbe) -> Value {
             "size": size,
             "watermark": true,
         });
-        if supports_seedream_single_image_probe_options(&probe.model) {
+        if supports_seedream_single_image_options(&probe.model) {
             body["sequential_image_generation"] = Value::String("disabled".to_string());
             body["stream"] = Value::Bool(false);
         }

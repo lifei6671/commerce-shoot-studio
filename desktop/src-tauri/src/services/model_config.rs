@@ -41,6 +41,12 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
         "mock-clothing-scene-plan-v1",
     ),
     ModelCapabilityDefinition::new(
+        "scene-prompt-planning",
+        "image-to-text",
+        "场景图片方案规划",
+        "mock-scene-prompt-plan-v1",
+    ),
+    ModelCapabilityDefinition::new(
         "viral-style-analysis",
         "text-to-text",
         "爆款风格分析",
@@ -48,7 +54,7 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
     ),
     ModelCapabilityDefinition::new(
         "scene-image-generation",
-        "text-to-image",
+        "image-to-image",
         "场景图生成",
         "mock-scene-image-v1",
     ),
@@ -104,6 +110,7 @@ impl ModelCapabilityDefinition {
     pub(crate) fn max_input_assets(&self) -> i64 {
         match self.id {
             "clothing-scene-planning" | "clothing-tryon-generation" => 6,
+            "scene-prompt-planning" | "scene-image-generation" => 3,
             _ => match self.category {
                 "text-to-text" | "text-to-image" => 0,
                 "image-to-text" => 3,
@@ -116,7 +123,10 @@ impl ModelCapabilityDefinition {
     pub(crate) fn supported_aspect_ratios(&self) -> &'static [&'static str] {
         match self.id {
             "clothing-base-model-generation" => &["2:3"],
-            "clothing-scene-planning" | "clothing-tryon-generation" => &["3:4", "1:1", "9:16"],
+            "clothing-scene-planning"
+            | "clothing-tryon-generation"
+            | "scene-prompt-planning"
+            | "scene-image-generation" => &["3:4", "1:1", "9:16"],
             _ => &["1:1", "3:4", "9:16", "16:9"],
         }
     }
@@ -135,7 +145,11 @@ impl ModelCapabilityDefinition {
 pub(crate) fn capability_requires_real_provider(capability_id: &str) -> bool {
     matches!(
         capability_id,
-        "clothing-scene-planning" | "clothing-base-model-generation" | "clothing-tryon-generation"
+        "clothing-scene-planning"
+            | "clothing-base-model-generation"
+            | "clothing-tryon-generation"
+            | "scene-prompt-planning"
+            | "scene-image-generation"
     )
 }
 
@@ -159,6 +173,7 @@ pub const ALL_CAPABILITY_IDS: &[&str] = &[
     "prompt-plan",
     "product-selling-points",
     "clothing-scene-planning",
+    "scene-prompt-planning",
     "viral-style-analysis",
     "scene-image-generation",
     "product-detail-generation",
@@ -181,9 +196,11 @@ pub const OPENAI_CAPABILITY_IDS: &[&str] = &[
     "prompt-plan",
     "product-selling-points",
     "clothing-scene-planning",
+    "scene-prompt-planning",
     "viral-style-analysis",
     "clothing-base-model-generation",
     "clothing-tryon-generation",
+    "scene-image-generation",
     "image-edit",
 ];
 pub const OPENAI_CATEGORIES: &[&str] = &[
@@ -754,10 +771,7 @@ pub fn default_resolved_config_for_capability(
 
     if let Some(config) = default_config {
         if config.provider_profile_id != "mock-local"
-            || !matches!(
-                capability_id,
-                "clothing-scene-planning" | "clothing-base-model-generation"
-            )
+            || !capability_requires_real_provider(capability_id)
         {
             return ensure_resolved_config_supports_capability(config, capability_id);
         }
@@ -769,10 +783,7 @@ pub fn default_resolved_config_for_capability(
         return ensure_resolved_config_supports_capability(config, capability_id);
     }
 
-    if matches!(
-        capability_id,
-        "clothing-scene-planning" | "clothing-base-model-generation"
-    ) {
+    if capability_requires_real_provider(capability_id) {
         let config = available_real_default_config_for_same_category(&database, capability_id)?
             .ok_or_else(|| ModelConfigError::NotFound(capability_id.to_string()))?;
         return ensure_resolved_config_supports_capability(config, capability_id);
@@ -1378,13 +1389,73 @@ pub fn image_size_options(provider: &str, model: &str) -> Vec<ImageSizeOption> {
                 "3136x1344",
             ),
         ],
-        (
-            "volcengine",
-            "doubao-seedream-5-0-260128"
-            | "doubao-seedream-5-0-lite-260128"
-            | "doubao-seedream-4-5-251128"
-            | "doubao-seedream-4-0-250828",
-        ) => &[
+        ("volcengine", "doubao-seedream-5-0-260128" | "doubao-seedream-5-0-lite-260128") => &[
+            (
+                "2048x2048",
+                "正方形 1:1 · 2048x2048",
+                "1:1",
+                2048,
+                2048,
+                "2048x2048",
+            ),
+            (
+                "1728x2304",
+                "竖图 3:4 · 1728x2304",
+                "3:4",
+                1728,
+                2304,
+                "1728x2304",
+            ),
+            (
+                "1440x2560",
+                "竖图 9:16 · 1440x2560",
+                "9:16",
+                1440,
+                2560,
+                "1440x2560",
+            ),
+            (
+                "2560x1440",
+                "横图 16:9 · 2560x1440",
+                "16:9",
+                2560,
+                1440,
+                "2560x1440",
+            ),
+            (
+                "4096x4096",
+                "正方形 1:1 · 4096x4096",
+                "1:1",
+                4096,
+                4096,
+                "4096x4096",
+            ),
+            (
+                "3072x4096",
+                "竖图 3:4 · 3072x4096",
+                "3:4",
+                3072,
+                4096,
+                "3072x4096",
+            ),
+            (
+                "2304x4096",
+                "竖图 9:16 · 2304x4096",
+                "9:16",
+                2304,
+                4096,
+                "2304x4096",
+            ),
+            (
+                "4096x2304",
+                "横图 16:9 · 4096x2304",
+                "16:9",
+                4096,
+                2304,
+                "4096x2304",
+            ),
+        ],
+        ("volcengine", "doubao-seedream-4-5-251128" | "doubao-seedream-4-0-250828") => &[
             (
                 "2048x2048",
                 "正方形 1:1 · 2048x2048",
@@ -1643,18 +1714,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_all_seedream_models_with_complete_2k_and_4k_sizes() {
+    fn resolves_seedream_5_models_with_official_2k_and_4k_sizes() {
         let models = [
             "doubao-seedream-5-0-260128",
             "doubao-seedream-5-0-lite-260128",
-            "doubao-seedream-4-5-251128",
-            "doubao-seedream-4-0-250828",
         ];
         let expected_values = [
             "2048x2048",
-            "1536x2048",
-            "1152x2048",
-            "2048x1152",
+            "1728x2304",
+            "1440x2560",
+            "2560x1440",
             "4096x4096",
             "3072x4096",
             "2304x4096",
@@ -1684,6 +1753,33 @@ mod tests {
                     && option.label.contains(&option.provider_value)
                     && label_has_expected_direction(option.width, option.height, &option.label)
             }));
+        }
+    }
+
+    #[test]
+    fn keeps_seedream_4_models_on_their_registered_2k_and_4k_sizes() {
+        let models = ["doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"];
+        let expected_values = [
+            "2048x2048",
+            "1536x2048",
+            "1152x2048",
+            "2048x1152",
+            "4096x4096",
+            "3072x4096",
+            "2304x4096",
+            "4096x2304",
+        ];
+
+        for model in models {
+            let options = image_size_options("volcengine", model);
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.provider_value.as_str())
+                    .collect::<Vec<_>>(),
+                expected_values,
+                "model={model}"
+            );
         }
     }
 

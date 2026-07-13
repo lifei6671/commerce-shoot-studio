@@ -8,13 +8,13 @@ export type GenerationRecord = {
   id: string;
   images: GeneratedDetailImage[];
   inputSummary: string;
-  kind: "product-detail" | "clothing-scene";
+  kind: "product-detail" | "clothing-scene" | "scene-generation";
   promptPlanId?: string;
   persistedTaskId?: string;
   relatedTaskIds?: string[];
   status: "complete" | "failed" | "generating" | "partial";
   title: string;
-  workspace: "product" | "clothing";
+  workspace: "product" | "clothing" | "scene";
 };
 
 type GenerationHistoryPopoverProps = {
@@ -32,6 +32,7 @@ type HistoryFilter = "all" | GenerationRecord["workspace"];
 const filterOptions: Array<{ label: string; value: HistoryFilter }> = [
   { label: "全部", value: "all" },
   { label: "商品", value: "product" },
+  { label: "场景", value: "scene" },
   { label: "服饰", value: "clothing" },
 ];
 
@@ -124,7 +125,7 @@ export function GenerationHistoryPopover({
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-1 rounded-[12px] bg-slate-100/80 p-1">
+      <div className="mt-3 grid grid-cols-4 gap-1 rounded-[12px] bg-slate-100/80 p-1">
         {filterOptions.map((option) => (
           <button
             aria-pressed={activeFilter === option.value}
@@ -173,7 +174,7 @@ function GenerationHistoryRow({
   onOpen: () => void;
   record: GenerationRecord;
 }) {
-  const Icon = record.workspace === "product" ? PackageCheck : Shirt;
+  const Icon = record.workspace === "product" ? PackageCheck : record.workspace === "scene" ? Images : Shirt;
   const generatedItems = record.images.filter((image) => image.kind !== "source-image");
   const completedCount = generatedItems.filter((image) => image.status === "complete").length;
 
@@ -277,7 +278,18 @@ function HistoryThumbnailStack({ images }: { images: GeneratedDetailImage[] }) {
 }
 
 function GenerationHistoryEmptyState({ activeFilter }: { activeFilter: HistoryFilter }) {
-  const text = activeFilter === "all" ? "暂无生成记录" : activeFilter === "product" ? "暂无商品记录" : "暂无服饰记录";
+  const text =
+    activeFilter === "all"
+      ? "暂无生成记录"
+      : activeFilter === "product"
+        ? "暂无商品记录"
+        : activeFilter === "scene"
+          ? "暂无场景记录"
+          : "暂无服饰记录";
+  const description =
+    activeFilter === "scene"
+      ? "生成场景图片后会自动保留在这里。"
+      : "生成详情图或服饰场景后会自动保留在这里。";
 
   return (
     <div
@@ -289,7 +301,7 @@ function GenerationHistoryEmptyState({ activeFilter }: { activeFilter: HistoryFi
           <Images className="size-4" />
         </div>
         <div className="mt-3 text-[13px] font-semibold text-slate-700">{text}</div>
-        <div className="mt-1 text-[12px] leading-5 text-slate-400">生成详情图或服饰场景后会自动保留在这里。</div>
+        <div className="mt-1 text-[12px] leading-5 text-slate-400">{description}</div>
       </div>
     </div>
   );

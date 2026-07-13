@@ -35,4 +35,7 @@ desktop/src-tauri/target/
 # Local code intelligence cache
 .codegraph/
 .codex/config.toml
+# Trellis 的共享 workflow/spec/task 与 Codex 集成文件需要进入版本控制；
+# 开发者身份和 session runtime 由 .trellis/.gitignore 排除，个人 workspace journal 保持本地。
+.trellis/workspace/*/
 /docs/superpowers/

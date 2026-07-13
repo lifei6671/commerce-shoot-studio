@@ -1306,10 +1306,13 @@ function GeneratedDetailCanvas({
                 <div
                   aria-label={`预览 ${previewImage.title}`}
                   className={cn(
-                    "relative h-[68vh] w-[min(68vh,70vw)] origin-center overflow-hidden rounded-[14px] shadow-[0_24px_80px_rgba(0,0,0,0.36)] transition-transform duration-200",
+                    "relative origin-center overflow-hidden rounded-[14px] shadow-[0_24px_80px_rgba(0,0,0,0.36)] transition-transform duration-200",
                     previewImage.src
-                      ? "bg-slate-100"
-                      : generatedImageBackgrounds[Math.max(previewImageIndex, 0) % generatedImageBackgrounds.length],
+                      ? "max-h-[68vh] max-w-[70vw] bg-transparent"
+                      : cn(
+                          "h-[68vh] w-[min(68vh,70vw)]",
+                          generatedImageBackgrounds[Math.max(previewImageIndex, 0) % generatedImageBackgrounds.length],
+                        ),
                   )}
                   onWheel={(event) => {
                     event.preventDefault();
@@ -1320,12 +1323,14 @@ function GeneratedDetailCanvas({
                   {previewImage.src ? (
                     <img
                       alt={previewImage.title}
-                      className="absolute inset-0 h-full w-full object-contain"
+                      className="block h-auto w-auto max-h-[68vh] max-w-[70vw] object-contain"
                       draggable={false}
                       src={previewImage.src}
                     />
                   ) : null}
-                  <div className="absolute inset-0 rounded-[14px] bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
+                  {!previewImage.src ? (
+                    <div className="absolute inset-0 rounded-[14px] bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
+                  ) : null}
                 </div>
                 <div className="rounded-full bg-black/32 px-4 py-2 text-sm font-medium text-white backdrop-blur-md">
                   {previewImage.title}

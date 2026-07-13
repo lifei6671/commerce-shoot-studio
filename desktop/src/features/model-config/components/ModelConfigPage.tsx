@@ -105,9 +105,13 @@ const categoryCatalogKeys = {
 } satisfies Record<ModelCategoryId, ModelCatalogCategory>;
 
 const categoryCapabilityIds = {
-  "image-to-image": ["clothing-tryon-generation", "image-edit"],
-  "image-to-text": ["product-selling-points", "clothing-scene-planning"],
-  "text-to-image": ["scene-image-generation", "product-detail-generation", "clothing-base-model-generation"],
+  "image-to-image": ["scene-image-generation", "clothing-tryon-generation", "image-edit"],
+  "image-to-text": [
+    "product-selling-points",
+    "clothing-scene-planning",
+    "scene-prompt-planning",
+  ],
+  "text-to-image": ["product-detail-generation", "clothing-base-model-generation"],
   "text-to-text": ["listing-copy", "prompt-plan", "viral-style-analysis"],
 } satisfies Record<ModelCategoryId, ModelCapability["id"][]>;
 

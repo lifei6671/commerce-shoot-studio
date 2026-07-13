@@ -999,7 +999,8 @@ fn builds_image_generation_request_with_reference_images_and_consistency_prompt(
     assert_eq!(body["model"], "doubao-seedream-4-0-250828");
     assert_eq!(body["image"], "data:image/jpeg;base64,reference");
     assert!(body.get("images").is_none());
-    assert!(body.get("sequential_image_generation").is_none());
+    assert_eq!(body["sequential_image_generation"], "disabled");
+    assert_eq!(body["stream"], false);
     assert!(body.get("max_tokens").is_none());
     assert!(body.get("temperature").is_none());
     assert_eq!(body["size"], "1152x2048");
@@ -1063,6 +1064,129 @@ fn builds_volcengine_image_generation_request_with_multiple_reference_images_as_
     assert_eq!(body["response_format"], "url");
     assert!(body.get("output_format").is_none());
     assert_eq!(body["watermark"], false);
+}
+
+#[test]
+fn maps_scene_ratio_to_registered_volcengine_provider_size() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "doubao-seedream-5-0-260128",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "kind": "scene-image-generation",
+            "ratio": "3:4",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成忠实的商品场景图。" }],
+                "rolelessPrompt": "生成忠实的商品场景图。"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,reference" }]
+        }),
+    )
+    .expect("scene image request body should build");
+
+    assert_eq!(body["size"], "1728x2304");
+}
+
+#[test]
+fn maps_seedream_5_pro_scene_ratio_to_registered_2k_size() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "doubao-seedream-5-0-pro-260628",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "kind": "scene-image-generation",
+            "ratio": "3:4",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成忠实的商品场景图。" }],
+                "rolelessPrompt": "生成忠实的商品场景图。"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,reference" }]
+        }),
+    )
+    .expect("Seedream 5 Pro scene image request body should build");
+
+    assert_eq!(body["size"], "1776x2368");
+}
+
+#[test]
+fn rejects_explicit_volcengine_scene_size_that_conflicts_with_frozen_ratio() {
+    let error = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "doubao-seedream-5-0-260128",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "kind": "scene-image-generation",
+            "ratio": "3:4",
+            "size": "2048x2048",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成忠实的商品场景图。" }],
+                "rolelessPrompt": "生成忠实的商品场景图。"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,reference" }]
+        }),
+    )
+    .expect_err("scene size must match the frozen ratio");
+
+    assert!(matches!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(_)
+    ));
+}
+
+#[test]
+fn preserves_explicit_volcengine_scene_size_when_ratio_matches() {
+    let body = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "doubao-seedream-5-0-260128",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "kind": "scene-image-generation",
+            "ratio": "3:4",
+            "size": "3072x4096",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成忠实的商品场景图。" }],
+                "rolelessPrompt": "生成忠实的商品场景图。"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,reference" }]
+        }),
+    )
+    .expect("matching explicit scene size should be preserved");
+
+    assert_eq!(body["size"], "3072x4096");
+}
+
+#[test]
+fn rejects_scene_ratio_when_volcengine_model_has_no_registered_size() {
+    let error = build_model_gateway_request_body(
+        &HttpModelGatewayRequestConfig {
+            endpoint_path: "/images/generations",
+            model: "unknown-seedream-model",
+            provider_profile_id: "volcengine",
+        },
+        &serde_json::json!({
+            "kind": "scene-image-generation",
+            "ratio": "3:4",
+            "prompt": {
+                "messages": [{ "role": "user", "content": "生成忠实的商品场景图。" }],
+                "rolelessPrompt": "生成忠实的商品场景图。"
+            },
+            "userImages": [{ "dataUrl": "data:image/png;base64,reference" }]
+        }),
+    )
+    .expect_err("unknown model must not guess a scene image size");
+
+    assert!(matches!(
+        error,
+        ModelGatewayError::ProviderRequestInvalid(_)
+    ));
 }
 
 #[test]

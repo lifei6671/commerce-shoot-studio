@@ -40,10 +40,14 @@ import { SceneConfigPanel } from "../features/scenes/components/SceneConfigPanel
 import { ScenePreviewCanvas } from "../features/scenes/components/ScenePreviewCanvas";
 import { ScenePromptReviewPanel } from "../features/scenes/components/ScenePromptReviewPanel";
 import {
-  createSceneImagePlans,
+  decodeScenePlanningOutput,
   defaultSceneConfig,
+  sceneImageGenerationPromptVersion,
+  scenePlanningPromptVersion,
+  sceneTemplateCatalogVersion,
   type SceneConfigState,
   type SceneImagePlan,
+  type ScenePlanningSnapshot,
 } from "../features/scenes/lib/sceneImagePlan";
 import { ModelConfigPage } from "../features/model-config/components/ModelConfigPage";
 import { SettingsPage } from "../features/settings/components/SettingsPage";
@@ -55,14 +59,12 @@ import { localModelConfigPort } from "../runtime/local/model-config";
 import type { GenerationTaskDetail, GenerationTaskInputAssetInput, ImageSizeOption } from "../runtime";
 import { useToast } from "../shared/ui/toast";
 
-const generationCompleteDelayMs = 3000;
 const productGenerationPollIntervalMs = 800;
 const productGenerationMaxQueuedPollCount = 15;
 export const productGenerationMaxUnchangedDurationMs = 360_000;
 const productGenerationMaxUnchangedPollCount =
   productGenerationMaxUnchangedDurationMs / productGenerationPollIntervalMs;
 const restoredRunningTaskStaleMs = 10 * 60 * 1000;
-const scenePlanDraftDelayMs = 2500;
 const historyRestoreDetailConcurrency = 4;
 
 async function cleanupUnmergedRetryTask(taskId: string, message: string) {
@@ -94,6 +96,12 @@ type ProductGenerationInputSnapshot = {
 type ClothingScenePlanningContext = {
   inputAssets: GenerationTaskInputAssetInput[];
   modelFeatures: unknown;
+};
+
+type ScenePlanningContext = {
+  inputAssets: GenerationTaskInputAssetInput[];
+  planningTaskId: string;
+  referenceImages: ProductImageAsset[];
 };
 
 function createProductGenerationInputSnapshot(
@@ -189,6 +197,7 @@ export function App() {
   const [sceneConfig, setSceneConfig] = useState(createDefaultSceneConfig);
   const [scenePromptReviewing, setScenePromptReviewing] = useState(false);
   const [scenePlanGenerating, setScenePlanGenerating] = useState(false);
+  const [scenePlanningSnapshot, setScenePlanningSnapshot] = useState<ScenePlanningSnapshot | null>(null);
   const [sceneImagePlans, setSceneImagePlans] = useState<SceneImagePlan[]>([]);
   const [sceneImages, setSceneImages] = useState<GeneratedDetailImage[]>([]);
   const [sceneImageGenerating, setSceneImageGenerating] = useState(false);
@@ -202,11 +211,16 @@ export function App() {
   const historyViewingRecordIdRef = useRef<string | null>(null);
   const deletedGenerationRecordIdsRef = useRef(new Set<string>());
   const clothingRetrySequenceRef = useRef(0);
+  const sceneRetrySequenceRef = useRef(0);
   const clothingGeneratingRecordIdRef = useRef<string | null>(null);
   const clothingScenePlanningRequestIdRef = useRef(0);
   const clothingScenePlanningTaskIdsRef = useRef(new Set<string>());
   const clothingScenePlanningCancellationsRef = useRef(new Map<string, Promise<boolean>>());
   const clothingScenePlanningContextRef = useRef<ClothingScenePlanningContext | null>(null);
+  const scenePlanningRequestIdRef = useRef(0);
+  const sceneGenerationRequestIdRef = useRef(0);
+  const sceneTaskIdsRef = useRef(new Set<string>());
+  const scenePlanningContextRef = useRef<ScenePlanningContext | null>(null);
   const clothingBaseModelGenerationRequestIdRef = useRef(0);
   const clothingBaseModelGenerationTaskIdRef = useRef<string | null>(null);
   const clothingBaseModelCancellationRef = useRef<{ promise: Promise<boolean>; taskId: string } | null>(null);
@@ -222,7 +236,8 @@ export function App() {
     activeGenerationRecordId === historyViewingRecordId &&
     historyViewingRecord?.status !== "generating" &&
     ((activeWorkspace === "product" && productDetailImages.length > 0) ||
-      (activeWorkspace === "clothing" && clothingSceneImages.length > 0));
+      (activeWorkspace === "clothing" && clothingSceneImages.length > 0) ||
+      (activeWorkspace === "scene" && sceneImages.length > 0));
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const { showToast } = useToast();
 
@@ -239,7 +254,7 @@ export function App() {
     setProductGenerationSettingsTouched(true);
   }
 
-  function clearActiveGenerationRecordForWorkspace(workspace: "clothing" | "product") {
+  function clearActiveGenerationRecordForWorkspace(workspace: "clothing" | "product" | "scene") {
     if (!activeGenerationRecordId) {
       return;
     }
@@ -280,6 +295,32 @@ export function App() {
     }
   }
 
+  function invalidateSceneTasks() {
+    scenePlanningRequestIdRef.current += 1;
+    sceneGenerationRequestIdRef.current += 1;
+    scenePlanningContextRef.current = null;
+    const taskIds = [...sceneTaskIdsRef.current];
+    sceneTaskIdsRef.current.clear();
+    const taskIdSet = new Set(taskIds);
+    setGenerationRecords((records) =>
+      records.map((record) => {
+        const tracksCancelledTask =
+          (record.persistedTaskId ? taskIdSet.has(record.persistedTaskId) : false) ||
+          (record.relatedTaskIds ?? []).some((taskId) => taskIdSet.has(taskId));
+        if (record.workspace !== "scene" || !tracksCancelledTask) {
+          return record;
+        }
+        const images = failGeneratedImages(record.images, "任务已取消");
+        return { ...record, images, status: deriveProductGenerationRecordStatus(images) };
+      }),
+    );
+    taskIds.forEach((taskId) => {
+      void localGenerationPort.cancelTask(taskId).catch((error) => {
+        console.warn("cancel scene task failed", { error, taskId });
+      });
+    });
+  }
+
   function resetClothingWorkspace() {
     invalidateClothingBaseModelGeneration();
     invalidateClothingScenePlanning();
@@ -298,14 +339,17 @@ export function App() {
   }
 
   function resetSceneWorkspace() {
+    invalidateSceneTasks();
     setSceneConfig(createDefaultSceneConfig());
     setScenePromptReviewing(false);
     setScenePlanGenerating(false);
     setSceneImagePlans([]);
+    setScenePlanningSnapshot(null);
     setSceneImages([]);
     setSceneImageGenerating(false);
     setHistoryOpen(false);
     setHistoryViewingRecordId(null);
+    clearActiveGenerationRecordForWorkspace("scene");
   }
 
   function handleNewTask() {
@@ -1015,15 +1059,51 @@ export function App() {
     );
   }
 
-  function removeGeneratedImageById(imageId: string, workspace: "clothing" | "product") {
-    if (workspace === "product") {
-      setProductDetailImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
-    } else {
-      setClothingSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+  function updateSceneImageById(
+    recordId: string,
+    imageId: string,
+    updater: (image: GeneratedDetailImage) => GeneratedDetailImage,
+  ) {
+    if (
+      activeGenerationRecordIdRef.current === recordId &&
+      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
+    ) {
+      setSceneImages((currentImages) => currentImages.map((image) => (image.id === imageId ? updater(image) : image)));
     }
     setGenerationRecords((currentRecords) =>
       currentRecords.map((record) => {
-        if (record.workspace !== workspace || !record.images.some((image) => image.id === imageId)) {
+        if (record.id !== recordId || record.workspace !== "scene") {
+          return record;
+        }
+        const images = record.images.map((image) => (image.id === imageId ? updater(image) : image));
+        return { ...record, images, status: deriveProductGenerationRecordStatus(images) };
+      }),
+    );
+  }
+
+  function removeGeneratedImageById(
+    imageId: string,
+    workspace: "clothing" | "product" | "scene",
+    recordId?: string,
+  ) {
+    if (workspace === "product") {
+      setProductDetailImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    } else if (workspace === "clothing") {
+      setClothingSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    } else if (
+      recordId &&
+      activeGenerationRecordIdRef.current === recordId &&
+      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
+    ) {
+      setSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    }
+    setGenerationRecords((currentRecords) =>
+      currentRecords.map((record) => {
+        if (
+          record.workspace !== workspace ||
+          (workspace === "scene" && record.id !== recordId) ||
+          !record.images.some((image) => image.id === imageId)
+        ) {
           return record;
         }
         const images = record.images.filter((image) => image.id !== imageId);
@@ -1036,11 +1116,18 @@ export function App() {
     );
   }
 
-  function findGeneratedImageRecord(imageId: string) {
+  function findGeneratedImageRecord(imageId: string, workspace: GenerationRecord["workspace"]) {
+    if (workspace === "scene") {
+      const displayedRecordId = historyViewingRecordIdRef.current ?? activeGenerationRecordIdRef.current;
+      return generationRecords.find(
+        (record) =>
+          record.id === displayedRecordId &&
+          record.workspace === "scene" &&
+          record.images.some((image) => image.id === imageId),
+      );
+    }
     return generationRecords.find(
-      (record) =>
-        (record.workspace === "product" || record.workspace === "clothing") &&
-        record.images.some((image) => image.id === imageId),
+      (record) => record.workspace === workspace && record.images.some((image) => image.id === imageId),
     );
   }
 
@@ -1062,7 +1149,8 @@ export function App() {
   }
 
   async function resizeGeneratedImage(image: GeneratedDetailImage, option: ImageSizeOption) {
-    const parentRecord = findGeneratedImageRecord(image.id);
+    const workspace = activeWorkspace === "scene" || activeWorkspace === "clothing" ? activeWorkspace : "product";
+    const parentRecord = findGeneratedImageRecord(image.id, workspace);
     if (!parentRecord?.persistedTaskId || !image.assetId) {
       const message = "当前图片缺少可替换的任务或资产信息。";
       throw new Error(message);
@@ -1141,8 +1229,10 @@ export function App() {
       });
       if (parentRecord.workspace === "product") {
         updateProductDetailImageById(image.id, updateImage);
-      } else {
+      } else if (parentRecord.workspace === "clothing") {
         updateClothingSceneImageById(image.id, updateImage);
+      } else {
+        updateSceneImageById(parentRecord.id, image.id, updateImage);
       }
       showToast({ message: "图片尺寸已修改", variant: "success" });
     } catch (error) {
@@ -1155,7 +1245,8 @@ export function App() {
   }
 
   async function deleteGeneratedImage(image: GeneratedDetailImage) {
-    const parentRecord = findGeneratedImageRecord(image.id);
+    const workspace = activeWorkspace === "scene" || activeWorkspace === "clothing" ? activeWorkspace : "product";
+    const parentRecord = findGeneratedImageRecord(image.id, workspace);
     if (!parentRecord?.persistedTaskId) {
       const message = "当前图片缺少可删除的任务信息。";
       showToast({ message, variant: "error" });
@@ -1181,7 +1272,7 @@ export function App() {
         ...(persistedAsset ? { assetId: persistedAsset.id } : {}),
         ...(image.assetId ? { displayedAssetId: image.assetId } : {}),
       });
-      removeGeneratedImageById(image.id, parentRecord.workspace);
+      removeGeneratedImageById(image.id, parentRecord.workspace, parentRecord.id);
       showToast({ message: "图片已删除", variant: "success" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "图片删除失败。";
@@ -1785,8 +1876,13 @@ export function App() {
     setHistoryViewingRecordId(record.id);
     if (record.workspace === "product") {
       setProductDetailImages(record.images);
-    } else {
+    } else if (record.workspace === "clothing") {
       setClothingSceneImages(record.images);
+    } else {
+      setSceneImages(record.images);
+      setScenePromptReviewing(true);
+      setScenePlanGenerating(false);
+      setSceneImageGenerating(record.status === "generating");
     }
     setHistoryOpen(false);
   }
@@ -1804,8 +1900,10 @@ export function App() {
     setHistoryViewingRecordId((currentId) => (currentId === recordId ? null : currentId));
     if (deletedRecord.workspace === "product") {
       setProductDetailImages([]);
-    } else {
+    } else if (deletedRecord.workspace === "clothing") {
       setClothingSceneImages([]);
+    } else {
+      setSceneImages([]);
     }
   }
 
@@ -1819,6 +1917,7 @@ export function App() {
     setHistoryViewingRecordId(null);
     setProductDetailImages([]);
     setClothingSceneImages([]);
+    setSceneImages([]);
     setHistoryOpen(false);
   }
 
@@ -2162,32 +2261,429 @@ export function App() {
     }
   }
 
-  function handleGenerateScenePlan() {
+  async function handleGenerateScenePlan() {
+    const requestId = scenePlanningRequestIdRef.current + 1;
+    scenePlanningRequestIdRef.current = requestId;
+    sceneGenerationRequestIdRef.current += 1;
+    scenePlanningContextRef.current = null;
     setScenePromptReviewing(true);
     setScenePlanGenerating(true);
+    setScenePlanningSnapshot(null);
     setSceneImagePlans([]);
     setSceneImages([]);
+    try {
+      const config = {
+        ...sceneConfig,
+        referenceImages: sceneConfig.referenceImages.map((image) => ({ ...image })),
+      };
+      const inputAssets = await importProductInputAssets(config.referenceImages, "reference");
+      if (scenePlanningRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (inputAssets.length !== config.referenceImages.length || inputAssets.length === 0) {
+        throw new Error("参考图导入失败，请重新选择图片后重试。");
+      }
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `scene-prompt-planning:${Date.now()}`,
+        input: {
+          kind: "scene-prompt-planning",
+          outputMode: config.outputMode,
+          planningPromptVersion: scenePlanningPromptVersion,
+          ratio: config.ratio,
+          referenceImageRoles: inputAssets.map((asset) => asset.role),
+          supplementalInfo: config.supplementalInfo.trim(),
+          templateCatalogVersion: sceneTemplateCatalogVersion,
+        },
+        inputAssets,
+        kind: "prompt-plan",
+        title: "场景图片方案",
+        workspace: "scene",
+      });
+      sceneTaskIdsRef.current.add(task.id);
+      if (scenePlanningRequestIdRef.current !== requestId) {
+        void localGenerationPort.cancelTask(task.id).catch(() => undefined);
+        return;
+      }
+      await requestGenerationTaskStart(task.id, "场景方案任务未能启动，请稍后重试。");
+      const detail = await pollSceneTask(task.id, requestId, "planning");
+      const snapshot = decodeScenePlanningOutput(detail.output, config.outputMode);
+      if (scenePlanningRequestIdRef.current !== requestId) {
+        return;
+      }
+      scenePlanningContextRef.current = {
+        inputAssets,
+        planningTaskId: task.id,
+        referenceImages: config.referenceImages.map((image) => ({ ...image })),
+      };
+      setScenePlanningSnapshot(snapshot);
+      setSceneImagePlans(snapshot.items);
+    } catch (error) {
+      if (scenePlanningRequestIdRef.current === requestId) {
+        scenePlanningContextRef.current = null;
+        setScenePromptReviewing(false);
+        setScenePlanningSnapshot(null);
+        setSceneImagePlans([]);
+        showToast({
+          message: `场景方案生成失败：${error instanceof Error ? error.message : String(error)}`,
+          variant: "error",
+        });
+      }
+    } finally {
+      if (scenePlanningRequestIdRef.current === requestId) {
+        setScenePlanGenerating(false);
+      }
+    }
   }
 
   function handleBackToSceneConfig() {
+    invalidateSceneTasks();
     setScenePromptReviewing(false);
     setScenePlanGenerating(false);
     setSceneImageGenerating(false);
+    setScenePlanningSnapshot(null);
     setSceneImagePlans([]);
     setSceneImages([]);
   }
 
-  function handleGenerateSceneImages(plans: SceneImagePlan[]) {
-    setSceneImages(
-      plans.map((plan) => ({
-        id: `scene-${plan.id}`,
-        prompt: plan.prompt,
-        ratio: plan.ratio,
-        status: "generating",
-        title: plan.title,
-      })),
-    );
+  async function handleGenerateSceneImages(plans: SceneImagePlan[]) {
+    const planningSnapshot = scenePlanningSnapshot;
+    const planningContext = scenePlanningContextRef.current;
+    if (!planningSnapshot || !planningContext) {
+      showToast({ message: "场景方案输入已失效，请重新生成方案。", variant: "error" });
+      return;
+    }
+    const requestId = sceneGenerationRequestIdRef.current + 1;
+    sceneGenerationRequestIdRef.current = requestId;
+    const frozenPlans = plans.map((plan) => ({ ...plan }));
+    const sourceImage: GeneratedDetailImage = {
+      id: `${planningContext.planningTaskId}-source`,
+      kind: "source-image",
+      sourceImages: planningContext.referenceImages.map((image) => ({ ...image })),
+      status: "complete",
+      title: "原图",
+    };
+    const generatedImages: GeneratedDetailImage[] = frozenPlans.map((plan) => ({
+      id: plan.id,
+      imageNo: plan.imageNo,
+      prompt: plan.prompt,
+      ratio: plan.ratio,
+      sceneDescription: plan.purpose,
+      status: "generating",
+      title: plan.title,
+    }));
+    let images: GeneratedDetailImage[] = [sourceImage, ...generatedImages];
+    setSceneImages(images);
     setSceneImageGenerating(true);
+    let generationTaskId: string | null = null;
+    try {
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `scene-image-generation:${Date.now()}`,
+        input: {
+          campaignStyleLock: planningSnapshot.campaignStyleLock,
+          conversionDriver: planningSnapshot.conversionDriver,
+          generationPromptVersion: sceneImageGenerationPromptVersion,
+          items: frozenPlans.map((plan) => ({
+            code: plan.code,
+            imageId: plan.id,
+            imageNo: plan.imageNo,
+            negativeConstraints: plan.negativeConstraints,
+            prompt: plan.prompt,
+            promptSummary: plan.promptSummary,
+            purpose: plan.purpose,
+            ratio: plan.ratio,
+            sortOrder: plan.sortOrder,
+            templateId: plan.templateId,
+            title: plan.title.replace(`${plan.code} `, ""),
+            variantId: plan.variantId,
+          })),
+          kind: "scene-image-generation",
+          outputMode: sceneConfig.outputMode,
+          planningPromptVersion: scenePlanningPromptVersion,
+          ratio: sceneConfig.ratio,
+          templateCatalogVersion: planningSnapshot.templateCatalogVersion,
+        },
+        inputAssets: planningContext.inputAssets,
+        kind: "image-generation",
+        promptPlanId: planningContext.planningTaskId,
+        title: "场景图片生成",
+        workspace: "scene",
+      });
+      generationTaskId = task.id;
+      if (sceneGenerationRequestIdRef.current !== requestId) {
+        await localGenerationPort.cancelTask(task.id).catch((error) => {
+          console.warn("cancel invalidated scene generation task failed", { error, taskId: task.id });
+        });
+        return;
+      }
+      sceneTaskIdsRef.current.add(task.id);
+      const record: GenerationRecord = {
+        createdAt: Date.now(),
+        id: task.id,
+        images,
+        inputSummary: `${sceneConfig.outputMode} · ${sceneConfig.ratio} · ${frozenPlans.length} 张`,
+        kind: "scene-generation",
+        persistedTaskId: task.id,
+        promptPlanId: planningContext.planningTaskId,
+        relatedTaskIds: [task.id, planningContext.planningTaskId],
+        status: "generating",
+        title: "场景图片",
+        workspace: "scene",
+      };
+      setGenerationRecords((records) => mergeGenerationRecords(records, [record]));
+      activeGenerationRecordIdRef.current = task.id;
+      historyViewingRecordIdRef.current = null;
+      setActiveGenerationRecordId(task.id);
+      setHistoryViewingRecordId(null);
+      await requestGenerationTaskStart(task.id, "场景图片任务未能启动，请稍后重试。");
+      const detail = await pollSceneTask(task.id, requestId, "generation", (nextDetail) => {
+        images = applySceneGeneratedAssetOutputs(images, nextDetail);
+        publishSceneGeneration(task.id, images, "generating", requestId);
+      });
+      images = applySceneGeneratedAssetOutputs(images, detail, { final: true });
+      const status = deriveProductGenerationRecordStatus(images);
+      publishSceneGeneration(task.id, images, status, requestId);
+    } catch (error) {
+      if (sceneGenerationRequestIdRef.current === requestId) {
+        const message = error instanceof Error ? error.message : "场景图片生成失败。";
+        images = failGeneratedImages(images, message);
+        if (generationTaskId) {
+          publishSceneGeneration(generationTaskId, images, "failed", requestId);
+        } else {
+          setSceneImages(images);
+        }
+        showToast({ message: `场景图片生成失败：${message}`, variant: "error" });
+      }
+    } finally {
+      if (sceneGenerationRequestIdRef.current === requestId) {
+        setSceneImageGenerating(false);
+      }
+    }
+  }
+
+  function publishSceneGeneration(
+    recordId: string,
+    images: GeneratedDetailImage[],
+    status: GenerationRecord["status"],
+    requestId: number,
+  ) {
+    if (sceneGenerationRequestIdRef.current !== requestId || deletedGenerationRecordIdsRef.current.has(recordId)) {
+      return;
+    }
+    if (
+      activeGenerationRecordIdRef.current === recordId &&
+      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
+    ) {
+      setSceneImages(images);
+    }
+    setGenerationRecords((records) =>
+      records.map((record) => (record.id === recordId ? { ...record, images, status } : record)),
+    );
+  }
+
+  async function pollSceneTask(
+    taskId: string,
+    requestId: number,
+    kind: "planning" | "generation",
+    onProgress?: (detail: GenerationTaskDetail) => void,
+    options: { enforceRequestId?: boolean; isCancelled?: () => boolean; keepTrackedAfterSuccess?: boolean } = {},
+  ) {
+    let queuedPollCount = 0;
+    let unchangedPollCount = 0;
+    let lastPollSignature = "";
+    for (;;) {
+      if (options.isCancelled?.()) {
+        throw new Error("场景任务轮询已停止。");
+      }
+      const activeRequestId =
+        kind === "planning" ? scenePlanningRequestIdRef.current : sceneGenerationRequestIdRef.current;
+      if (options.enforceRequestId !== false && activeRequestId !== requestId) {
+        throw new Error("场景任务已取消。");
+      }
+      const detail = await localGenerationPort.getTaskDetail(taskId);
+      const latestRequestId =
+        kind === "planning" ? scenePlanningRequestIdRef.current : sceneGenerationRequestIdRef.current;
+      if ((options.enforceRequestId !== false && latestRequestId !== requestId) || options.isCancelled?.()) {
+        throw new Error("场景任务已取消。");
+      }
+      onProgress?.(detail);
+      const signature = createTaskPollSignature(detail);
+      unchangedPollCount = signature === lastPollSignature ? unchangedPollCount + 1 : 0;
+      lastPollSignature = signature;
+      queuedPollCount = detail.task.status === "queued" ? queuedPollCount + 1 : 0;
+      if (detail.task.status === "queued") {
+        await requestGenerationTaskStart(taskId, "场景任务未能启动，请稍后重试。");
+      }
+      if (isTaskTerminal(detail.task.status)) {
+        if (detail.task.status !== "succeeded") {
+          sceneTaskIdsRef.current.delete(taskId);
+          throw new Error(detail.task.error?.message ?? "场景任务未成功完成。");
+        }
+        if (!options.keepTrackedAfterSuccess) {
+          sceneTaskIdsRef.current.delete(taskId);
+        }
+        return detail;
+      }
+      if (queuedPollCount >= productGenerationMaxQueuedPollCount) {
+        throw new Error("场景任务长时间未启动，请检查后台任务执行状态。");
+      }
+      if (unchangedPollCount >= productGenerationMaxUnchangedPollCount) {
+        throw new Error("场景任务长时间无进展，请检查模型配置或后台任务日志。");
+      }
+      await delay(productGenerationPollIntervalMs);
+    }
+  }
+
+  async function retrySceneImage(image: GeneratedDetailImage) {
+    const requestId = sceneGenerationRequestIdRef.current;
+    const parentRecord = findGeneratedImageRecord(image.id, "scene");
+    if (!parentRecord?.persistedTaskId || parentRecord.workspace !== "scene") {
+      showToast({ message: "场景图片缺少可重试的父任务。", variant: "error" });
+      return;
+    }
+    const originalImage = { ...image };
+    let completedRetryTaskId: string | undefined;
+    try {
+      const parentDetail = await localGenerationPort.getTaskDetail(parentRecord.persistedTaskId);
+      if (
+        sceneGenerationRequestIdRef.current !== requestId ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id)
+      ) {
+        return;
+      }
+      const input = parentDetail.input && typeof parentDetail.input === "object"
+        ? (parentDetail.input as Record<string, unknown>)
+        : {};
+      if (
+        readOutputString(input.planningPromptVersion) !== scenePlanningPromptVersion ||
+        readOutputString(input.generationPromptVersion) !== sceneImageGenerationPromptVersion ||
+        readOutputString(input.templateCatalogVersion) !== sceneTemplateCatalogVersion
+      ) {
+        throw new Error("该任务使用的 Prompt 或模板版本已过期，请重新规划后生成。");
+      }
+      const item = (Array.isArray(input.items) ? input.items : [])
+        .map((value) => (value && typeof value === "object" ? (value as Record<string, unknown>) : {}))
+        .find((value) => readOutputString(value.imageId) === image.id);
+      if (!item) {
+        throw new Error("场景图片缺少冻结的生成参数，请重新规划后生成。");
+      }
+      const inputAssets = parentDetail.inputAssets
+        .filter((asset) => asset.role === "reference")
+        .map((asset, index): GenerationTaskInputAssetInput => ({
+          assetId: asset.asset.id,
+          role: "reference",
+          sortOrder: index,
+        }));
+      if (inputAssets.length === 0) {
+        throw new Error("场景图片缺少参考图资产，无法重新生成。");
+      }
+      const imageNo = readOutputNumber(item.imageNo) || image.imageNo;
+      if (!imageNo) {
+        throw new Error("场景图片缺少稳定序号，无法重新生成。");
+      }
+      updateSceneImageById(parentRecord.id, image.id, (current) => ({
+        ...current,
+        errorMessage: undefined,
+        status: "generating",
+      }));
+      const retrySequence = Math.max(Date.now(), sceneRetrySequenceRef.current + 1);
+      sceneRetrySequenceRef.current = retrySequence;
+      const task = await localGenerationPort.createTask({
+        idempotencyKey: `${parentRecord.persistedTaskId}:${image.id}:scene-retry:${retrySequence}`,
+        input: createSceneRetryTaskInput(input, item, {
+          imageNo,
+          parentTaskId: parentRecord.persistedTaskId,
+          retrySequence,
+          targetImageId: image.id,
+        }),
+        inputAssets,
+        kind: "image-generation",
+        promptPlanId: parentRecord.promptPlanId,
+        title: `重新生成 ${image.title}`,
+        workspace: "scene",
+      });
+      if (
+        sceneGenerationRequestIdRef.current !== requestId ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id)
+      ) {
+        await localGenerationPort.cancelTask(task.id).catch((error) => {
+          console.warn("cancel invalidated scene retry task failed", { error, taskId: task.id });
+        });
+        return;
+      }
+      sceneTaskIdsRef.current.add(task.id);
+      setGenerationRecords((records) =>
+        records.map((record) =>
+          record.id === parentRecord.id
+            ? { ...record, relatedTaskIds: Array.from(new Set([...(record.relatedTaskIds ?? []), task.id])) }
+            : record,
+        ),
+      );
+      await requestGenerationTaskStart(task.id, "场景图片重新生成任务未能启动。");
+      if (sceneGenerationRequestIdRef.current !== requestId) {
+        return;
+      }
+      const retryDetail = await pollSceneTask(task.id, requestId, "generation", undefined, {
+        keepTrackedAfterSuccess: true,
+      });
+      completedRetryTaskId = task.id;
+      const replacement = [...retryDetail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
+      if (!replacement) {
+        throw new Error("场景图片重新生成结果缺少可用图片。");
+      }
+      if (
+        sceneGenerationRequestIdRef.current !== requestId ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id)
+      ) {
+        return;
+      }
+      const persistedAsset = await findPersistedResultAsset(parentRecord.persistedTaskId, imageNo);
+      if (
+        sceneGenerationRequestIdRef.current !== requestId ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id)
+      ) {
+        return;
+      }
+      await localGenerationPort.replaceResultImage({
+        currentAssetId: persistedAsset?.id,
+        displayedAssetId: image.assetId,
+        replacementAssetId: replacement.asset.id,
+        replacementTaskId: task.id,
+        taskId: parentRecord.persistedTaskId,
+      });
+      if (sceneGenerationRequestIdRef.current !== requestId) {
+        return;
+      }
+      updateSceneImageById(parentRecord.id, image.id, (current) => ({
+        ...current,
+        assetId: replacement.asset.id,
+        assetLocalPath: replacement.asset.localPath,
+        assetRelativePath: replacement.asset.relativePath,
+        errorMessage: undefined,
+        height: replacement.asset.height,
+        src: replacement.asset.url ?? replacement.asset.localPath,
+        status: "complete",
+        width: replacement.asset.width,
+      }));
+      showToast({ message: "场景图片已重新生成", variant: "success" });
+    } catch (error) {
+      if (
+        sceneGenerationRequestIdRef.current !== requestId ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id)
+      ) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "场景图片重新生成失败。";
+      updateSceneImageById(parentRecord.id, image.id, () => ({
+        ...originalImage,
+        errorMessage: originalImage.src ? undefined : message,
+        status: originalImage.src ? "complete" : "failed",
+      }));
+      showToast({ message, variant: "error" });
+    } finally {
+      if (completedRetryTaskId) {
+        sceneTaskIdsRef.current.delete(completedRetryTaskId);
+      }
+    }
   }
 
   useEffect(() => {
@@ -2203,7 +2699,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function listGenerationTasksForWorkspace(workspace: "clothing" | "product") {
+    async function listGenerationTasksForWorkspace(workspace: "clothing" | "product" | "scene") {
       const pageSize = 20;
       const tasks = [];
       let page = 1;
@@ -2236,9 +2732,150 @@ export function App() {
       return taskDetails;
     }
 
+    function updateRestoredSceneRecord(
+      recordId: string,
+      images: GeneratedDetailImage[],
+      status: GenerationRecord["status"],
+    ) {
+      if (cancelled || deletedGenerationRecordIdsRef.current.has(recordId)) {
+        return;
+      }
+      const viewingRestoredRecord =
+        activeGenerationRecordIdRef.current === recordId && historyViewingRecordIdRef.current === recordId;
+      if (viewingRestoredRecord) {
+        setSceneImages(images);
+        if (status !== "generating") {
+          setSceneImageGenerating(false);
+        }
+      }
+      setGenerationRecords((records) =>
+        records.map((record) => (record.id === recordId ? { ...record, images, status } : record)),
+      );
+    }
+
+    async function resumeRestoredSceneParentTask(detail: GenerationTaskDetail, requestId: number) {
+      const initialRecord = createSceneGenerationRecordFromTaskDetail(detail);
+      if (!initialRecord) {
+        return;
+      }
+      let images = initialRecord.images;
+      const stopped = () =>
+        cancelled ||
+        deletedGenerationRecordIdsRef.current.has(initialRecord.id);
+      sceneTaskIdsRef.current.add(detail.task.id);
+      try {
+        const finalDetail = await pollSceneTask(
+          detail.task.id,
+          requestId,
+          "generation",
+          (nextDetail) => {
+            images = applySceneGeneratedAssetOutputs(images, nextDetail);
+            updateRestoredSceneRecord(initialRecord.id, images, "generating");
+          },
+          { enforceRequestId: false, isCancelled: stopped },
+        );
+        if (stopped()) {
+          return;
+        }
+        images = applySceneGeneratedAssetOutputs(images, finalDetail, { final: true });
+        updateRestoredSceneRecord(
+          initialRecord.id,
+          images,
+          deriveProductGenerationRecordStatus(images),
+        );
+      } catch (error) {
+        if (stopped()) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "场景图片生成失败。";
+        images = failGeneratedImages(images, message);
+        updateRestoredSceneRecord(initialRecord.id, images, "failed");
+      }
+    }
+
+    async function resumeRestoredSceneRetryTask(
+      detail: GenerationTaskDetail,
+      parentRecord: GenerationRecord,
+      requestId: number,
+    ) {
+      const retryPatch = createRestoredSingleImageRetryPatchFromTaskDetail(detail, { includeIncomplete: true });
+      if (!retryPatch?.parentTaskId) {
+        return;
+      }
+      const parentImage = parentRecord.images.find((image) => restoredImageMatchesRetryTarget(image, retryPatch));
+      const stopped = () =>
+        cancelled ||
+        deletedGenerationRecordIdsRef.current.has(parentRecord.id);
+      let latestRetryStatus = detail.task.status;
+      sceneTaskIdsRef.current.add(detail.task.id);
+      try {
+        const finalDetail = await pollSceneTask(
+          detail.task.id,
+          requestId,
+          "generation",
+          (nextDetail) => {
+            latestRetryStatus = nextDetail.task.status;
+          },
+          {
+            enforceRequestId: false,
+            isCancelled: stopped,
+            keepTrackedAfterSuccess: true,
+          },
+        );
+        const replacement = [...finalDetail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
+        if (!replacement) {
+          throw new Error("场景图片重新生成结果缺少可用图片。");
+        }
+        if (stopped()) {
+          return;
+        }
+        await localGenerationPort.replaceResultImage({
+          currentAssetId: parentImage?.assetId,
+          displayedAssetId: parentImage?.assetId,
+          replacementAssetId: replacement.asset.id,
+          replacementTaskId: detail.task.id,
+          taskId: retryPatch.parentTaskId,
+        });
+        if (stopped()) {
+          return;
+        }
+        const parentDetail = await localGenerationPort.getTaskDetail(retryPatch.parentTaskId);
+        const refreshedRecord = createSceneGenerationRecordFromTaskDetail(parentDetail);
+        if (!refreshedRecord || stopped()) {
+          return;
+        }
+        updateRestoredSceneRecord(
+          parentRecord.id,
+          refreshedRecord.images,
+          refreshedRecord.status,
+        );
+      } catch (error) {
+        if (stopped()) {
+          return;
+        }
+        try {
+          const parentDetail = await localGenerationPort.getTaskDetail(retryPatch.parentTaskId);
+          const refreshedRecord = createSceneGenerationRecordFromTaskDetail(parentDetail);
+          if (refreshedRecord && !stopped()) {
+            updateRestoredSceneRecord(
+              parentRecord.id,
+              refreshedRecord.images,
+              refreshedRecord.status,
+            );
+          }
+        } catch (refreshError) {
+          console.warn("refresh restored scene retry parent failed", refreshError);
+        }
+      } finally {
+        if (isTaskTerminal(latestRetryStatus)) {
+          sceneTaskIdsRef.current.delete(detail.task.id);
+        }
+      }
+    }
+
     async function restoreGenerationHistory() {
       try {
-        const [productTasks, clothingTasks] = await Promise.all([
+        const [productTasks, clothingTasks, sceneTasks] = await Promise.all([
           listGenerationTasksForWorkspace("product").catch((error) => {
             console.warn("restore product generation task list failed", error);
             return [];
@@ -2247,15 +2884,20 @@ export function App() {
             console.warn("restore clothing generation task list failed", error);
             return [];
           }),
+          listGenerationTasksForWorkspace("scene").catch((error) => {
+            console.warn("restore scene generation task list failed", error);
+            return [];
+          }),
         ]);
         const taskById = new Map(
-          [...productTasks, ...clothingTasks]
+          [...productTasks, ...clothingTasks, ...sceneTasks]
             .filter((task) => task.kind === "image-generation" || task.kind === "listing-copy")
             .map((task) => [task.id, task] as const),
         );
         const taskDetails = await getTaskDetailsWithConcurrency([...taskById.values()]);
         const productTaskDetails = taskDetails.filter((detail) => detail.task.workspace === "product");
         const clothingTaskDetails = taskDetails.filter((detail) => detail.task.workspace === "clothing");
+        const sceneTaskDetails = taskDetails.filter((detail) => detail.task.workspace === "scene");
         const restoredRecords = productTaskDetails
           .filter((detail) => detail.task.kind === "image-generation")
           .map(createProductGenerationRecordFromTaskDetail)
@@ -2282,10 +2924,48 @@ export function App() {
           restoredClothingRecords,
           clothingRetryPatches,
         );
-        const restoredGenerationRecords = [...restoredRecordsWithListingCopy, ...restoredClothingRecordsWithRetries];
+        const sceneRetryPatches = sceneTaskDetails
+          .filter((detail) => detail.task.kind === "image-generation")
+          .map((detail) => createRestoredSingleImageRetryPatchFromTaskDetail(detail, { includeIncomplete: true }))
+          .filter((patch): patch is RestoredSingleImageRetryPatch => patch !== null);
+        const restoredSceneRecords = sceneTaskDetails
+          .filter((detail) => detail.task.kind === "image-generation")
+          .map(createSceneGenerationRecordFromTaskDetail)
+          .filter((record): record is GenerationRecord => record !== null);
+        const restoredSceneRecordsWithRetries = mergeRestoredSingleImageRetryPatches(
+          restoredSceneRecords,
+          sceneRetryPatches,
+        );
+        const restoredGenerationRecords = [
+          ...restoredRecordsWithListingCopy,
+          ...restoredClothingRecordsWithRetries,
+          ...restoredSceneRecordsWithRetries,
+        ];
 
         if (!cancelled && restoredGenerationRecords.length > 0) {
           setGenerationRecords((currentRecords) => mergeGenerationRecords(currentRecords, restoredGenerationRecords));
+        }
+        if (!cancelled) {
+          const requestId = sceneGenerationRequestIdRef.current;
+          const restoredSceneRecordByTaskId = new Map(
+            restoredSceneRecords.map((record) => [record.persistedTaskId, record] as const),
+          );
+          sceneTaskDetails
+            .filter((detail) => !isTaskTerminal(detail.task.status) && !isRestoredTaskStale(detail.task))
+            .forEach((detail) => {
+              if (isSingleImageRetryTaskDetail(detail)) {
+                const input = detail.input && typeof detail.input === "object"
+                  ? (detail.input as Record<string, unknown>)
+                  : {};
+                const parentTaskId = readOutputString(input.parentTaskId) || detail.task.retryOfTaskId;
+                const parentRecord = parentTaskId ? restoredSceneRecordByTaskId.get(parentTaskId) : undefined;
+                if (parentRecord) {
+                  void resumeRestoredSceneRetryTask(detail, parentRecord, requestId);
+                }
+                return;
+              }
+              void resumeRestoredSceneParentTask(detail, requestId);
+            });
         }
       } catch (error) {
         console.warn("restore generation history failed", error);
@@ -2298,32 +2978,6 @@ export function App() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!scenePlanGenerating) {
-      return;
-    }
-
-    const planTimer = window.setTimeout(() => {
-      setSceneImagePlans(createSceneImagePlans(sceneConfig));
-      setScenePlanGenerating(false);
-    }, scenePlanDraftDelayMs);
-
-    return () => window.clearTimeout(planTimer);
-  }, [sceneConfig, scenePlanGenerating]);
-
-  useEffect(() => {
-    if (!sceneImageGenerating) {
-      return;
-    }
-
-    const generationTimer = window.setTimeout(() => {
-      setSceneImages((currentImages) => completeGeneratedImages(currentImages, pickRandomFailedImageId(currentImages)));
-      setSceneImageGenerating(false);
-    }, generationCompleteDelayMs);
-
-    return () => window.clearTimeout(generationTimer);
-  }, [sceneImageGenerating]);
 
   return (
     <AppShell
@@ -2382,11 +3036,11 @@ export function App() {
           {isSceneWorkspace ? (
             scenePromptReviewing ? (
               <ScenePromptReviewPanel
+                campaignStyleLock={scenePlanningSnapshot?.campaignStyleLock ?? ""}
                 config={sceneConfig}
                 imageGenerating={sceneImageGenerating}
                 onBack={handleBackToSceneConfig}
                 onGenerateImages={handleGenerateSceneImages}
-                onPlansChange={setSceneImagePlans}
                 planGenerating={scenePlanGenerating}
                 plans={sceneImagePlans}
               />
@@ -2422,7 +3076,14 @@ export function App() {
       canvas={
         isSceneWorkspace ? (
           sceneImages.length > 0 ? (
-            <PreviewCanvas boards={previewBoards} detailImages={sceneImages} />
+            <PreviewCanvas
+              boards={previewBoards}
+              detailImages={sceneImages}
+              onImageDelete={deleteGeneratedImage}
+              onImageResize={resizeGeneratedImage}
+              onImageRetry={retrySceneImage}
+              onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
+            />
           ) : (
             <ScenePreviewCanvas />
           )
@@ -2458,6 +3119,28 @@ export function App() {
   );
 }
 
+export function createSceneRetryTaskInput(
+  parentInput: Record<string, unknown>,
+  item: Record<string, unknown>,
+  retry: { imageNo: number; parentTaskId: string; retrySequence: number; targetImageId: string },
+) {
+  return {
+    campaignStyleLock: readOutputString(parentInput.campaignStyleLock),
+    conversionDriver: readOutputString(parentInput.conversionDriver),
+    generationPromptVersion: readOutputString(parentInput.generationPromptVersion),
+    items: [{ ...item, imageNo: retry.imageNo, sortOrder: 0 }],
+    kind: "scene-image-generation",
+    outputMode: readOutputString(parentInput.outputMode),
+    parentTaskId: retry.parentTaskId,
+    planningPromptVersion: readOutputString(parentInput.planningPromptVersion),
+    ratio: readOutputString(parentInput.ratio),
+    retrySequence: retry.retrySequence,
+    singleImageRetry: true,
+    targetImageId: retry.targetImageId,
+    templateCatalogVersion: readOutputString(parentInput.templateCatalogVersion),
+  };
+}
+
 function createGenerationRecordId(prefix: "clothing" | "product") {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -2467,35 +3150,6 @@ function createProductHistorySummary(settings: typeof defaultProductGenerationSe
     settings.advancedFormats.length > 0 ? settings.advancedFormats.join("、") : settings.format;
 
   return `${settings.platform} · ${settings.market} · ${settings.language} · ${formatLabel} · ${imageCount} 张`;
-}
-
-function pickRandomFailedImageId(images: GeneratedDetailImage[]) {
-  const failureCandidates = images.filter((image) => image.kind !== "source-image");
-  if (failureCandidates.length === 0) {
-    return null;
-  }
-
-  return failureCandidates[Math.floor(Math.random() * failureCandidates.length)]?.id ?? null;
-}
-
-function completeGeneratedImages(images: GeneratedDetailImage[], failedImageId: string | null): GeneratedDetailImage[] {
-  return images.map((image) =>
-    image.kind === "source-image"
-      ? {
-          ...image,
-          status: "complete",
-        }
-      : image.id === failedImageId
-        ? {
-            ...image,
-            errorMessage: "生成失败",
-            status: "failed",
-          }
-        : {
-            ...image,
-            status: "complete",
-          },
-  );
 }
 
 function deletePersistedGenerationRecord(record: GenerationRecord | undefined) {
@@ -2629,6 +3283,96 @@ function createClothingGenerationRecordFromTaskDetail(detail: GenerationTaskDeta
   };
 }
 
+function createSceneGenerationRecordFromTaskDetail(detail: GenerationTaskDetail): GenerationRecord | null {
+  const input = detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {};
+  if (readOutputString(input.kind) !== "scene-image-generation" || isSingleImageRetryTaskDetail(detail)) {
+    return null;
+  }
+  const items = readSceneGenerationInputItems(input);
+  if (items.length === 0) {
+    return null;
+  }
+  const stale = isRestoredTaskStale(detail.task);
+  const terminal = isTaskTerminal(detail.task.status);
+  const deletedSortOrders = deletedResultSortOrders(detail);
+  const outputAssetBySortOrder = new Map(detail.outputAssets.map((asset) => [asset.sortOrder, asset] as const));
+  const referenceImages = readReferenceImagesFromTaskDetail(detail, input);
+  const restoredImages = items.flatMap((item): GeneratedDetailImage[] => {
+    if (deletedSortOrders.has(item.sortOrder)) {
+      return [];
+    }
+    const outputAsset = outputAssetBySortOrder.get(item.sortOrder);
+    const src = outputAsset?.asset.url ?? outputAsset?.asset.localPath;
+    return [{
+      assetId: outputAsset?.asset.id,
+      assetLocalPath: outputAsset?.asset.localPath,
+      assetRelativePath: outputAsset?.asset.relativePath,
+      errorMessage: src ? undefined : stale ? "生成中断" : terminal ? detail.task.error?.message || "生成结果缺少可展示图片。" : undefined,
+      height: outputAsset?.asset.height,
+      id: item.imageId,
+      imageNo: item.imageNo,
+      prompt: item.prompt,
+      ratio: item.ratio,
+      referenceImages,
+      sceneDescription: item.purpose,
+      src,
+      status: src ? "complete" : stale || terminal ? "failed" : "generating",
+      title: `${item.code} ${item.title}`,
+      width: outputAsset?.asset.width,
+    }];
+  });
+  if (restoredImages.length === 0) {
+    return null;
+  }
+  const images = prependRestoredSourceImageCards(detail.task.id, restoredImages, referenceImages);
+  const promptPlanId = readTaskPromptPlanId(detail);
+  return {
+    createdAt: dateTimeToTimestamp(detail.task.createdAt),
+    id: detail.task.id,
+    images,
+    inputSummary: detail.task.inputSummary || `${readOutputString(input.ratio)} · ${restoredImages.length} 张`,
+    kind: "scene-generation",
+    persistedTaskId: detail.task.id,
+    promptPlanId,
+    relatedTaskIds: [detail.task.id, promptPlanId].filter((taskId): taskId is string => Boolean(taskId)),
+    status: restoredGenerationTaskStatus(detail, images, stale),
+    title: detail.task.title || "场景图片",
+    workspace: "scene",
+  };
+}
+
+type RestoredSceneGenerationInputItem = {
+  code: string;
+  imageId: string;
+  imageNo: number;
+  prompt: string;
+  purpose: string;
+  ratio: string;
+  sortOrder: number;
+  title: string;
+};
+
+function readSceneGenerationInputItems(input: Record<string, unknown>): RestoredSceneGenerationInputItem[] {
+  const items = Array.isArray(input.items) ? input.items : [];
+  return items.flatMap((item, index): RestoredSceneGenerationInputItem[] => {
+    const value = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    const imageId = readOutputString(value.imageId);
+    if (!imageId) {
+      return [];
+    }
+    return [{
+      code: readOutputString(value.code) || `S${index + 1}`,
+      imageId,
+      imageNo: readOutputNumber(value.imageNo) || index + 1,
+      prompt: readOutputString(value.prompt),
+      purpose: readOutputString(value.purpose),
+      ratio: readOutputString(value.ratio) || readOutputString(input.ratio),
+      sortOrder: readOutputNumber(value.sortOrder),
+      title: readOutputString(value.title) || `场景图片 ${index + 1}`,
+    }];
+  });
+}
+
 type RestoredListingCopyImage = {
   image: GeneratedDetailImage;
   promptPlanId: string;
@@ -2640,6 +3384,7 @@ type RestoredSingleImageRetryPatch = {
   image: GeneratedDetailImage;
   imageNo: number;
   parentTaskId?: string;
+  preserveCompletedTargetOnFailure: boolean;
   retrySequence?: number;
   taskId: string;
   targetImageId: string;
@@ -2661,6 +3406,12 @@ function createRestoredSingleImageRetryPatchFromTaskDetail(
   const imageNo = readOutputNumber(item.imageNo);
   const parentTaskId = readOutputString(input.parentTaskId) || detail.task.retryOfTaskId;
   const retrySequence = readOutputNumber(input.retrySequence);
+  const isSceneRetry = readOutputString(input.kind) === "scene-image-generation";
+  const sceneCode = readOutputString(item.code);
+  const itemTitle = readOutputString(item.title);
+  const title = isSceneRetry && sceneCode && itemTitle
+    ? `${sceneCode} ${itemTitle}`
+    : itemTitle || detail.task.title.replace(/^重新生成\s*/, "") || "详情图";
   const outputAsset = [...detail.outputAssets].sort((left, right) => left.sortOrder - right.sortOrder)[0];
   const src = outputAsset?.asset.url ?? outputAsset?.asset.localPath;
   if (!targetImageId || (!includeIncomplete && !src)) {
@@ -2678,6 +3429,7 @@ function createRestoredSingleImageRetryPatchFromTaskDetail(
     targetImageId,
     imageNo,
     parentTaskId,
+    preserveCompletedTargetOnFailure: isSceneRetry,
     retrySequence: retrySequence > 0 ? retrySequence : undefined,
     taskId: detail.task.id,
     updatedAt: dateTimeToTimestamp(detail.task.completedAt || detail.task.updatedAt || detail.task.createdAt),
@@ -2686,14 +3438,16 @@ function createRestoredSingleImageRetryPatchFromTaskDetail(
       assetId: outputAsset?.asset.id,
       assetLocalPath: outputAsset?.asset.localPath,
       assetRelativePath: outputAsset?.asset.relativePath,
-      errorMessage: status === "failed" ? detail.task.error?.message || "服饰场景图重新生成失败。" : undefined,
+      errorMessage: status === "failed"
+        ? detail.task.error?.message || (isSceneRetry ? "场景图片重新生成失败。" : "服饰场景图重新生成失败。")
+        : undefined,
       imageNo: imageNo || undefined,
-      prompt: readOutputString(item.imagePrompt) || undefined,
+      prompt: readOutputString(isSceneRetry ? item.prompt : item.imagePrompt) || undefined,
       referenceImages: readReferenceImagesFromTaskDetail(detail, input),
-      sceneDescription: readOutputString(item.sceneDescription) || undefined,
+      sceneDescription: readOutputString(isSceneRetry ? item.purpose : item.sceneDescription) || undefined,
       src,
       status,
-      title: readOutputString(item.title) || detail.task.title.replace(/^重新生成\s*/, "") || "详情图",
+      title,
     },
   };
 }
@@ -2777,19 +3531,26 @@ function mergeRestoredSingleImageRetryPatches(
                 sceneDescription: patch.image.sceneDescription || image.sceneDescription,
                 src: patch.image.src,
                 status: "complete",
+                title: patch.image.title || image.title,
               }
-            : {
-                ...image,
-                assetId: undefined,
-                assetLocalPath: undefined,
-                assetRelativePath: undefined,
-                errorMessage: patch.image.errorMessage,
-                prompt: patch.image.prompt || image.prompt,
-                referenceImages: patch.image.referenceImages?.length ? patch.image.referenceImages : image.referenceImages,
-                sceneDescription: patch.image.sceneDescription || image.sceneDescription,
-                src: undefined,
-                status: patch.image.status,
-              }
+            : patch.image.status === "failed" &&
+                patch.preserveCompletedTargetOnFailure &&
+                image.status === "complete" &&
+                image.src
+              ? image
+              : {
+                  ...image,
+                  assetId: undefined,
+                  assetLocalPath: undefined,
+                  assetRelativePath: undefined,
+                  errorMessage: patch.image.errorMessage,
+                  prompt: patch.image.prompt || image.prompt,
+                  referenceImages: patch.image.referenceImages?.length ? patch.image.referenceImages : image.referenceImages,
+                  sceneDescription: patch.image.sceneDescription || image.sceneDescription,
+                  src: undefined,
+                  status: patch.image.status,
+                  title: patch.image.title || image.title,
+                }
           : image,
       );
     }
@@ -3185,6 +3946,45 @@ function applyGeneratedAssetOutputs(
       height: outputAsset.asset.height,
       referenceImages: referenceImages.length > 0 ? referenceImages : image.referenceImages,
       src: outputAsset.asset.url ?? outputAsset.asset.localPath,
+      status: "complete",
+      width: outputAsset.asset.width,
+    };
+  });
+}
+
+function applySceneGeneratedAssetOutputs(
+  images: GeneratedDetailImage[],
+  detail: GenerationTaskDetail,
+  options: { final?: boolean } = {},
+) {
+  const outputAssetBySortOrder = new Map(detail.outputAssets.map((item) => [item.sortOrder, item] as const));
+  const referenceImages = readReferenceImagesFromTaskDetail(
+    detail,
+    detail.input && typeof detail.input === "object" ? (detail.input as Record<string, unknown>) : {},
+  );
+  let generatedImageIndex = 0;
+  return images.map((image): GeneratedDetailImage => {
+    if (image.kind === "source-image") {
+      return { ...image, status: "complete" };
+    }
+    const sortOrder = image.imageNo ? image.imageNo - 1 : generatedImageIndex;
+    generatedImageIndex += 1;
+    const outputAsset = outputAssetBySortOrder.get(sortOrder);
+    const src = outputAsset?.asset.url ?? outputAsset?.asset.localPath;
+    if (!outputAsset || !src) {
+      return options.final
+        ? { ...image, errorMessage: detail.task.error?.message || "生成结果缺少可展示图片。", status: "failed" }
+        : image;
+    }
+    return {
+      ...image,
+      assetId: outputAsset.asset.id,
+      assetLocalPath: outputAsset.asset.localPath,
+      assetRelativePath: outputAsset.asset.relativePath,
+      errorMessage: undefined,
+      height: outputAsset.asset.height,
+      referenceImages,
+      src,
       status: "complete",
       width: outputAsset.asset.width,
     };

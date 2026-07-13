@@ -15,9 +15,12 @@ use crate::infrastructure::providers::openai_compatible::normalize_openai_compat
 use crate::infrastructure::providers::openai_images::{
     build_openai_image_edit_multipart, OpenAiMultipartBody,
 };
-use crate::services::model_config::validate_image_size;
+use crate::services::model_config::{image_size_options, validate_image_size};
 use crate::services::model_gateway::{
     ModelGatewayAdapter, ModelGatewayAdapterRequest, ModelGatewayAdapterResult, ModelGatewayError,
+};
+use crate::services::provider_connection::{
+    supports_seedream_single_image_options, VOLCENGINE_SEEDREAM_5_PRO_MODEL,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -883,20 +886,77 @@ pub fn build_model_gateway_request_body(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let scene_ratio = if input.get("kind").and_then(Value::as_str)
+            == Some("scene-image-generation")
+        {
+            Some(input.get("ratio").and_then(Value::as_str).ok_or_else(|| {
+                ModelGatewayError::ProviderRequestInvalid("场景生图任务缺少图片比例。".to_string())
+            })?)
+        } else {
+            None
+        };
         if let Some(size) = explicit_size {
             validate_image_size(config.provider_profile_id, config.model, size).map_err(|_| {
                 ModelGatewayError::ProviderRequestInvalid(
                     "当前火山引擎模型不支持所选图片尺寸。".to_string(),
                 )
             })?;
+            if let Some(ratio) = scene_ratio {
+                let size_ratio = image_size_options(config.provider_profile_id, config.model)
+                    .into_iter()
+                    .find(|option| option.provider_value == size)
+                    .map(|option| option.ratio)
+                    .ok_or_else(|| {
+                        ModelGatewayError::ProviderRequestInvalid(
+                            "当前火山引擎模型不支持所选图片尺寸。".to_string(),
+                        )
+                    })?;
+                if size_ratio != ratio {
+                    return Err(ModelGatewayError::ProviderRequestInvalid(
+                        "场景图片尺寸必须与任务比例一致。".to_string(),
+                    ));
+                }
+            }
         }
+        let mapped_scene_size = if explicit_size.is_none() {
+            if let Some(ratio) = scene_ratio {
+                let options = image_size_options(config.provider_profile_id, config.model);
+                let matching_option = if config.model == VOLCENGINE_SEEDREAM_5_PRO_MODEL {
+                    // Pro 尺寸表按 1K、2K 排列；真实生成默认使用同一比例的 2K 档。
+                    options.iter().rev().find(|option| option.ratio == ratio)
+                } else {
+                    options.iter().find(|option| option.ratio == ratio)
+                };
+                Some(
+                    matching_option
+                        .ok_or_else(|| {
+                            ModelGatewayError::ProviderRequestInvalid(
+                                "当前火山引擎模型不支持所选场景图片比例。".to_string(),
+                            )
+                        })?
+                        .provider_value
+                        .clone(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut body = json!({
             "model": config.model,
             "prompt": prompt.roleless,
-            "size": explicit_size.unwrap_or("2K"),
+            "size": explicit_size
+                .map(str::to_string)
+                .or(mapped_scene_size)
+                .unwrap_or_else(|| "2K".to_string()),
             "response_format": "url",
             "watermark": false,
         });
+        if supports_seedream_single_image_options(config.model) {
+            body["sequential_image_generation"] = Value::String("disabled".to_string());
+            body["stream"] = Value::Bool(false);
+        }
         match images.as_slice() {
             [] => {}
             [image] => {

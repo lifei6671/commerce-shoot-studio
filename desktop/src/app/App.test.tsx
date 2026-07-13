@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { App } from "./App";
+import { App, createSceneRetryTaskInput } from "./App";
 import { selectProductImages } from "../features/generation/lib/productImagePicker";
 import { PreviewCanvas } from "../features/generation/components/PreviewCanvas";
 import { GenerationHistoryPopover } from "../features/history/components/GenerationHistoryPopover";
@@ -21,6 +21,34 @@ it("keeps task polling alive beyond the longest provider timeout", async () => {
 
   expect(pollingWindow).toBe(360_000);
   expect(pollingWindow).toBeGreaterThan(300_000);
+});
+
+it("inherits the complete frozen scene contract for a single-image retry", () => {
+  const input = createSceneRetryTaskInput(
+    {
+      campaignStyleLock: "统一暖白色板",
+      conversionDriver: "pain-point",
+      generationPromptVersion: "v7",
+      outputMode: "detail-pack",
+      planningPromptVersion: "v10",
+      ratio: "9:16",
+      templateCatalogVersion: "v5",
+    },
+    { imageId: "scene-d3", imageNo: 3, prompt: "机制解释", sortOrder: 2 },
+    { imageNo: 3, parentTaskId: "task-parent", retrySequence: 2, targetImageId: "scene-d3" },
+  );
+
+  expect(input).toMatchObject({
+    conversionDriver: "pain-point",
+    generationPromptVersion: "v7",
+    outputMode: "detail-pack",
+    planningPromptVersion: "v10",
+    ratio: "9:16",
+    templateCatalogVersion: "v5",
+  });
+  expect(input.items).toEqual([
+    expect.objectContaining({ imageId: "scene-d3", imageNo: 3, sortOrder: 0 }),
+  ]);
 });
 
 const tauriEventMock = vi.hoisted(() => {
@@ -54,6 +82,23 @@ const saveMock = vi.mocked(save);
 const aiWritingSuggestionPattern = /产品名称：黑色休闲翻领长袖衬衫/;
 const aiWritingDisclaimerAcceptedStorageKey = "commerce-shoot-studio.ai-writing-disclaimer.accepted.v1";
 
+const sceneVisualFullPackFixture = [
+  ["H1", "hero-image", "首屏主视觉", "一眼可懂的视觉主张"],
+  ["H2", "flat-lay", "核心功能或质感特写", "核心功能或质感特写"],
+  ["H3", "storefront", "典型使用场景", "典型使用场景匹配"],
+  ["H4", "before-after", "可观察对比", "普通方案与升级方案的可观察对比"],
+  ["H5", "seasonal-campaign", "行动引导", "仅使用已有证据的优惠、保障或行动引导"],
+  ["D1", "poster-banner", "详情页首屏", "承接主图卖点并说明适用对象与核心问题"],
+  ["D2", "ugc-style", "痛点放大", "放大用户当前的不便、损失或风险"],
+  ["D3", "exploded-view", "机制解释", "用可视结构解释产品如何发挥作用"],
+  ["D4", "infographic", "核心利益", "把二至四个可证实的核心利益做成易扫读内容"],
+  ["D5", "size-spec", "使用步骤", "用三至四步降低使用或测量理解成本"],
+  ["D6", "lifestyle-scene", "场景覆盖", "覆盖典型使用场景、适用对象或状态"],
+  ["D7", "multi-angle-grid", "对比选择", "对比普通方案与本产品的可观察差异"],
+  ["D8", "detail-macro", "信任背书", "用材料、工艺、包装或保障等已有证据建立信任"],
+  ["D9", "social-media", "FAQ / 风险逆转 / CTA", "回答残留疑虑并给出风险逆转或行动引导"],
+] as const;
+
 const appTestProviderProfiles = [
   {
     baseUrl: "mock://local",
@@ -67,9 +112,11 @@ const appTestProviderProfiles = [
       "prompt-plan",
       "product-selling-points",
       "clothing-scene-planning",
+      "scene-prompt-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
+      "clothing-base-model-generation",
       "clothing-tryon-generation",
       "image-edit",
     ],
@@ -88,9 +135,11 @@ const appTestProviderProfiles = [
       "prompt-plan",
       "product-selling-points",
       "clothing-scene-planning",
+      "scene-prompt-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
+      "clothing-base-model-generation",
       "clothing-tryon-generation",
       "image-edit",
     ],
@@ -109,9 +158,11 @@ const appTestProviderProfiles = [
       "prompt-plan",
       "product-selling-points",
       "clothing-scene-planning",
+      "scene-prompt-planning",
       "viral-style-analysis",
       "scene-image-generation",
       "product-detail-generation",
+      "clothing-base-model-generation",
       "clothing-tryon-generation",
       "image-edit",
     ],
@@ -163,7 +214,9 @@ const appTestModelConfigs = [
   appTestModelConfig("prompt-plan", "OpenAI 场景描述", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("product-selling-points", "OpenAI 商品卖点提取", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("clothing-scene-planning", "OpenAI 服饰场景规划", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
+  appTestModelConfig("scene-prompt-planning", "OpenAI 场景图片规划", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
   appTestModelConfig("scene-image-generation", "OpenAI 文生图", "gpt-image-2", "https://api.openai.com/v1/images"),
+  appTestModelConfig("clothing-base-model-generation", "OpenAI 服饰基准模特", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("clothing-tryon-generation", "OpenAI 图生图", "gpt-image-2", "https://api.openai.com/v1/images"),
   appTestModelConfig("image-edit", "OpenAI 图片编辑", "gpt-image-1", "https://api.openai.com/v1/images"),
   appTestModelConfig("viral-style-analysis", "OpenAI 文生文", "gpt-5.5", "https://api.openai.com/v1", "/responses"),
@@ -469,7 +522,10 @@ describe("App shell", () => {
         const input = (args as { input?: { idempotencyKey?: string; input?: { kind?: string }; kind?: string; workspace?: string } } | undefined)?.input;
         const taskInputKind = input?.input?.kind;
         const taskIdKind =
-          taskInputKind === "clothing-scene-planning" || taskInputKind === "clothing-tryon-generation"
+          taskInputKind === "clothing-scene-planning" ||
+          taskInputKind === "clothing-tryon-generation" ||
+          taskInputKind === "scene-prompt-planning" ||
+          taskInputKind === "scene-image-generation"
             ? taskInputKind
             : input?.kind;
         const id = input?.idempotencyKey?.includes("listing-copy")
@@ -499,6 +555,38 @@ describe("App shell", () => {
       }
       if (command === "generation_get_task_detail") {
         const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId.includes("scene-prompt-planning")) {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            output: {
+              campaignStyleLock: "固定暖白色板、中性棚拍光与统一无衬线字体。",
+              conversionDriver: "visual",
+              items: sceneVisualFullPackFixture.map(([code, templateId, title, purpose], index) => ({
+                code,
+                imageId: `scene-${code.toLowerCase()}`,
+                imageNo: index + 1,
+                negativeConstraints: "禁止新增或篡改 Logo，禁止虚构参数。",
+                prompt: `${code} ${title}，陶瓷保温杯，固定色板。`,
+                promptSummary: `${title}，陶瓷保温杯置于画面核心区域。`,
+                purpose,
+                ratio: "1:1",
+                sortOrder: index,
+                templateId,
+                title,
+                variantId: "minimal",
+              })),
+              templateCatalogVersion: "v5",
+            },
+            outputAssets: [],
+            task: {
+              id: taskId,
+              kind: "prompt-plan",
+              stage: "completed",
+              status: "succeeded",
+            },
+          });
+        }
         if (taskId.includes("clothing-scene-planning")) {
           return Promise.resolve({
             events: [],
@@ -1356,6 +1444,1103 @@ describe("App shell", () => {
     expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
       taskId: "task_persisted_listing_copy_retry",
     });
+  });
+
+  it("restores scene reference images as the first result card without changing the generated count", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        return Promise.resolve({
+          items: [
+            {
+              attemptNo: 1,
+              completedAt: "2026-07-02T11:00:00.000Z",
+              createdAt: "2026-07-02T10:59:00.000Z",
+              id: "task_persisted_scene",
+              kind: "image-generation",
+              promptPlanId: "task_persisted_scene_plan",
+              stage: "completed",
+              status: "succeeded",
+              title: "场景图片",
+              updatedAt: "2026-07-02T11:00:00.000Z",
+              workspace: "scene",
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        });
+      }
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId === "task_persisted_scene") {
+          return Promise.resolve({
+            events: [],
+            input: {
+              items: [
+                {
+                  code: "S1",
+                  imageId: "scene-s1",
+                  imageNo: 1,
+                  prompt: "Magazine editorial portrait",
+                  purpose: "杂志人物大片",
+                  ratio: "3:4",
+                  sortOrder: 0,
+                  title: "杂志人物大片",
+                },
+              ],
+              kind: "scene-image-generation",
+              outputMode: "single",
+              ratio: "3:4",
+            },
+            inputAssets: [
+              {
+                asset: {
+                  id: "asset_scene_reference",
+                  localPath: "/workspace/current/assets/source/person.png",
+                  originalName: "person.png",
+                  relativePath: "assets/source/person.png",
+                  url: "asset://localhost/workspace/current/assets/source/person.png",
+                },
+                role: "reference",
+                sortOrder: 0,
+              },
+            ],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_scene_output",
+                  localPath: "/workspace/current/assets/generated/scene-s1.jpeg",
+                  relativePath: "assets/generated/scene-s1.jpeg",
+                  url: "asset://localhost/workspace/current/assets/generated/scene-s1.jpeg",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              createdAt: "2026-07-02T10:59:00.000Z",
+              id: taskId,
+              kind: "image-generation",
+              promptPlanId: "task_persisted_scene_plan",
+              stage: "completed",
+              status: "succeeded",
+              title: "场景图片",
+              updatedAt: "2026-07-02T11:00:00.000Z",
+              workspace: "scene",
+            },
+          });
+        }
+      }
+      return baseInvoke?.(command, args) ?? Promise.resolve(undefined);
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", expect.any(Object)));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    expect(within(historyDialog).getByText("1 张")).toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+
+    const resultGrid = screen.getByTestId("generated-result-grid");
+    const resultCards = within(resultGrid).getAllByRole("article");
+    const sourceCard = within(resultGrid).getByTestId("generated-source-image-card");
+    expect(resultCards[0]).toBe(sourceCard);
+    expect(within(sourceCard).getByRole("img", { name: "person.png" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("/workspace/current/assets/source/person.png"),
+    );
+    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "S1 杂志人物大片" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("/workspace/current/assets/generated/scene-s1.jpeg"),
+    );
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(screen.getByRole("button", { name: "删除记录 场景图片" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: "task_persisted_scene_plan",
+      }),
+    );
+  });
+
+  it.each([
+    { initialStage: "calling-provider", initialStatus: "running", shouldStart: false },
+    { initialStage: "queued", initialStatus: "queued", shouldStart: true },
+  ] as const)("continues polling a restored $initialStatus scene parent task", async ({
+    initialStage,
+    initialStatus,
+    shouldStart,
+  }) => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const taskId = `task_scene_${initialStatus}_restore`;
+    const now = new Date().toISOString();
+    let detailCalls = 0;
+    const task = {
+      attemptNo: 1,
+      createdAt: now,
+      id: taskId,
+      kind: "image-generation",
+      stage: initialStage,
+      status: initialStatus,
+      title: "恢复中的场景图片",
+      updatedAt: now,
+      workspace: "scene",
+    };
+    const input = {
+      items: [
+        {
+          code: "S1",
+          imageId: "scene-running-s1",
+          imageNo: 1,
+          prompt: "运行中的场景 prompt",
+          purpose: "运行中的场景",
+          ratio: "3:4",
+          sortOrder: 0,
+          title: "运行中的场景",
+        },
+      ],
+      kind: "scene-image-generation",
+      outputMode: "single",
+      ratio: "3:4",
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const requestedTaskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail" && requestedTaskId === taskId) {
+        detailCalls += 1;
+        const completed = detailCalls >= (shouldStart ? 3 : 2);
+        return Promise.resolve({
+          events: [],
+          input,
+          inputAssets: [],
+          outputAssets: completed
+            ? [
+                {
+                  asset: {
+                    id: "asset_scene_running_restored",
+                    localPath: "/workspace/current/assets/generated/scene-running-restored.png",
+                    relativePath: "assets/generated/scene-running-restored.png",
+                  },
+                  role: "output",
+                  sortOrder: 0,
+                },
+              ]
+            : [],
+          task: completed
+            ? { ...task, completedAt: now, stage: "completed", status: "succeeded", updatedAt: now }
+            : task,
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    await waitFor(() => expect(within(historyDialog).getByText("已完成")).toBeInTheDocument(), { timeout: 2_000 });
+    if (shouldStart) {
+      expect(invokeMock).toHaveBeenCalledWith("generation_run_task", { taskId });
+      expect(
+        invokeMock.mock.calls.filter(
+          ([command, args]) => command === "generation_run_task" && (args as { taskId?: string })?.taskId === taskId,
+        ),
+      ).toHaveLength(1);
+    } else {
+      expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", { taskId });
+    }
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+    expect(screen.getByRole("img", { name: "S1 运行中的场景" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("scene-running-restored.png"),
+    );
+  });
+
+  it("keeps a restored scene parent polling after a new scene planning request starts", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const taskId = "task_scene_restore_survives_new_plan";
+    const now = new Date().toISOString();
+    let detailCalls = 0;
+    let resolveRestoredPoll: ((detail: Record<string, unknown>) => void) | undefined;
+    const task = {
+      attemptNo: 1,
+      createdAt: now,
+      id: taskId,
+      kind: "image-generation",
+      stage: "calling-provider",
+      status: "running",
+      title: "独立恢复的场景图片",
+      updatedAt: now,
+      workspace: "scene",
+    };
+    const input = {
+      items: [
+        {
+          code: "S1",
+          imageId: "scene-independent-s1",
+          imageNo: 1,
+          prompt: "独立恢复 prompt",
+          purpose: "独立恢复场景",
+          ratio: "3:4",
+          sortOrder: 0,
+          title: "独立恢复场景",
+        },
+      ],
+      kind: "scene-image-generation",
+      outputMode: "single",
+      ratio: "3:4",
+    };
+    const runningDetail = { events: [], input, inputAssets: [], outputAssets: [], task };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const requestedTaskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail" && requestedTaskId === taskId) {
+        detailCalls += 1;
+        if (detailCalls === 1) {
+          return Promise.resolve(runningDetail);
+        }
+        return new Promise((resolve) => {
+          resolveRestoredPoll = resolve;
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/new-plan.png",
+        name: "new-plan.png",
+        path: "/Users/demo/Pictures/new-plan.png",
+        src: "asset://new-plan.png",
+      },
+    ]);
+
+    renderApp();
+
+    await waitFor(() => expect(resolveRestoredPoll).toBeDefined());
+    await user.click(screen.getByRole("button", { name: "场景" }));
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+    await user.click(screen.getByRole("button", { name: "完整图片包（14 张）" }));
+    await user.type(screen.getByRole("textbox", { name: "补充信息" }), "新场景规划");
+    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+    await waitFor(() => expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14));
+
+    await act(async () => {
+      resolveRestoredPoll?.({
+        ...runningDetail,
+        outputAssets: [
+          {
+            asset: {
+              id: "asset_scene_independent_complete",
+              localPath: "/workspace/current/assets/generated/scene-independent-complete.png",
+              relativePath: "assets/generated/scene-independent-complete.png",
+            },
+            role: "output",
+            sortOrder: 0,
+          },
+        ],
+        task: { ...task, completedAt: now, stage: "completed", status: "succeeded", updatedAt: now },
+      });
+    });
+
+    expect(screen.queryByRole("img", { name: "S1 独立恢复场景" })).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14);
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    await waitFor(() => expect(within(historyDialog).getByText("已完成")).toBeInTheDocument());
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+    expect(screen.getByRole("img", { name: "S1 独立恢复场景" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("scene-independent-complete.png"),
+    );
+  });
+
+  it("continues a restored running scene retry and merges its result into the parent slot", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const parentTaskId = "task_scene_running_retry_parent";
+    const retryTaskId = "task_scene_running_retry_child";
+    const now = new Date().toISOString();
+    let retryDetailCalls = 0;
+    let replaced = false;
+    const parentTask = {
+      attemptNo: 1,
+      completedAt: now,
+      createdAt: now,
+      id: parentTaskId,
+      kind: "image-generation",
+      promptPlanId: "task_scene_running_retry_plan",
+      stage: "completed",
+      status: "succeeded",
+      title: "重试恢复父任务",
+      updatedAt: now,
+      workspace: "scene",
+    };
+    const retryTask = {
+      attemptNo: 1,
+      createdAt: now,
+      id: retryTaskId,
+      kind: "image-generation",
+      promptPlanId: "task_scene_running_retry_plan",
+      stage: "calling-provider",
+      status: "running",
+      title: "重新生成 S1 重试恢复图",
+      updatedAt: now,
+      workspace: "scene",
+    };
+    const parentInput = {
+      items: [
+        {
+          code: "S1",
+          imageId: "scene-running-retry-s1",
+          imageNo: 1,
+          prompt: "父任务 prompt",
+          purpose: "父任务场景",
+          ratio: "3:4",
+          sortOrder: 0,
+          title: "重试恢复图",
+        },
+      ],
+      kind: "scene-image-generation",
+      outputMode: "single",
+      ratio: "3:4",
+    };
+    const retryInput = {
+      ...parentInput,
+      items: [{ ...parentInput.items[0], sortOrder: 0 }],
+      parentTaskId,
+      retrySequence: 1_783_861_000_000,
+      singleImageRetry: true,
+      targetImageId: "scene-running-retry-s1",
+    };
+    const outputAsset = (id: string, filename: string) => ({
+      asset: {
+        id,
+        localPath: `/workspace/current/assets/generated/${filename}`,
+        relativePath: `assets/generated/${filename}`,
+      },
+      role: "output",
+      sortOrder: 0,
+    });
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [retryTask, parentTask] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail" && taskId === parentTaskId) {
+        return Promise.resolve({
+          events: [],
+          input: parentInput,
+          inputAssets: [],
+          outputAssets: [
+            replaced
+              ? outputAsset("asset_scene_running_retry_new", "scene-running-retry-new.png")
+              : outputAsset("asset_scene_running_retry_old", "scene-running-retry-old.png"),
+          ],
+          task: parentTask,
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === retryTaskId) {
+        retryDetailCalls += 1;
+        const completed = retryDetailCalls >= 2;
+        return Promise.resolve({
+          events: [],
+          input: retryInput,
+          inputAssets: [],
+          outputAssets: completed
+            ? [outputAsset("asset_scene_running_retry_new", "scene-running-retry-new.png")]
+            : [],
+          task: completed
+            ? { ...retryTask, completedAt: now, stage: "completed", status: "succeeded", updatedAt: now }
+            : retryTask,
+        });
+      }
+      if (command === "generation_replace_result_image") {
+        replaced = true;
+        return Promise.resolve({ replaced: true });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    await waitFor(() => expect(within(historyDialog).getByText("已完成")).toBeInTheDocument());
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", { taskId: retryTaskId });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "generation_replace_result_image",
+      expect.objectContaining({
+        input: expect.objectContaining({
+          replacementTaskId: retryTaskId,
+          taskId: parentTaskId,
+        }),
+      }),
+    );
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+    expect(screen.getByRole("img", { name: "S1 重试恢复图" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("scene-running-retry-new.png"),
+    );
+  });
+
+  it("restores a succeeded scene single-image retry under its parent record", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const parentTaskId = "task_scene_retry_restore_parent";
+    const retryTaskId = "task_scene_retry_restore_child";
+    const promptPlanTaskId = "task_scene_retry_restore_plan";
+    const parentTask = {
+      completedAt: "2026-07-12T11:00:10.000Z",
+      createdAt: "2026-07-12T11:00:00.000Z",
+      error: { code: "IMAGE_GENERATION_FAILED", message: "生成失败", retryable: true },
+      id: parentTaskId,
+      kind: "image-generation",
+      promptPlanId: promptPlanTaskId,
+      stage: "failed",
+      status: "failed",
+      title: "历史场景图片",
+      updatedAt: "2026-07-12T11:00:10.000Z",
+      workspace: "scene",
+    };
+    const retryTask = {
+      completedAt: "2026-07-12T12:00:10.000Z",
+      createdAt: "2026-07-12T12:00:00.000Z",
+      id: retryTaskId,
+      kind: "image-generation",
+      promptPlanId: promptPlanTaskId,
+      stage: "completed",
+      status: "succeeded",
+      title: "重新生成 S1 重试后场景标题",
+      updatedAt: "2026-07-12T12:00:10.000Z",
+      workspace: "scene",
+    };
+    const parentDetail = {
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: "父任务旧 prompt",
+            purpose: "父任务旧 purpose",
+            ratio: "3:4",
+            sortOrder: 0,
+            title: "父任务旧标题",
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        ratio: "3:4",
+      },
+      inputAssets: [],
+      outputAssets: [],
+      task: parentTask,
+    };
+    const retryDetail = {
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: "重试成功后的 Scene prompt",
+            purpose: "重试成功后的 Scene purpose",
+            ratio: "3:4",
+            sortOrder: 0,
+            title: "重试后场景标题",
+          },
+        ],
+        kind: "scene-image-generation",
+        parentTaskId,
+        retrySequence: 1_783_860_000_000,
+        singleImageRetry: true,
+        targetImageId: "scene-s1",
+      },
+      inputAssets: [],
+      outputAssets: [
+        {
+          asset: {
+            id: "asset_scene_retry_restored",
+            localPath: "/workspace/current/assets/generated/scene-retry-restored.png",
+            relativePath: "assets/generated/scene-retry-restored.png",
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: retryTask,
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [retryTask, parentTask] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        return Promise.resolve(taskId === retryTaskId ? retryDetail : parentDetail);
+      }
+      if (command === "generation_delete_task") {
+        return Promise.resolve({ deleted: true });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    expect(screen.getByText("1 条本地记录")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+
+    const restoredCard = screen.getByTestId("generated-detail-image-card");
+    expect(within(restoredCard).getByRole("img", { name: "S1 重试后场景标题" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("scene-retry-restored.png"),
+    );
+    expect(restoredCard).toHaveAttribute("data-prompt", "重试成功后的 Scene prompt");
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(screen.getByRole("button", { name: "删除记录 历史场景图片" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: retryTaskId,
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", { taskId: parentTaskId });
+    expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", { taskId: promptPlanTaskId });
+  });
+
+  it.each([
+    { retryStage: "failed", retryStatus: "failed", statusLabel: "已完成" },
+    { retryStage: "running", retryStatus: "running", statusLabel: "生成中" },
+  ] as const)("restores a $retryStatus scene retry over a completed parent image", async ({
+    retryStage,
+    retryStatus,
+    statusLabel,
+  }) => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const retryTimestamp = new Date().toISOString();
+    const parentTaskId = "task_scene_failed_retry_restore_parent";
+    const retryTaskId = "task_scene_failed_retry_restore_child";
+    const parentTask = {
+      completedAt: "2026-07-12T11:00:10.000Z",
+      createdAt: "2026-07-12T11:00:00.000Z",
+      id: parentTaskId,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+      title: "已有成功图的场景任务",
+      updatedAt: "2026-07-12T11:00:10.000Z",
+      workspace: "scene",
+    };
+    const retryTask = {
+      ...(retryStatus === "failed"
+        ? {
+            completedAt: retryTimestamp,
+            error: { code: "IMAGE_GENERATION_FAILED", message: "重新生成失败", retryable: true },
+          }
+        : {}),
+      createdAt: retryTimestamp,
+      id: retryTaskId,
+      kind: "image-generation",
+      stage: retryStage,
+      status: retryStatus,
+      title: "重新生成 S1 已有成功图",
+      updatedAt: retryTimestamp,
+      workspace: "scene",
+    };
+    const parentDetail = {
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: "父任务成功 prompt",
+            purpose: "父任务成功 purpose",
+            ratio: "3:4",
+            sortOrder: 0,
+            title: "已有成功图",
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        ratio: "3:4",
+      },
+      inputAssets: [],
+      outputAssets: [
+        {
+          asset: {
+            id: "asset_scene_parent_complete",
+            localPath: "/workspace/current/assets/generated/scene-parent-complete.png",
+            relativePath: "assets/generated/scene-parent-complete.png",
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: parentTask,
+    };
+    const retryDetail = {
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: "失败重试 prompt",
+            purpose: "失败重试 purpose",
+            ratio: "3:4",
+            sortOrder: 0,
+            title: "已有成功图",
+          },
+        ],
+        kind: "scene-image-generation",
+        parentTaskId,
+        retrySequence: 1_783_860_100_000,
+        singleImageRetry: true,
+        targetImageId: "scene-s1",
+      },
+      inputAssets: [],
+      outputAssets: [],
+      task: retryTask,
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [retryTask, parentTask] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        return Promise.resolve(taskId === retryTaskId ? retryDetail : parentDetail);
+      }
+      if (command === "generation_delete_task") {
+        return Promise.resolve({ deleted: true });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    expect(screen.getByText(statusLabel)).toBeInTheDocument();
+    if (retryStatus === "failed") {
+      await user.click(within(historyDialog).getByRole("button", { name: "打开" }));
+      expect(screen.getByRole("img", { name: "S1 已有成功图" })).toHaveAttribute(
+        "src",
+        expect.stringContaining("scene-parent-complete.png"),
+      );
+      await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    } else {
+      expect(screen.queryByText("已完成")).not.toBeInTheDocument();
+    }
+
+    await user.click(screen.getByRole("button", { name: "删除记录 已有成功图的场景任务" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", {
+        taskId: retryTaskId,
+      }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("generation_delete_task", { taskId: parentTaskId });
+  });
+
+  it("scopes scene image deletion to the history record currently being viewed", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    const createSceneDetail = (taskId: string, title: string, assetId: string) => ({
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: `${title} prompt`,
+            purpose: title,
+            ratio: "3:4",
+            sortOrder: 0,
+            title,
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        ratio: "3:4",
+      },
+      inputAssets: [],
+      outputAssets: [
+        {
+          asset: {
+            id: assetId,
+            localPath: `/workspace/current/assets/generated/${taskId}.png`,
+            relativePath: `assets/generated/${taskId}.png`,
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: {
+        completedAt: taskId.includes("new") ? "2026-07-12T12:00:10.000Z" : "2026-07-12T11:00:10.000Z",
+        createdAt: taskId.includes("new") ? "2026-07-12T12:00:00.000Z" : "2026-07-12T11:00:00.000Z",
+        id: taskId,
+        kind: "image-generation",
+        promptPlanId: `${taskId}-plan`,
+        stage: "completed",
+        status: "succeeded",
+        title,
+        updatedAt: taskId.includes("new") ? "2026-07-12T12:00:10.000Z" : "2026-07-12T11:00:10.000Z",
+        workspace: "scene",
+      },
+    });
+    const newest = createSceneDetail("task_scene_new", "新场景图片", "asset_scene_new");
+    const older = createSceneDetail("task_scene_old", "旧场景图片", "asset_scene_old");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const items = workspace === "scene" ? [newest.task, older.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        return Promise.resolve(
+          (args as { taskId?: string } | undefined)?.taskId === older.task.id ? older : newest,
+        );
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("2"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByText("旧场景图片").closest("button") as HTMLButtonElement);
+    const restoredCard = screen.getByTestId("generated-detail-image-card");
+    await user.hover(restoredCard);
+    await user.click(within(restoredCard).getByRole("button", { name: "删除 S1 旧场景图片" }));
+    await user.click(within(screen.getByRole("dialog", { name: "删除图片" })).getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_delete_result_image",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            assetId: "asset_scene_old",
+            imageId: "scene-s1",
+            taskId: "task_scene_old",
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("tracks scene retry tasks with a restart-safe sequence so workspace reset cancels them", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Date, "now").mockReturnValue(1_783_860_000_000);
+    const baseInvoke = invokeMock.getMockImplementation();
+    const parentDetail = {
+      events: [],
+      input: {
+        campaignStyleLock: "",
+        conversionDriver: "visual",
+        generationPromptVersion: "v7",
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            negativeConstraints: "禁止虚构信息",
+            prompt: "历史失败场景 prompt",
+            promptSummary: "历史失败场景摘要",
+            purpose: "历史失败场景",
+            ratio: "3:4",
+            sortOrder: 0,
+            templateId: "hero-image",
+            title: "历史失败场景",
+            variantId: "base",
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        planningPromptVersion: "v10",
+        ratio: "3:4",
+        templateCatalogVersion: "v5",
+      },
+      inputAssets: [
+        {
+          asset: {
+            id: "asset_scene_reference",
+            localPath: "/workspace/current/assets/source/cup.png",
+            relativePath: "assets/source/cup.png",
+          },
+          role: "reference",
+          sortOrder: 0,
+        },
+      ],
+      outputAssets: [],
+      task: {
+        completedAt: "2026-07-12T11:00:10.000Z",
+        createdAt: "2026-07-12T11:00:00.000Z",
+        error: { code: "IMAGE_GENERATION_FAILED", message: "生成失败", retryable: true },
+        id: "task_scene_retry_parent",
+        kind: "image-generation",
+        promptPlanId: "task_scene_retry_plan",
+        stage: "failed",
+        status: "failed",
+        title: "历史失败场景图片",
+        updatedAt: "2026-07-12T11:00:10.000Z",
+        workspace: "scene",
+      },
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      const taskInput = (args as { input?: { input?: Record<string, unknown> } } | undefined)?.input?.input;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [parentDetail.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail" && taskId === parentDetail.task.id) {
+        return Promise.resolve(parentDetail);
+      }
+      if (command === "generation_create_task" && taskInput?.singleImageRetry === true) {
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-12T12:00:00.000Z",
+          id: "task_scene_retry_child",
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "重新生成 S1 历史失败场景",
+          updatedAt: "2026-07-12T12:00:00.000Z",
+          workspace: "scene",
+        });
+      }
+      if (command === "generation_run_task" && taskId === "task_scene_retry_child") {
+        return new Promise(() => undefined);
+      }
+      if (command === "generation_cancel_task") {
+        return Promise.resolve({ cancelled: true });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "生成记录" }))
+        .getByText("历史失败场景图片")
+        .closest("button") as HTMLButtonElement,
+    );
+    const failedCard = screen.getByTestId("failed-result-card");
+    await user.hover(failedCard);
+    await user.click(within(failedCard).getByRole("button", { name: "重试 S1 历史失败场景" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            idempotencyKey: "task_scene_retry_parent:scene-s1:scene-retry:1783860000000",
+            input: expect.objectContaining({ retrySequence: 1_783_860_000_000 }),
+          }),
+        }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", {
+        taskId: "task_scene_retry_child",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const cancelledRetryRow = within(screen.getByRole("dialog", { name: "生成记录" }))
+      .getByText("历史失败场景图片")
+      .closest(".group") as HTMLElement;
+    expect(within(cancelledRetryRow).getByText("失败")).toBeInTheDocument();
+    expect(within(cancelledRetryRow).queryByText("生成中")).not.toBeInTheDocument();
+  });
+
+  it("does not replace a scene result after reset while resolving the persisted parent asset", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let parentDetailReads = 0;
+    let resolvePersistedLookup: ((detail: Record<string, unknown>) => void) | undefined;
+    const parentDetail = {
+      events: [],
+      input: {
+        campaignStyleLock: "",
+        conversionDriver: "visual",
+        generationPromptVersion: "v7",
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            negativeConstraints: "禁止虚构信息",
+            prompt: "等待父槽位场景 prompt",
+            promptSummary: "等待父槽位场景摘要",
+            purpose: "等待父槽位场景",
+            ratio: "3:4",
+            sortOrder: 0,
+            templateId: "hero-image",
+            title: "等待父槽位场景",
+            variantId: "base",
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        planningPromptVersion: "v10",
+        ratio: "3:4",
+        templateCatalogVersion: "v5",
+      },
+      inputAssets: [
+        {
+          asset: {
+            id: "asset_scene_reference",
+            localPath: "/workspace/current/assets/source/cup.png",
+            relativePath: "assets/source/cup.png",
+          },
+          role: "reference",
+          sortOrder: 0,
+        },
+      ],
+      outputAssets: [],
+      task: {
+        completedAt: "2026-07-12T11:00:10.000Z",
+        createdAt: "2026-07-12T11:00:00.000Z",
+        error: { code: "IMAGE_GENERATION_FAILED", message: "生成失败", retryable: true },
+        id: "task_scene_replace_parent",
+        kind: "image-generation",
+        promptPlanId: "task_scene_replace_plan",
+        stage: "failed",
+        status: "failed",
+        title: "等待父槽位场景图片",
+        updatedAt: "2026-07-12T11:00:10.000Z",
+        workspace: "scene",
+      },
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      const taskInput = (args as { input?: { input?: Record<string, unknown> } } | undefined)?.input?.input;
+      if (command === "generation_list_tasks") {
+        const items = workspace === "scene" ? [parentDetail.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail" && taskId === parentDetail.task.id) {
+        parentDetailReads += 1;
+        if (parentDetailReads >= 3) {
+          return new Promise((resolve) => {
+            resolvePersistedLookup = resolve;
+          });
+        }
+        return Promise.resolve(parentDetail);
+      }
+      if (command === "generation_create_task" && taskInput?.singleImageRetry === true) {
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-12T12:00:00.000Z",
+          id: "task_scene_replace_child",
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "重新生成 S1 等待父槽位场景",
+          updatedAt: "2026-07-12T12:00:00.000Z",
+          workspace: "scene",
+        });
+      }
+      if (command === "generation_run_task" && taskId === "task_scene_replace_child") {
+        return Promise.resolve({ invocationId: "inv_scene_replace_child", taskId });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_scene_replace_child") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_scene_replacement",
+                localPath: "/workspace/current/assets/generated/scene-replacement.png",
+                relativePath: "assets/generated/scene-replacement.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-generation",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "scene",
+          },
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+    await waitFor(() => expect(screen.getByRole("button", { name: /生成记录/ })).toHaveTextContent("1"));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "生成记录" }))
+        .getByText("等待父槽位场景图片")
+        .closest("button") as HTMLButtonElement,
+    );
+    const failedCard = screen.getByTestId("failed-result-card");
+    await user.hover(failedCard);
+    await user.click(within(failedCard).getByRole("button", { name: "重试 S1 等待父槽位场景" }));
+    await waitFor(() => expect(resolvePersistedLookup).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+    await act(async () => {
+      resolvePersistedLookup?.(parentDetail);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_replace_result_image", expect.any(Object));
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const resetParentRow = within(screen.getByRole("dialog", { name: "生成记录" }))
+      .getByText("等待父槽位场景图片")
+      .closest(".group") as HTMLElement;
+    expect(within(resetParentRow).getByText("失败")).toBeInTheDocument();
+    expect(within(resetParentRow).queryByText("生成中")).not.toBeInTheDocument();
   });
 
   it("loads later clothing history pages when auxiliary tasks fill the first page", async () => {
@@ -3317,7 +4502,13 @@ describe("App shell", () => {
     await user.click(screen.getAllByTestId("generated-detail-image-card")[0]);
 
     const lightbox = screen.getByRole("dialog", { name: "图片相册预览" });
-    expect(within(lightbox).getByRole("img", { name: "首屏主视觉" })).toHaveAttribute(
+    const previewFrame = within(lightbox).getByLabelText("预览 首屏主视觉");
+    const previewImage = within(lightbox).getByRole("img", { name: "首屏主视觉" });
+    expect(previewFrame).toHaveClass("max-h-[68vh]", "max-w-[70vw]", "bg-transparent");
+    expect(previewFrame).not.toHaveClass("h-[68vh]", "w-[min(68vh,70vw)]", "bg-slate-100");
+    expect(previewImage).toHaveClass("block", "h-auto", "w-auto", "max-h-[68vh]", "max-w-[70vw]", "object-contain");
+    expect(previewFrame.querySelector("[class*='radial-gradient']")).toBeNull();
+    expect(previewImage).toHaveAttribute(
       "src",
       "asset://localhost/workspace/current/assets/generated/hero.jpeg",
     );
@@ -9750,22 +10941,263 @@ describe("App shell", () => {
     await user.click(screen.getByRole("button", { name: "场景" }));
     await user.click(screen.getByRole("button", { name: "上传参考图" }));
     expect(await screen.findByAltText("cup.png")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "完整图片包" }));
+    await user.click(screen.getByRole("button", { name: "完整图片包（14 张）" }));
     await user.click(screen.getByRole("button", { name: "1:1" }));
-    await user.type(screen.getByPlaceholderText(/建议补充产品名称/), "陶瓷保温杯");
-    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+    await user.type(screen.getByRole("textbox", { name: "补充信息" }), "陶瓷保温杯");
+    fireEvent.click(screen.getByRole("button", { name: "生成图片方案" }));
 
-    expect(screen.getByRole("complementary", { name: "场景方案与 Prompt" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "场景方案" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "新建任务" }));
 
     expect(screen.getByRole("complementary", { name: "场景配置" })).toBeInTheDocument();
-    expect(screen.queryByRole("complementary", { name: "场景方案与 Prompt" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "场景方案" })).not.toBeInTheDocument();
     expect(screen.queryByAltText("cup.png")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "单张场景图" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "单张场景图（1 张）" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "3:4" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByPlaceholderText(/建议补充产品名称/)).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "补充信息" })).toHaveValue("");
     expect(screen.getByRole("button", { name: "请上传参考图" })).toBeDisabled();
+  });
+
+  it("cancels a scene image task created after the workspace request was invalidated", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolveGenerationCreate: ((task: Record<string, unknown>) => void) | undefined;
+    invokeMock.mockImplementation((command, args) => {
+      const taskKind = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind;
+      if (command === "generation_create_task" && taskKind === "scene-image-generation") {
+        return new Promise((resolve) => {
+          resolveGenerationCreate = resolve;
+        });
+      }
+      if (command === "generation_cancel_task") {
+        return Promise.resolve({ cancelled: true });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/cup.png",
+        name: "cup.png",
+        path: "/Users/demo/Pictures/cup.png",
+        src: "asset://cup.png",
+      },
+    ]);
+
+    renderApp();
+    await user.click(screen.getByRole("button", { name: "场景" }));
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+    await user.click(screen.getByRole("button", { name: "完整图片包（14 张）" }));
+    await user.type(screen.getByRole("textbox", { name: "补充信息" }), "陶瓷保温杯");
+    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+    await waitFor(() => expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14));
+    await user.click(screen.getByRole("button", { name: "开始生成图片" }));
+    await waitFor(() => expect(resolveGenerationCreate).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: "新建任务" }));
+    await act(async () => {
+      resolveGenerationCreate?.({
+        attemptNo: 1,
+        createdAt: "2026-07-12T12:00:00.000Z",
+        id: "task_scene_created_after_reset",
+        kind: "image-generation",
+        stage: "queued",
+        status: "queued",
+        title: "场景图片生成",
+        updatedAt: "2026-07-12T12:00:00.000Z",
+        workspace: "scene",
+      });
+    });
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("generation_cancel_task", {
+        taskId: "task_scene_created_after_reset",
+      }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("generation_run_task", {
+      taskId: "task_scene_created_after_reset",
+    });
+  });
+
+  it("keeps a viewed scene history record visible while another scene task finishes polling", async () => {
+    const user = userEvent.setup();
+    const baseInvoke = invokeMock.getMockImplementation();
+    let resolveLiveDetail: ((detail: Record<string, unknown>) => void) | undefined;
+    const historyDetail = {
+      events: [],
+      input: {
+        items: [
+          {
+            code: "S1",
+            imageId: "scene-s1",
+            imageNo: 1,
+            prompt: "历史场景 prompt",
+            purpose: "历史场景",
+            ratio: "3:4",
+            sortOrder: 0,
+            title: "历史场景",
+          },
+        ],
+        kind: "scene-image-generation",
+        outputMode: "single",
+        ratio: "3:4",
+      },
+      inputAssets: [],
+      outputAssets: [
+        {
+          asset: {
+            id: "asset_scene_history",
+            localPath: "/workspace/current/assets/generated/scene-history.png",
+            relativePath: "assets/generated/scene-history.png",
+          },
+          role: "output",
+          sortOrder: 0,
+        },
+      ],
+      task: {
+        completedAt: "2026-07-12T11:00:10.000Z",
+        createdAt: "2026-07-12T11:00:00.000Z",
+        id: "task_scene_history",
+        kind: "image-generation",
+        promptPlanId: "task_scene_history_plan",
+        stage: "completed",
+        status: "succeeded",
+        title: "历史场景图片",
+        updatedAt: "2026-07-12T11:00:10.000Z",
+        workspace: "scene",
+      },
+    };
+    invokeMock.mockImplementation((command, args) => {
+      const taskKind = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind;
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "generation_list_tasks") {
+        const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const items = workspace === "scene" ? [historyDetail.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_create_task" && taskKind === "scene-image-generation") {
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-12T12:00:00.000Z",
+          id: "task_scene_live",
+          kind: "image-generation",
+          stage: "queued",
+          status: "queued",
+          title: "场景图片生成",
+          updatedAt: "2026-07-12T12:00:00.000Z",
+          workspace: "scene",
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_scene_history") {
+        return Promise.resolve(historyDetail);
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_scene_live") {
+        return new Promise((resolve) => {
+          resolveLiveDetail = resolve;
+        });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/cup.png",
+        name: "cup.png",
+        path: "/Users/demo/Pictures/cup.png",
+        src: "asset://cup.png",
+      },
+    ]);
+
+    renderApp();
+    await user.click(screen.getByRole("button", { name: "场景" }));
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+    await user.click(screen.getByRole("button", { name: "完整图片包（14 张）" }));
+    await user.type(screen.getByRole("textbox", { name: "补充信息" }), "陶瓷保温杯");
+    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+    await waitFor(() => expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14));
+    await user.click(screen.getByRole("button", { name: "开始生成图片" }));
+    await waitFor(() => expect(resolveLiveDetail).toBeDefined());
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByText("历史场景图片").closest("button") as HTMLButtonElement);
+    expect(screen.getByRole("img", { name: "S1 历史场景" })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveLiveDetail?.({
+        events: [],
+        inputAssets: [],
+        outputAssets: Array.from({ length: 14 }, (_, index) => ({
+          asset: {
+            id: `asset_scene_live_${index + 1}`,
+            localPath: `/workspace/current/assets/generated/scene-live-${index + 1}.png`,
+            relativePath: `assets/generated/scene-live-${index + 1}.png`,
+          },
+          role: "output",
+          sortOrder: index,
+        })),
+        task: {
+          id: "task_scene_live",
+          kind: "image-generation",
+          stage: "completed",
+          status: "succeeded",
+          workspace: "scene",
+        },
+      });
+    });
+
+    await waitFor(() => expect(screen.getByRole("img", { name: "S1 历史场景" })).toBeInTheDocument());
+    expect(screen.queryByRole("img", { name: "H1 首屏主视觉" })).not.toBeInTheDocument();
+  });
+
+  it("returns to scene configuration when prompt planning validation fails", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "generation_get_task_detail") {
+        const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
+        if (taskId.includes("scene-prompt-planning")) {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            output: {},
+            outputAssets: [],
+            task: {
+              error: {
+                code: "SCENE_PROMPT_PLAN_OUTPUT_INVALID",
+                message: "场景规划结果校验失败：单图元数据不符合冻结配置。",
+                retryable: true,
+              },
+              id: taskId,
+              kind: "prompt-plan",
+              stage: "failed",
+              status: "failed",
+              workspace: "scene",
+            },
+          });
+        }
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+    selectProductImagesMock.mockResolvedValue([
+      {
+        id: "/Users/demo/Pictures/person.png",
+        name: "person.png",
+        path: "/Users/demo/Pictures/person.png",
+        src: "asset://person.png",
+      },
+    ]);
+
+    renderApp();
+    await user.click(screen.getByRole("button", { name: "场景" }));
+    await user.click(screen.getByRole("button", { name: "上传参考图" }));
+    expect(await screen.findByAltText("person.png")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "补充信息" }), "生成自然人物场景");
+    await user.click(screen.getByRole("button", { name: "生成图片方案" }));
+
+    expect(await screen.findByText(/场景方案生成失败：场景规划结果校验失败/)).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "场景配置" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "场景方案" })).not.toBeInTheDocument();
+    expect(screen.getByAltText("person.png")).toBeInTheDocument();
   });
 
   it("guides scene generation through reference images, prompt review, and image results", async () => {
@@ -9791,86 +11223,138 @@ describe("App shell", () => {
     expect(screen.getByRole("complementary", { name: "场景配置" })).toBeInTheDocument();
     expect(screen.getByRole("main", { name: "场景预览画布" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "请上传参考图" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "单张场景图" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "单张场景图（1 张）" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "3:4" })).toHaveAttribute("aria-pressed", "true");
-    const sceneCategoryTabs = screen.getByRole("tablist", { name: "场景分类" });
-    const baseProductSceneTab = screen.getByRole("tab", { name: "基础商品" });
-
-    expect(sceneCategoryTabs).toHaveClass("grid", "grid-cols-5");
-    expect(sceneCategoryTabs).not.toHaveClass("overflow-x-auto");
-    expect(baseProductSceneTab).toHaveClass("min-w-0", "truncate", "px-0.5", "text-[11px]");
-    expect(baseProductSceneTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "内容营销" })).toHaveAttribute("aria-selected", "false");
-    expect(screen.getAllByRole("radio")).toHaveLength(5);
-    expect(screen.getByRole("radio", { name: "白底主图" })).toBeChecked();
-    expect(screen.queryByRole("radio", { name: "运动 Campaign" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: "极简电商" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "内容营销" }));
-
-    expect(screen.getByRole("tab", { name: "内容营销" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getAllByRole("radio")).toHaveLength(6);
-    expect(screen.getByRole("radio", { name: "运动 Campaign" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("radio", { name: "运动 Campaign" }));
-
-    expect(screen.getByRole("radio", { name: "运动 Campaign" })).toBeChecked();
+    expect(screen.queryByRole("tablist", { name: "场景分类" })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(screen.getByRole("textbox", { name: "补充信息" })).toBeRequired();
 
     await user.click(screen.getByRole("button", { name: "上传参考图" }));
 
     expect(selectProductImagesMock).toHaveBeenCalledWith(3);
     expect(await screen.findByAltText("cup.png")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请填写补充信息" })).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "完整图片包" }));
-
-    expect(screen.queryByRole("tablist", { name: "场景分类" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: "白底主图" })).not.toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "极简电商" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "完整图片包（14 张）" }));
 
     await user.click(screen.getByRole("button", { name: "1:1" }));
     await user.type(
-      screen.getByPlaceholderText(/建议补充产品名称/),
-      "陶瓷保温杯，卖点是防滑杯套和通勤便携。",
+      screen.getByRole("textbox", { name: "补充信息" }),
+      "  陶瓷保温杯，卖点是防滑杯套和通勤便携。  ",
     );
 
-    vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "生成图片方案" }));
 
-    expect(screen.getByRole("complementary", { name: "场景方案与 Prompt" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "场景方案" })).toBeInTheDocument();
     expect(screen.getByText("方案生成中...")).toBeInTheDocument();
 
-    act(() => {
-      vi.advanceTimersByTime(2600);
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.find(
+          ([command, args]) =>
+            command === "generation_create_task" &&
+            (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+              "scene-prompt-planning",
+        ),
+      ).toBeDefined(),
+    );
+    const planningCreateCall = invokeMock.mock.calls.find(
+      ([command, args]) =>
+        command === "generation_create_task" &&
+        (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+          "scene-prompt-planning",
+    );
+    const planningInput = (
+      planningCreateCall?.[1] as { input?: { input?: Record<string, unknown> } } | undefined
+    )?.input?.input;
+    expect(planningInput).toMatchObject({
+      kind: "scene-prompt-planning",
+      planningPromptVersion: "v10",
+      supplementalInfo: "陶瓷保温杯，卖点是防滑杯套和通勤便携。",
     });
-    vi.useRealTimers();
+    expect(planningInput).not.toHaveProperty("selectedSceneTemplateId");
+    expect(planningInput).not.toHaveProperty("selectedVisualDirectionId");
 
-    expect(screen.getByText("统一风格锁定")).toBeInTheDocument();
-    expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14);
+    expect(await screen.findByText("统一风格锁定")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByTestId("scene-prompt-card")).toHaveLength(14));
     expect(screen.getByText("H1 首屏主视觉")).toBeInTheDocument();
     expect(screen.getByText("D9 FAQ / 风险逆转 / CTA")).toBeInTheDocument();
-    expect(screen.getAllByText(/陶瓷保温杯/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/陶瓷保温杯置于画面核心区域/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("textbox", { name: /图片提示词/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("H1 首屏主视觉，陶瓷保温杯，固定色板。")).not.toBeInTheDocument();
 
-    const firstPrompt = screen.getByRole("textbox", { name: "改写 H1 首屏主视觉 Prompt" });
-    expect((firstPrompt as HTMLTextAreaElement).value).toContain("统一风格锁定：");
-    await user.clear(firstPrompt);
-    await user.type(firstPrompt, "统一风格锁定：固定色板。主图居中，留白至少 45%。");
-
-    expect(firstPrompt).toHaveValue("统一风格锁定：固定色板。主图居中，留白至少 45%。");
-
-    vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "开始生成图片" }));
 
     expect(screen.getByText("生成结果:")).toBeInTheDocument();
-    expect(screen.getAllByText("AI 生成中")).toHaveLength(14);
-
-    act(() => {
-      vi.advanceTimersByTime(3200);
-    });
-    vi.useRealTimers();
-
-    expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(13);
-    expect(screen.getAllByTestId("failed-result-card")).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByTestId("generated-detail-image-card")).toHaveLength(14));
+    const sceneResultGrid = screen.getByTestId("generated-result-grid");
+    const sceneResultCards = within(sceneResultGrid).getAllByRole("article");
+    const sceneSourceCard = within(sceneResultGrid).getByTestId("generated-source-image-card");
+    const sceneGeneratedCards = within(sceneResultGrid).getAllByTestId("generated-detail-image-card");
+    expect(sceneResultCards[0]).toBe(sceneSourceCard);
+    expect(sceneSourceCard).toHaveTextContent("原图");
+    expect(within(sceneSourceCard).getByRole("img", { name: "cup.png" })).toHaveAttribute("src", "asset://cup.png");
+    expect(within(sceneSourceCard).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(sceneSourceCard).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(sceneGeneratedCards[0]).getByRole("img", { name: "H1 首屏主视觉" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("generated-1.png"),
+    );
+    expect(screen.queryByTestId("failed-result-card")).not.toBeInTheDocument();
     expect(screen.getByText("H1 首屏主视觉")).toBeInTheDocument();
+
+    await user.click(sceneSourceCard);
+    expect(screen.queryByRole("dialog", { name: "图片相册预览" })).not.toBeInTheDocument();
+    await user.click(sceneGeneratedCards[0]);
+    const sceneLightbox = screen.getByRole("dialog", { name: "图片相册预览" });
+    expect(within(sceneLightbox).getByText("1 / 14")).toBeInTheDocument();
+    expect(within(sceneLightbox).getAllByRole("button", { name: /查看缩略图/ })).toHaveLength(14);
+    expect(within(sceneLightbox).queryByRole("img", { name: "缩略图 cup.png" })).not.toBeInTheDocument();
+    await user.click(within(sceneLightbox).getByRole("button", { name: "关闭图片预览" }));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "generation_create_task",
+      expect.objectContaining({
+        input: expect.objectContaining({
+          input: expect.objectContaining({
+            campaignStyleLock: "固定暖白色板、中性棚拍光与统一无衬线字体。",
+            conversionDriver: "visual",
+            generationPromptVersion: "v7",
+            kind: "scene-image-generation",
+            outputMode: "full-pack",
+            planningPromptVersion: "v10",
+            ratio: "1:1",
+            templateCatalogVersion: "v5",
+          }),
+          workspace: "scene",
+        }),
+      }),
+    );
+    const generationCreateCall = invokeMock.mock.calls.find(
+      ([command, args]) =>
+        command === "generation_create_task" &&
+        (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind ===
+          "scene-image-generation",
+    );
+    const frozenInput = (
+      generationCreateCall?.[1] as {
+        input?: { input?: { items?: Array<{ prompt?: string; promptSummary?: string; templateId?: string }> } };
+      } | undefined
+    )?.input?.input;
+    const frozenTemplateIds = frozenInput?.items?.map((item) => item.templateId) ?? [];
+    expect(frozenInput).toMatchObject({ conversionDriver: "visual", outputMode: "full-pack" });
+    expect(frozenInput?.items).toHaveLength(14);
+    expect(frozenInput?.items?.[0]).toMatchObject({
+      prompt: "H1 首屏主视觉，陶瓷保温杯，固定色板。",
+      promptSummary: "首屏主视觉，陶瓷保温杯置于画面核心区域。",
+    });
+    expect(new Set(frozenTemplateIds).size).toBe(14);
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "场景" }));
+    expect(within(historyDialog).getByText("场景图片")).toBeInTheDocument();
+    expect(within(historyDialog).getByText("14 张")).toBeInTheDocument();
+    expect(within(historyDialog).getByText("已完成")).toBeInTheDocument();
   });
 
   it("switches from detail generation to the clothing try-on workspace", async () => {

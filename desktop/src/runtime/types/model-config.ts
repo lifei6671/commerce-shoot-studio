@@ -6,6 +6,7 @@ export type ModelCapability = {
     | "prompt-plan"
     | "product-selling-points"
     | "clothing-scene-planning"
+    | "scene-prompt-planning"
     | "viral-style-analysis"
     | "scene-image-generation"
     | "product-detail-generation"

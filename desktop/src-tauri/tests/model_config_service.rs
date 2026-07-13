@@ -48,7 +48,7 @@ fn model_config_lists_builtin_mock_profile_and_seeded_mock_configs() {
 }
 
 #[test]
-fn clothing_real_provider_only_capabilities_reject_seeded_mock_defaults() {
+fn real_provider_only_capabilities_reject_seeded_mock_defaults() {
     let workspace_dir = initialized_workspace("model-config-clothing-real-provider-only");
     let capability_service = CapabilityService::new();
 
@@ -56,6 +56,8 @@ fn clothing_real_provider_only_capabilities_reject_seeded_mock_defaults() {
         "clothing-scene-planning",
         "clothing-base-model-generation",
         "clothing-tryon-generation",
+        "scene-prompt-planning",
+        "scene-image-generation",
     ] {
         let capability = capability_service
             .get_capability(&workspace_dir, capability_id)
@@ -70,6 +72,31 @@ fn clothing_real_provider_only_capabilities_reject_seeded_mock_defaults() {
             Some("未配置可用真实模型。")
         );
     }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn scene_capabilities_report_reference_and_category_contracts() {
+    let workspace_dir = initialized_workspace("model-config-scene-capability-metadata");
+    let service = CapabilityService::new();
+
+    let planning = service
+        .get_capability(&workspace_dir, "scene-prompt-planning")
+        .expect("scene planning capability should load");
+    assert_eq!(planning.category, "image-to-text");
+    assert_eq!(planning.max_input_assets, Some(3));
+    assert_eq!(planning.supported_aspect_ratios, vec!["3:4", "1:1", "9:16"]);
+
+    let generation = service
+        .get_capability(&workspace_dir, "scene-image-generation")
+        .expect("scene generation capability should load");
+    assert_eq!(generation.category, "image-to-image");
+    assert_eq!(generation.max_input_assets, Some(3));
+    assert_eq!(
+        generation.supported_aspect_ratios,
+        vec!["3:4", "1:1", "9:16"]
+    );
 
     remove_workspace(&workspace_dir);
 }
@@ -192,9 +219,12 @@ fn openai_provider_profile_includes_image_to_image_capabilities() {
     assert!(openai
         .supported_capabilities
         .contains(&"clothing-base-model-generation".to_string()));
-    assert!(!openai
+    assert!(openai
         .supported_capabilities
         .contains(&"scene-image-generation".to_string()));
+    assert!(openai
+        .supported_capabilities
+        .contains(&"scene-prompt-planning".to_string()));
     assert!(!openai
         .supported_capabilities
         .contains(&"product-detail-generation".to_string()));
@@ -205,7 +235,11 @@ fn saving_openai_image_to_image_uses_fixed_images_edits_endpoint() {
     let workspace_dir = initialized_workspace("model-config-openai-image-to-image-endpoint");
     let service = ModelConfigService::new();
 
-    for capability_id in ["clothing-tryon-generation", "image-edit"] {
+    for capability_id in [
+        "scene-image-generation",
+        "clothing-tryon-generation",
+        "image-edit",
+    ] {
         let saved = service
             .save_config(
                 &workspace_dir,
@@ -308,7 +342,7 @@ fn saving_config_updates_capability_immediately_without_api_key_for_mock_provide
             &workspace_dir,
             SaveLocalModelConfigInput {
                 id: None,
-                capability_id: "scene-image-generation".to_string(),
+                capability_id: "product-detail-generation".to_string(),
                 provider_profile_id: "mock-local".to_string(),
                 display_name: "场景图 Mock".to_string(),
                 execution_mode: "sync".to_string(),
@@ -320,7 +354,7 @@ fn saving_config_updates_capability_immediately_without_api_key_for_mock_provide
         )
         .expect("config should save");
     let capability = capability_service
-        .get_capability(&workspace_dir, "scene-image-generation")
+        .get_capability(&workspace_dir, "product-detail-generation")
         .expect("capability should load");
 
     assert_eq!(saved.provider_label, "Mock Local");
@@ -474,10 +508,10 @@ fn category_fallback_skips_available_provider_that_does_not_support_target_capab
         .expect("workspace database should open");
     database
         .execute(
-            "UPDATE model_configs SET is_default = 0 WHERE capability_id = 'product-detail-generation'",
+            "UPDATE model_configs SET is_default = 0 WHERE capability_id = 'image-edit'",
             [],
         )
-        .expect("product detail mock default should clear");
+        .expect("image edit mock default should clear");
     database
         .execute(
             "
@@ -485,7 +519,7 @@ fn category_fallback_skips_available_provider_that_does_not_support_target_capab
                 id, provider_profile_id, capability_id, secret_value
             )
             VALUES ('secret_legacy_deepseek_image', 'deepseek',
-                    'product-detail-generation', 'legacy-secret')
+                    'image-edit', 'legacy-secret')
             ",
             [],
         )
@@ -512,7 +546,7 @@ fn category_fallback_skips_available_provider_that_does_not_support_target_capab
                 execution_mode, model, endpoint_path, enabled, is_default,
                 connection_status, connection_fingerprint
             )
-            VALUES ('cfg_legacy_deepseek_image', 'product-detail-generation',
+            VALUES ('cfg_legacy_deepseek_image', 'image-edit',
                     'deepseek', 'Legacy DeepSeek 文生图', 'openai-compatible',
                     'sync', 'legacy-image-model', '/chat/completions', 1, 1,
                     'available', ?1)
@@ -522,7 +556,7 @@ fn category_fallback_skips_available_provider_that_does_not_support_target_capab
         .expect("legacy unsupported config should insert");
 
     let resolved =
-        default_resolved_config_for_capability(&workspace_dir, "clothing-base-model-generation")
+        default_resolved_config_for_capability(&workspace_dir, "clothing-tryon-generation")
             .expect("fallback should continue to the supported provider");
 
     assert_eq!(resolved.provider_profile_id, "volcengine");
@@ -772,7 +806,7 @@ fn volcengine_image_generation_uses_images_generations_endpoint() {
     assert_eq!(probe.provider_profile_id, "volcengine");
     assert_eq!(probe.base_url, "https://ark.cn-beijing.volces.com/api/v3");
     assert_eq!(probe.endpoint_path, "/images/generations");
-    assert_eq!(probe.category, "text-to-image");
+    assert_eq!(probe.category, "image-to-image");
     assert_eq!(probe.model, "doubao-seedream-4-0-250828");
 
     remove_workspace(&workspace_dir);
@@ -895,11 +929,8 @@ fn testing_one_category_config_marks_related_defaults_without_extra_provider_cal
         &workspace_dir,
         "scene-image-generation",
     );
-    let detail_config = save_volcengine_text_to_image_config(
-        &model_service,
-        &workspace_dir,
-        "product-detail-generation",
-    );
+    let detail_config =
+        save_volcengine_text_to_image_config(&model_service, &workspace_dir, "image-edit");
 
     for config in [&scene_config, &detail_config] {
         model_service

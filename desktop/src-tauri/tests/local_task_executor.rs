@@ -23,10 +23,10 @@ fn run_next_executes_oldest_queued_task_with_model_gateway_and_events() {
     let workspace_dir = initialized_workspace("local-executor-success");
     let generation_service = GenerationService::new();
     let first = generation_service
-        .create_task(&workspace_dir, create_scene_task("scene-exec-1"))
+        .create_task(&workspace_dir, create_listing_copy_task("listing-exec-1"))
         .expect("first task should create");
     let second = generation_service
-        .create_task(&workspace_dir, create_scene_task("scene-exec-2"))
+        .create_task(&workspace_dir, create_listing_copy_task("listing-exec-2"))
         .expect("second task should create");
 
     let result = LocalTaskExecutor::new()
@@ -43,7 +43,7 @@ fn run_next_executes_oldest_queued_task_with_model_gateway_and_events() {
     let invocation_count: i64 = database
         .connection()
         .query_row(
-            "SELECT COUNT(*) FROM model_invocations WHERE id = ?1 AND capability_id = 'scene-image-generation'",
+            "SELECT COUNT(*) FROM model_invocations WHERE id = ?1 AND capability_id = 'listing-copy'",
             [result.invocation_id.as_deref().expect("invocation id")],
             |row| row.get(0),
         )
@@ -71,10 +71,16 @@ fn run_task_executes_requested_task_without_consuming_older_queue() {
     let workspace_dir = initialized_workspace("local-executor-targeted-task");
     let generation_service = GenerationService::new();
     let older = generation_service
-        .create_task(&workspace_dir, create_scene_task("scene-targeted-old"))
+        .create_task(
+            &workspace_dir,
+            create_listing_copy_task("listing-targeted-old"),
+        )
         .expect("older task should create");
     let target = generation_service
-        .create_task(&workspace_dir, create_scene_task("scene-targeted-new"))
+        .create_task(
+            &workspace_dir,
+            create_listing_copy_task("listing-targeted-new"),
+        )
         .expect("target task should create");
 
     let result = LocalTaskExecutor::new()
@@ -97,11 +103,14 @@ fn run_task_executes_requested_task_without_consuming_older_queue() {
 }
 
 #[test]
-fn run_next_persists_generated_result_asset_for_scene_task() {
+fn run_next_persists_generated_result_assets_for_product_task() {
     let workspace_dir = initialized_workspace("local-executor-generated-asset");
     let generation_service = GenerationService::new();
     let task = generation_service
-        .create_task(&workspace_dir, create_scene_task("scene-generated-asset"))
+        .create_task(
+            &workspace_dir,
+            create_product_detail_task("product-generated-assets"),
+        )
         .expect("task should create");
 
     LocalTaskExecutor::new()
@@ -112,7 +121,7 @@ fn run_next_persists_generated_result_asset_for_scene_task() {
         .get_task_detail(&workspace_dir, &task.id)
         .expect("task detail should load");
 
-    assert_eq!(detail.output_assets.len(), 1);
+    assert_eq!(detail.output_assets.len(), 3);
     let output = &detail.output_assets[0];
     assert_eq!(output.role, "output");
     assert_eq!(output.sort_order, 0);

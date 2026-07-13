@@ -216,7 +216,7 @@ For code changes, run the narrow relevant test first, then the broader repositor
 - Keep `场景` separate from `商品` and `服饰` unless a request explicitly merges workflows.
 - `场景` uses the ecom-details-image mapping and currently tracks 25 templates grouped by business tabs.
 - Product generation state must survive workspace switching unless the user explicitly resets or starts a new task.
-- 商品和服饰 result source image is not a generated asset: it should appear first in the result grid with an `原图` badge, but it should not participate in selection, batch/all-image download, long preview / long-image download, or image viewer behavior.
+- 商品、服饰和场景 result source image is not a generated asset: it should appear first in the result grid with an `原图` badge, but it should not participate in selection, batch/all-image download, long preview / long-image download, or image viewer behavior.
 - Failed generated cards can be selected for deletion but must not participate in download, long preview, image viewing, or album preview.
 - API key/provider behavior must not be documented as production-ready storage or real network integration unless verified.
 - Native image selection should use Tauri/native picker paths; do not document browser `<input type="file">` as the desktop UX.
