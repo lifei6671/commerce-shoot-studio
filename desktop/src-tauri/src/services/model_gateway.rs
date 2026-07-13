@@ -81,6 +81,21 @@ pub enum ModelGatewayError {
     ProviderTransport(ProviderTransportErrorKind),
 }
 
+#[derive(Debug)]
+pub(crate) enum ModelGatewayInvocationError {
+    Config(ModelConfigError),
+    Provider(ModelGatewayError),
+}
+
+impl ModelGatewayInvocationError {
+    fn into_model_config_error(self) -> ModelConfigError {
+        match self {
+            Self::Config(source) => source,
+            Self::Provider(source) => model_config_error_from_gateway_error(source),
+        }
+    }
+}
+
 impl std::fmt::Display for ModelGatewayError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -138,10 +153,21 @@ impl ModelGatewayService {
         workspace_directory: &Path,
         request: ModelGatewayRequest,
     ) -> Result<ModelGatewayResult, ModelConfigError> {
-        let resolved_context =
-            resolve_gateway_context(workspace_directory, &request.capability_id)?;
+        self.invoke_real_provider_detailed(workspace_directory, request)
+            .map_err(ModelGatewayInvocationError::into_model_config_error)
+    }
+
+    pub(crate) fn invoke_real_provider_detailed(
+        &self,
+        workspace_directory: &Path,
+        request: ModelGatewayRequest,
+    ) -> Result<ModelGatewayResult, ModelGatewayInvocationError> {
+        let resolved_context = resolve_gateway_context(workspace_directory, &request.capability_id)
+            .map_err(ModelGatewayInvocationError::Config)?;
         if resolved_context.config.provider_profile_id == "mock-local" {
-            return Err(ModelConfigError::Validation(no_available_model_message()));
+            return Err(ModelGatewayInvocationError::Config(
+                ModelConfigError::Validation(no_available_model_message()),
+            ));
         }
         let diagnostic_log_path = Some(
             workspace_directory
@@ -149,9 +175,14 @@ impl ModelGatewayService {
                 .join("model-gateway-diagnostics.jsonl"),
         );
         let adapter = HttpModelGatewayAdapter::new(diagnostic_log_path)
-            .map_err(model_config_error_from_gateway_error)?;
+            .map_err(ModelGatewayInvocationError::Provider)?;
 
-        self.invoke_with_resolved_context(workspace_directory, request, &adapter, resolved_context)
+        self.invoke_with_resolved_context_detailed(
+            workspace_directory,
+            request,
+            &adapter,
+            resolved_context,
+        )
     }
 
     pub(crate) fn invoke_real_provider_leased(
@@ -359,20 +390,36 @@ impl ModelGatewayService {
         request: ModelGatewayRequest,
         adapter: &T,
     ) -> Result<ModelGatewayResult, ModelConfigError> {
-        let resolved_context =
-            resolve_gateway_context(workspace_directory, &request.capability_id)?;
-        self.invoke_with_resolved_context(workspace_directory, request, adapter, resolved_context)
+        self.invoke_with_adapter_detailed(workspace_directory, request, adapter)
+            .map_err(ModelGatewayInvocationError::into_model_config_error)
     }
 
-    fn invoke_with_resolved_context<T: ModelGatewayAdapter>(
+    pub(crate) fn invoke_with_adapter_detailed<T: ModelGatewayAdapter>(
+        &self,
+        workspace_directory: &Path,
+        request: ModelGatewayRequest,
+        adapter: &T,
+    ) -> Result<ModelGatewayResult, ModelGatewayInvocationError> {
+        let resolved_context = resolve_gateway_context(workspace_directory, &request.capability_id)
+            .map_err(ModelGatewayInvocationError::Config)?;
+        self.invoke_with_resolved_context_detailed(
+            workspace_directory,
+            request,
+            adapter,
+            resolved_context,
+        )
+    }
+
+    fn invoke_with_resolved_context_detailed<T: ModelGatewayAdapter>(
         &self,
         workspace_directory: &Path,
         request: ModelGatewayRequest,
         adapter: &T,
         resolved_context: ResolvedGatewayContext,
-    ) -> Result<ModelGatewayResult, ModelConfigError> {
-        let database =
-            WorkspaceDatabase::open(workspace_directory).map_err(ModelConfigError::from)?;
+    ) -> Result<ModelGatewayResult, ModelGatewayInvocationError> {
+        let database = WorkspaceDatabase::open(workspace_directory)
+            .map_err(ModelConfigError::from)
+            .map_err(ModelGatewayInvocationError::Config)?;
         let invocation_id = create_invocation_id();
         let input_summary = summarize_input(&request.input);
         let api_key = resolved_context.api_key.as_deref();
@@ -387,7 +434,7 @@ impl ModelGatewayService {
                 model: &resolved_context.config.view.model,
                 provider_profile_id: &resolved_context.config.provider_profile_id,
             })
-            .map_err(model_config_error_from_gateway_error)?;
+            .map_err(ModelGatewayInvocationError::Provider)?;
         let request_summary_json = serde_json::json!({
             "inputSummary": input_summary,
         });
@@ -402,7 +449,8 @@ impl ModelGatewayService {
             &request_summary_json,
             &output_summary_json,
             adapter_result.usage_json.as_ref(),
-        )?;
+        )
+        .map_err(ModelGatewayInvocationError::Config)?;
 
         Ok(ModelGatewayResult {
             invocation_id,

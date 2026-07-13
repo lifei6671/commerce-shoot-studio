@@ -52,7 +52,7 @@
 - [ ] `scene-prompt-planning` 为最多 3 张参考图的 image-to-text 能力；`scene-image-generation` 为最多 3 张参考图的 image-to-image 能力。
 - [ ] OpenAI 场景生图使用 multipart edits；火山使用 generations，尺寸按当前模型矩阵解析。
 - [ ] 一个场景父任务可逐项生成并保持稳定 sort order；部分失败保留成功项，全部失败返回规范化错误。
-- [ ] 场景结果来自真实 output assets，并支持历史恢复、取消、删除、尺寸修改和单图重试。
+- [ ] 场景结果来自真实 output assets，并支持历史恢复、取消、删除、尺寸修改、AI 改图和单图重试；AI 改图持久化当前展示资产、用户微调要求与 lineage，完整 Prompt 只在执行器内存组装，并使用执行时的当前默认真实 `image-edit` 配置，成功替换原槽位、失败保留原图。
 - [ ] SQLite、事件、诊断和前端 DTO 不包含敏感或 raw 模型内容。
 - [ ] 输出模式 Tooltip 正确说明 1/5/9/14 张和实际 H/D 语义，鼠标悬停和键盘聚焦可访问，浮层不被滚动面板裁剪。
 - [ ] 图片包不允许删除固定计划，空 Prompt 不能提交；分类切换不会保留不可见模板。

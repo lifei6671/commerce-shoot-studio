@@ -5,6 +5,7 @@ export type ModelCapability = {
     | "listing-copy"
     | "prompt-plan"
     | "product-selling-points"
+    | "image-text-recognition"
     | "clothing-scene-planning"
     | "scene-prompt-planning"
     | "viral-style-analysis"

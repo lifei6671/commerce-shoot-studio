@@ -1,6 +1,7 @@
 import type { DateTimeString, PageRequest, PageResult, WorkspaceKind } from "./common";
 import type { Asset } from "./assets";
 import type { NormalizedTaskError } from "./errors";
+import type { ImageTextBox } from "./ai-assist";
 
 export type GenerationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
 
@@ -23,6 +24,21 @@ export type GenerationTaskInputAssetInput = {
   role: GenerationTaskInputAssetRole;
   sortOrder: number;
 };
+
+export type ResultImageTextChange =
+  | {
+      box: ImageTextBox;
+      lineId: string;
+      operation: "replace";
+      originalText: string;
+      replacementText: string;
+    }
+  | {
+      box: ImageTextBox;
+      lineId: string;
+      operation: "delete";
+      originalText: string;
+    };
 
 export type GenerationTask = {
   id: string;

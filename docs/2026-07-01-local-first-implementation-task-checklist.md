@@ -638,7 +638,7 @@ M7 真实场景生图闭环
 ### M5-T04 CapabilityPort
 
 - 依赖：M5-T02、M5-T03。
-- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但服饰三项能力以及 `scene-prompt-planning`、`scene-image-generation` 均为 real-provider-only。场景规划和场景生图最多接收 3 张参考图，类别分别为 `image-to-text`、`image-to-image`，并声明 3:4、1:1、9:16 比例。
+- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但 `image-edit`、`image-text-recognition`、`clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation`、`scene-prompt-planning`、`scene-image-generation` 共七项能力均为 real-provider-only。场景规划和场景生图最多接收 3 张参考图，类别分别为 `image-to-text`、`image-to-image`，并声明 3:4、1:1、9:16 比例。
 - 主要文件：
   - `desktop/src-tauri/src/services/capability*`
   - `desktop/src/runtime/local/capability*`
@@ -655,7 +655,7 @@ M7 真实场景生图闭环
 ### M5-T05 模型配置页真实化
 
 - 依赖：M5-T02、M5-T03、M5-T04。
-- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 11 个 capability、provider profiles、local configs 和 secret status。`图生文` 分类包含商品卖点、服饰规划和场景规划；`图生图` 分类包含场景生图、服饰试穿和图片编辑。保存分类配置时仍与 Provider allowlist 求交集，endpoint 由 Rust runtime 固定解析。
+- 当前状态：已完成第一版。页面从 Public Runtime Ports 读取 12 个 capability、provider profiles、local configs 和 secret status。`图生文` 分类包含商品卖点、图片文字识别、服饰规划和场景规划；`图生图` 分类包含场景生图、服饰试穿和图片编辑。保存分类配置时仍与 Provider allowlist 求交集，endpoint 由 Rust runtime 固定解析。
 - 主要文件：
   - `desktop/src/features/model-config/components/ModelConfigPage.tsx`
   - `desktop/src/features/model-config/*test*`
@@ -697,7 +697,7 @@ M7 真实场景生图闭环
 ### M6-T02 DeterministicModelGatewayAdapter
 
 - 依赖：M6-T01。
-- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，覆盖 11 个 capability 的底层测试替身，不触发真实 Provider 调用；real-provider-only 能力不会因此在业务 UI 中变为可用。每次调用会写入脱敏 invocation 记录。
+- 当前状态：已完成第一版。`DeterministicModelGatewayAdapter` 已从 service 内联逻辑拆到 infrastructure provider adapter，覆盖 12 个 capability 的底层测试替身，不触发真实 Provider 调用；`image-text-recognition` 等 real-provider-only 能力不会因此在业务 UI 中变为可用或产生可展示假结果。每次调用会写入脱敏 invocation 记录。
 - 主要文件：
   - `desktop/src-tauri/src/infrastructure/providers/deterministic*`
   - `desktop/src-tauri/src/services/model_gateway*test*`
@@ -883,6 +883,24 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
   与并发历史查看回归已修复并通过 Vitest。相册只查看成功的 generated assets，并按图片固有
   比例展示，不在图片外补浅色背景。真实 OpenAI/火山引擎外网、macOS/Windows 系统保存
   对话框和真实桌面快速历史切换竞态仍待手工验收。
+  商品、服饰和场景结果卡的 AI 改图已统一接入真实 `image-edit` 任务；实时结果和从历史打开
+  的结果都提交当前展示资产与用户微调要求；完整 Provider Prompt 只在 Rust 执行器内存组装，
+  不写 task JSON。执行时读取当前默认真实图生图配置，`mock-local` 不得产生可归并结果；成功
+  后替换原稳定槽位，失败保留原图。浮层提交按钮只显示“重新生成”，不再显示积分 icon 和数字。
+  同一套结果卡现已接入真实“编辑文字”两阶段链路：打开浮层立即显示骨架屏，Rust 使用当前
+  generated asset 与执行时最新真实 `image-text-recognition` 配置返回逐行文字及归一化位置；未
+  识别到文字时全局 warning toast 提示并关闭浮层。用户未修改时确认按钮禁用；只提交变化行，
+  清空行明确记为 `delete`，其余记为 `replace`，再由 `result-image-text-rewrite` 任务使用执行时
+  最新真实 `image-edit` 配置修改当前图片并归并原稳定槽位。Prompt、Base64 和 Provider 原始
+  响应不持久化；OCR 解析兼容完整 JSON Markdown 围栏，格式拒绝日志只输出安全分类，不输出
+  识别原文、坐标值或 Provider raw response。OCR Prompt v2 使用无歧义的归一化
+  `left/top/right/bottom`，Rust 转换成内部严格 xywh；若模型仍返回旧版字段，只在整批坐标可
+  一致判定为 `x/y/right/bottom` 时统一转换，仍歧义的越界单项直接忽略，不扩成图片边缘大框；
+  任一文字项的 bbox 缺失、类型、范围或 edge 顺序不可靠时也只跳过该项，保留其它有效文字并
+  连续重建 line ID，全部位置无效时按空结果 toast 关闭；JSON、items 和 text 合同错误仍整批
+  失败。改字执行边界仍严格拒绝越界。bbox
+  只作为空间提示，图生图必须用 originalText 唯一匹配，歧义或找不到时保持不变，不得擦除整个
+  近似框。真实 OpenAI/火山引擎定位改字视觉效果仍待付费 Provider 人工验收。
 - 主要文件：
   - `desktop/src/features/scenes/*`
   - `desktop/src/features/generation/*`
@@ -912,6 +930,21 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
   进程重启后已由 startup recovery 标记为 `interrupted` 的任务不会被重新启动。相关 child task
   继续保留在删除关联中。用户开始另一轮普通场景请求时，旧恢复任务仍独立更新自己的历史
   记录，但不得覆盖当前画布。
+  AI 改图按当前 workspace 自己的展示 record 定位父任务与资产；只有属于该 workspace 的 history
+  record ID 才能参与解析，避免其它 workspace 的全局 ID 遮蔽当前画布，也避免相同稳定 `imageId`
+  在不同记录间串写。编辑文字同样复用该精确 record 的资产与稳定槽位；自动化已覆盖商品、服饰、
+  场景三类实时结果及对应三类历史入口，并覆盖跨 workspace 保留画布和不同记录复用相同稳定
+  `imageId` 的隔离场景。历史查看身份现按 workspace 保存；依次打开 A、B 历史再返回 A 时，A 的
+  历史结果画布仍保持只读结果查看布局，不会重新显示生成配置面板，生成记录浮层也只高亮 A。
+  dialog session、识别 request、提交 request 和 source asset identity 共同隔离迟到响应；切换
+  history scope 后，旧提交的 success/error/finally 不得关闭、toast 或覆盖新浮层，也不得让新记录
+  中相同 `imageId` 的卡片显示生成中；scope 切换不得提前释放旧提交锁，A → B → A 返回 A 时仍
+  锁定。提交锁保存在生命周期长于结果画布组件的可订阅 store 中；提交期间卸载并重新挂载同一
+  scope/图片仍显示生成中，每个 `finally` 只能移除自身 operation token。提交期间禁止关闭，资产
+  变化后旧识别结果不能继续提交。
+  2026-07-13 验证：`PreviewCanvas.text-edit.test.tsx` 16/16、`App.test.tsx` 146/146、前端全量
+  276/276、Rust 全量测试、
+  `make check`、`cargo fmt --check` 与 `git diff --check` 均通过；真实 OpenAI/火山付费改图仍待手工验收。
   真实桌面快速新建、取消和重启重试竞态仍待手工验收。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`

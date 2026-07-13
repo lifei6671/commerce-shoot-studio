@@ -33,6 +33,44 @@ describe("localAiAssistPort", () => {
     });
   });
 
+  it("recognizes image text with an asset id only", async () => {
+    invokeMock.mockResolvedValueOnce({
+      items: [
+        {
+          box: { height: 0.1, width: 0.3, x: 0.1, y: 0.2 },
+          id: "line-001",
+          text: "Size Guide",
+        },
+      ],
+    });
+
+    await expect(localAiAssistPort.recognizeImageText({ assetId: "asset-current" })).resolves.toMatchObject({
+      items: [{ id: "line-001" }],
+    });
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset-current" },
+    });
+  });
+
+  it("preserves structured recognition errors", async () => {
+    invokeMock.mockRejectedValueOnce({
+      code: "PROVIDER_TIMEOUT",
+      message: "文字识别超时，请重试。",
+      retryable: true,
+    });
+
+    const error = await localAiAssistPort
+      .recognizeImageText({ assetId: "asset-current" })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      code: "PROVIDER_TIMEOUT",
+      message: "文字识别超时，请重试。",
+      retryable: true,
+    });
+    expect(error).toBeInstanceOf(Error);
+  });
+
   it("streams product selling point deltas through tauri events", async () => {
     const deltas: string[] = [];
     let eventHandler: ((event: { payload: unknown }) => void) | undefined;

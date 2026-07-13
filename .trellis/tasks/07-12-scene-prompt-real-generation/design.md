@@ -78,6 +78,7 @@ Prompt 配置包括：
 - 至少一项保存成功则父任务 succeeded，并记录 failed item count；全部失败取最小 item index 的代表错误。
 - cancel/hidden 守卫覆盖 Provider 返回、下载、落盘和关联，晚到结果不得复活。
 - 单项重试创建含一个 item 的子任务，成功后原子归并父任务稳定槽位并隐藏子任务。
+- 商品、服饰和场景结果共用 `image-edit` AI 改图任务；任务只关联当前展示资产并持久化用户微调要求与 lineage，完整 Provider Prompt 在执行器内存组装，执行时读取当前默认真实 `image-edit` 配置，`mock-local` 不得产生可归并结果。成功结果沿用结果资产替换事务归并原槽位，失败或归并冲突不覆盖原图；历史入口按当前打开 record 定位父任务，避免跨记录串写。
 - Prompt/catalog 版本不匹配的旧任务仍可查看资产，但重试要求重新规划。
 - 实时结果从规划上下文冻结的参考图构造首位只读原图卡；历史恢复从
   `inputAssets(role=reference)` 重建同一卡片。原图卡不参与 generated output 状态、数量、

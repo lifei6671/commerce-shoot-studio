@@ -462,6 +462,19 @@ export type GeneratedDetailImage = {
 
 第一版可以只增加 `prompt` 和 `ratio`，真实图片字段等 Provider 接入时再启用。
 
+场景结果与从生成历史恢复的场景结果复用统一 AI 改图链路：用户在结果卡输入微调 Prompt 后，
+前端创建 `image-edit` 任务，以当前展示资产作为唯一 reference，并只持久化用户微调要求与
+结果 lineage；完整 Provider Prompt 由 Rust 执行器在内存组装。Rust 执行时解析当前默认真实
+`image-edit` 模型配置，`mock-local` 不得返回可归并结果。新图成功落盘后原子替换父任务稳定
+槽位，Provider 或归并失败时保留原图。提交按钮只显示“重新生成”。
+
+场景实时结果和历史恢复结果也复用统一“编辑文字”链路。打开浮层后先显示骨架屏，并以当前
+active generated asset 调用最新真实 `image-text-recognition` 配置；返回项包含按阅读顺序排列
+的文字和归一化 bbox。未识别到文字时提示用户并关闭浮层；未发生修改时确认按钮禁用。用户
+清空某一行表示删除该 bbox 内文字，非空修改表示替换；前端只提交变化行，Rust 将其校验后交给
+执行时最新真实 `image-edit` 配置，成功后替换原稳定槽位。Prompt 与图片数据仅在内存构造，
+真实 Provider 的 OCR 准确率、bbox 精度和擦字背景补全效果仍待人工验收。
+
 ## 7. Prompt 配置与生成规则
 
 业务 Prompt 的唯一事实源是 Rust bundle 内的四个 TOML：
@@ -680,6 +693,7 @@ lib 185/185 且全部 integration/doc tests 成功。25 模板在真实参考图
 - 点击 `开始生成图片` 后创建并启动一个父 `scene-image-generation` 任务。
 - 生成完成后展示结果图卡片。
 - 单图预览、删除、下载、全部下载继续可用。
+- 场景实时结果和历史恢复结果均可用当前图片与用户 Prompt 发起 AI 改图；成功替换原槽位，失败保留原图。
 - 结果卡片标题来自图片计划，而不是固定占位文案。
 
 ### Phase 5：真实 Provider 接入

@@ -53,6 +53,7 @@ fn real_provider_only_capabilities_reject_seeded_mock_defaults() {
     let capability_service = CapabilityService::new();
 
     for capability_id in [
+        "image-text-recognition",
         "clothing-scene-planning",
         "clothing-base-model-generation",
         "clothing-tryon-generation",
@@ -72,6 +73,24 @@ fn real_provider_only_capabilities_reject_seeded_mock_defaults() {
             Some("未配置可用真实模型。")
         );
     }
+
+    remove_workspace(&workspace_dir);
+}
+
+#[test]
+fn image_text_recognition_reports_single_reference_contract() {
+    let workspace_dir = initialized_workspace("model-config-image-text-recognition-metadata");
+    let capability = CapabilityService::new()
+        .get_capability(&workspace_dir, "image-text-recognition")
+        .expect("image text recognition capability should load");
+
+    assert_eq!(capability.category, "image-to-text");
+    assert_eq!(capability.max_input_assets, Some(1));
+    assert!(!capability.available);
+    assert_eq!(
+        capability.unavailable_reason.as_deref(),
+        Some("未配置可用真实模型。")
+    );
 
     remove_workspace(&workspace_dir);
 }
@@ -225,6 +244,9 @@ fn openai_provider_profile_includes_image_to_image_capabilities() {
     assert!(openai
         .supported_capabilities
         .contains(&"scene-prompt-planning".to_string()));
+    assert!(openai
+        .supported_capabilities
+        .contains(&"image-text-recognition".to_string()));
     assert!(!openai
         .supported_capabilities
         .contains(&"product-detail-generation".to_string()));

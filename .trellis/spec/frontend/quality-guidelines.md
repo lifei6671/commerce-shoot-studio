@@ -192,3 +192,165 @@ input: { supplementalInfo: config.supplementalInfo.trim() }
 - Display exactly one leading code: prepend it only when the title does not already start with the
   same code.
 - Test both `title = "Main visual"` and `title = "H1 Main visual"`.
+
+## Scenario: Result image rewrite across workspaces and history
+
+### 1. Scope / Trigger
+
+- Trigger: a product, clothing, or scene generated image is edited from the live result canvas or from an opened history record.
+
+### 2. Signatures
+
+- `PreviewCanvas.onImageRewrite(image, instruction)` owns the shared UI handoff.
+- The created task has `kind = "image-edit"`, one `inputAssets(role = "reference")` entry, and lineage fields `parentTaskId`, `targetImageId`, `imageNo`, and `sourceAssetId`.
+
+### 3. Contracts
+
+- The reference asset is the asset currently displayed on the card, including a replacement restored from history; never reuse the original parent output blindly.
+- The frontend persists only the trimmed `rewriteInstruction`; Rust constructs `prompt.messages` and
+  `prompt.rolelessPrompt` in memory after loading the current reference asset. Prompt, Base64, and raw
+  image URLs must not enter the task snapshot.
+- Model config is resolved by the Rust executor for `image-edit` when the task runs, so the current default real config is used; `mock-local` must not produce a mergeable rewrite.
+- Success replaces the stable parent slot; Provider or merge failure preserves the displayed image.
+- Record lookup and UI write-back require the exact record currently displayed by the operation's workspace.
+  A history record ID is eligible only when that record belongs to the same workspace; otherwise use that
+  workspace's own displayed/active record. Do not fall back to a workspace-wide image-ID search. Stable image
+  IDs may repeat across history records.
+- History-viewing identity is workspace-scoped. The read-only result layout and history-popover active row must
+  both derive from the current workspace's exact displayed record, not the last globally opened record.
+
+### 4. Validation & Error Matrix
+
+- Missing displayed `assetId` -> reject before task creation.
+- Missing persisted parent task or stable image number -> reject before Provider invocation.
+- Replacement lineage mismatch or changed parent slot -> clean up the unmerged derived task and keep the displayed image.
+- Missing rewrite handler in production wiring -> do not treat a local loading timer as a successful rewrite.
+
+### 5. Good/Base/Bad Cases
+
+- Good: open an older scene record, edit its current replacement asset, and update only that record after the replacement transaction succeeds.
+- Base: edit a live product result using its current generated asset.
+- Bad: find every clothing record with the same `imageId` and overwrite them all after one history edit.
+
+### 6. Tests Required
+
+- Assert product, clothing, and scene task creation uses the correct workspace, current asset, stable lineage fields, and trimmed instruction.
+- Assert at least one restored history path uses the restored current asset and updates only the opened record.
+- Open history A, then history B in another workspace, navigate back to A, and assert A keeps the read-only
+  layout and is the only active row in the history popover.
+- Assert success calls `replaceResultImage`; Provider or replacement failure leaves the original `src` intact.
+- Assert the rewrite submit button has the exact accessible name and text `重新生成`, without a credit icon or number.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+const record = records.find((item) => item.workspace === workspace && item.images.some(({ id }) => id === imageId));
+updateEveryRecordWithImageId(imageId, replacement);
+```
+
+#### Correct
+
+```typescript
+const historyRecord = records.find(
+  (item) => item.id === historyViewingRecordId && item.workspace === workspace,
+);
+const displayedRecordId = historyRecord?.id ?? activeRecordIdForWorkspace(workspace);
+const record = records.find((item) => item.id === displayedRecordId && item.workspace === workspace);
+updateGeneratedImageForRecord(record.id, workspace, imageId, replacement);
+```
+
+## Scenario: Generated-image text editing dialog
+
+### 1. Scope / Trigger
+
+- Trigger: product, clothing, or scene result cards, including restored history records, expose
+  `编辑文字`.
+
+### 2. Signatures
+
+- `PreviewCanvas.onRecognizeImageText(image): Promise<ImageTextRecognitionResult>`.
+- `PreviewCanvas.onImageTextRewrite(image, changes): Promise<void>`.
+- `ResultImageTextChange` is an explicit `replace` or `delete` discriminated union with a normalized box.
+
+### 3. Contracts
+
+- Opening is synchronous and enters `recognizing` with an accessible skeleton; never show static sample
+  text while waiting.
+- Recognition and submission are bound to history-record scope, dialog session, target image, and source
+  asset identities.
+- Only changed trimmed rows are submitted. Empty replacement means explicit `delete`; non-empty means
+  `replace`. No effective change keeps `确认改字` disabled.
+- After the request/session/asset identity check still passes, empty recognition is closed by the
+  component and reported once through the App global warning toast. A stale empty response is ignored.
+- Submission failure is reported once through the App global error toast and preserves the edited rows.
+- Reconcile `detailImages` updates against the active target image and its captured source asset. An
+  unrelated card update must not close the dialog.
+- App supplies the global rewrite-error notifier, but the dialog invokes it only after the submitting
+  session, target, and source asset still match. A stale A failure must neither toast nor mutate B.
+- Submission markers are scoped by record, image, and operation token. Switching scope closes the dialog but
+  does not release an in-flight marker; returning A after A -> B -> A remains locked until A's own `finally`
+  removes only its token.
+- Submission markers must outlive a `PreviewCanvas` / `GeneratedDetailCanvas` component instance. Keep them
+  in a subscribed store outside component-local state so conditional workspace rendering cannot unlock a paid
+  request. Component unmount invalidates dialog/request identities, but never clears the in-flight marker.
+
+### 4. Validation & Error Matrix
+
+- `retryable=true` recognition error -> keep dialog open and show retry.
+- `retryable=false` -> keep safe error and close controls, with no retry.
+- Source asset changes before submit -> reject and require a new recognition.
+- Submission in progress -> disable inputs, X, cancel, confirm, and backdrop close.
+- Component unmount/remount during submission -> the same scope/image remains generating until the original
+  operation token is removed.
+- Late result from an old request/session/asset -> ignore it.
+
+### 5. Good/Base/Bad Cases
+
+- Good: clear one recognized line, submit one delete change, and keep every other row unchanged.
+- Base: edit nothing; the confirm button remains disabled and contains no credit icon or count.
+- Bad: reuse OCR rows after resize, close a newer dialog when an older submit resolves, or emit duplicate
+  local and global toasts.
+
+### 6. Tests Required
+
+- Cover skeleton/ready/typed error/retry, no-change disabled, changed-only replace, explicit delete, and
+  submission locking.
+- Cover closed/retargeted/stale-asset late recognition and old-submit/new-dialog isolation.
+- Cover unrelated list rerenders while B is open, stale A failure without a toast, and a source asset
+  change during submit followed by failure without restoring stale ready state.
+- Cover opening history in workspace A and then switching to workspace B; B recognition/submission must use
+  B's own displayed record rather than A's retained history ID.
+- Cover concurrent A/B submits and A -> B -> A; both markers remain independent and each `finally` releases
+  only its own operation token.
+- Cover a real unmount and remount of the same scope/image while submission is unresolved; rerender-only
+  coverage is insufficient because it preserves component-local state.
+- Cover App task payload, current record/current asset lineage, empty-result global toast, and success/failure
+  stable-slot behavior across live and restored workspaces.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```typescript
+setRows(["Size Guide", "Length (CM)"]);
+onRewrite(image, rows);
+```
+
+#### Correct
+
+```typescript
+const result = await onRecognizeImageText(image);
+await onImageTextRewrite(image, createChangedRows(result.items, editedValues));
+```
+
+For submission locks, component-local state is insufficient:
+
+```typescript
+// Wrong: conditional workspace rendering releases the lock on unmount.
+const [pendingOperations, setPendingOperations] = useState([]);
+
+// Correct: subscribe to a record-scoped store whose lifetime outlives the canvas instance.
+const pendingOperations = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+```

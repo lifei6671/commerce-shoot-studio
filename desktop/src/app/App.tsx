@@ -54,9 +54,17 @@ import { SettingsPage } from "../features/settings/components/SettingsPage";
 import { moduleOptions, navItems, previewBoards } from "./studioData";
 import type { ProductImageAsset } from "../features/generation/lib/productImagePicker";
 import { localAssetPort } from "../runtime/local/assets";
+import { localAiAssistPort } from "../runtime/local/ai-assist";
 import { localGenerationPort } from "../runtime/local/generation";
 import { localModelConfigPort } from "../runtime/local/model-config";
-import type { GenerationTaskDetail, GenerationTaskInputAssetInput, ImageSizeOption } from "../runtime";
+import {
+  ImageTextRecognitionError,
+  type GenerationTaskDetail,
+  type GenerationTaskInputAssetInput,
+  type ImageSizeOption,
+  type ImageTextRecognitionResult,
+  type ResultImageTextChange,
+} from "../runtime";
 import { useToast } from "../shared/ui/toast";
 
 const productGenerationPollIntervalMs = 800;
@@ -203,12 +211,23 @@ export function App() {
   const [sceneImageGenerating, setSceneImageGenerating] = useState(false);
   const [generationRecords, setGenerationRecords] = useState<GenerationRecord[]>([]);
   const [activeGenerationRecordId, setActiveGenerationRecordId] = useState<string | null>(null);
-  const [historyViewingRecordId, setHistoryViewingRecordId] = useState<string | null>(null);
+  const [historyViewingRecordIds, setHistoryViewingRecordIds] = useState<
+    Record<GenerationRecord["workspace"], string | null>
+  >({ clothing: null, product: null, scene: null });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [productGeneratingRecordId, setProductGeneratingRecordId] = useState<string | null>(null);
   const [clothingGeneratingRecordId, setClothingGeneratingRecordId] = useState<string | null>(null);
   const activeGenerationRecordIdRef = useRef<string | null>(null);
-  const historyViewingRecordIdRef = useRef<string | null>(null);
+  const historyViewingRecordIdsRef = useRef<Record<GenerationRecord["workspace"], string | null>>({
+    clothing: null,
+    product: null,
+    scene: null,
+  });
+  const displayedGenerationRecordIdsRef = useRef<Record<GenerationRecord["workspace"], string | null>>({
+    clothing: null,
+    product: null,
+    scene: null,
+  });
   const deletedGenerationRecordIdsRef = useRef(new Set<string>());
   const clothingRetrySequenceRef = useRef(0);
   const sceneRetrySequenceRef = useRef(0);
@@ -228,13 +247,24 @@ export function App() {
   const isModelWorkspace = activeWorkspace === "model";
   const isSceneWorkspace = activeWorkspace === "scene";
   const isSettingsWorkspace = activeWorkspace === "settings";
+  const historyViewingRecordId =
+    activeWorkspace === "product" || activeWorkspace === "clothing" || activeWorkspace === "scene"
+      ? historyViewingRecordIds[activeWorkspace]
+      : null;
+  const activeHistoryRecordId =
+    activeWorkspace === "product" || activeWorkspace === "clothing" || activeWorkspace === "scene"
+      ? displayedGenerationRecordIdsRef.current[activeWorkspace]
+      : activeGenerationRecordId;
   const historyViewingRecord = historyViewingRecordId
     ? generationRecords.find((record) => record.id === historyViewingRecordId)
     : null;
   const isGenerationResultViewing =
     historyViewingRecordId !== null &&
-    activeGenerationRecordId === historyViewingRecordId &&
-    historyViewingRecord?.status !== "generating" &&
+    historyViewingRecord !== null &&
+    historyViewingRecord !== undefined &&
+    displayedGenerationRecordIdsRef.current[historyViewingRecord.workspace] === historyViewingRecordId &&
+    historyViewingRecord.workspace === activeWorkspace &&
+    historyViewingRecord.status !== "generating" &&
     ((activeWorkspace === "product" && productDetailImages.length > 0) ||
       (activeWorkspace === "clothing" && clothingSceneImages.length > 0) ||
       (activeWorkspace === "scene" && sceneImages.length > 0));
@@ -245,16 +275,28 @@ export function App() {
     activeGenerationRecordIdRef.current = activeGenerationRecordId;
   }, [activeGenerationRecordId]);
 
-  useEffect(() => {
-    historyViewingRecordIdRef.current = historyViewingRecordId;
-  }, [historyViewingRecordId]);
-
   function handleProductGenerationSettingsChange(settings: typeof productGenerationSettings) {
     setProductGenerationSettings(settings);
     setProductGenerationSettingsTouched(true);
   }
 
+  function setDisplayedGenerationRecordId(workspace: GenerationRecord["workspace"], recordId: string | null) {
+    displayedGenerationRecordIdsRef.current[workspace] = recordId;
+  }
+
+  function setHistoryViewingRecordId(workspace: GenerationRecord["workspace"], recordId: string | null) {
+    historyViewingRecordIdsRef.current[workspace] = recordId;
+    setHistoryViewingRecordIds((currentIds) =>
+      currentIds[workspace] === recordId ? currentIds : { ...currentIds, [workspace]: recordId },
+    );
+  }
+
+  function isDisplayedGenerationRecord(recordId: string, workspace: GenerationRecord["workspace"]) {
+    return displayedGenerationRecordIdsRef.current[workspace] === recordId;
+  }
+
   function clearActiveGenerationRecordForWorkspace(workspace: "clothing" | "product" | "scene") {
+    setDisplayedGenerationRecordId(workspace, null);
     if (!activeGenerationRecordId) {
       return;
     }
@@ -277,7 +319,7 @@ export function App() {
     setProductDetailGenerating(false);
     setProductGeneratingRecordId(null);
     setHistoryOpen(false);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("product", null);
     clearActiveGenerationRecordForWorkspace("product");
   }
 
@@ -334,7 +376,7 @@ export function App() {
     setClothingGeneratingRecordId(null);
     clothingGeneratingRecordIdRef.current = null;
     setHistoryOpen(false);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("clothing", null);
     clearActiveGenerationRecordForWorkspace("clothing");
   }
 
@@ -348,7 +390,7 @@ export function App() {
     setSceneImages([]);
     setSceneImageGenerating(false);
     setHistoryOpen(false);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("scene", null);
     clearActiveGenerationRecordForWorkspace("scene");
   }
 
@@ -459,8 +501,9 @@ export function App() {
 
     deletedGenerationRecordIdsRef.current.delete(recordId);
     setGenerationRecords((currentRecords) => [record, ...currentRecords]);
+    setDisplayedGenerationRecordId("product", recordId);
     setActiveGenerationRecordId(recordId);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("product", null);
     setProductGeneratingRecordId(recordId);
     setProductDetailImages(resultItems);
     setProductDetailGenerating(true);
@@ -998,10 +1041,7 @@ export function App() {
     images: GeneratedDetailImage[],
     status: GenerationRecord["status"],
   ) {
-    if (
-      activeGenerationRecordIdRef.current === recordId &&
-      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
-    ) {
+    if (isDisplayedGenerationRecord(recordId, "product")) {
       setProductDetailImages(images);
     }
     setGenerationRecords((currentRecords) =>
@@ -1064,10 +1104,7 @@ export function App() {
     imageId: string,
     updater: (image: GeneratedDetailImage) => GeneratedDetailImage,
   ) {
-    if (
-      activeGenerationRecordIdRef.current === recordId &&
-      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
-    ) {
+    if (isDisplayedGenerationRecord(recordId, "scene")) {
       setSceneImages((currentImages) => currentImages.map((image) => (image.id === imageId ? updater(image) : image)));
     }
     setGenerationRecords((currentRecords) =>
@@ -1081,29 +1118,53 @@ export function App() {
     );
   }
 
-  function removeGeneratedImageById(
+  function updateGeneratedImageForRecord(
+    recordId: string,
+    workspace: GenerationRecord["workspace"],
     imageId: string,
-    workspace: "clothing" | "product" | "scene",
-    recordId?: string,
+    updater: (image: GeneratedDetailImage) => GeneratedDetailImage,
   ) {
-    if (workspace === "product") {
-      setProductDetailImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
-    } else if (workspace === "clothing") {
-      setClothingSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
-    } else if (
-      recordId &&
-      activeGenerationRecordIdRef.current === recordId &&
-      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
-    ) {
-      setSceneImages((currentImages) => currentImages.filter((image) => image.id !== imageId));
+    if (isDisplayedGenerationRecord(recordId, workspace)) {
+      const updateImages = (currentImages: GeneratedDetailImage[]) =>
+        currentImages.map((image) => (image.id === imageId ? updater(image) : image));
+      if (workspace === "product") {
+        setProductDetailImages(updateImages);
+      } else if (workspace === "clothing") {
+        setClothingSceneImages(updateImages);
+      } else {
+        setSceneImages(updateImages);
+      }
     }
     setGenerationRecords((currentRecords) =>
       currentRecords.map((record) => {
-        if (
-          record.workspace !== workspace ||
-          (workspace === "scene" && record.id !== recordId) ||
-          !record.images.some((image) => image.id === imageId)
-        ) {
+        if (record.id !== recordId || record.workspace !== workspace) {
+          return record;
+        }
+        const images = record.images.map((image) => (image.id === imageId ? updater(image) : image));
+        return { ...record, images, status: deriveProductGenerationRecordStatus(images) };
+      }),
+    );
+  }
+
+  function removeGeneratedImageById(
+    imageId: string,
+    workspace: "clothing" | "product" | "scene",
+    recordId: string,
+  ) {
+    if (isDisplayedGenerationRecord(recordId, workspace)) {
+      const removeImage = (currentImages: GeneratedDetailImage[]) =>
+        currentImages.filter((image) => image.id !== imageId);
+      if (workspace === "product") {
+        setProductDetailImages(removeImage);
+      } else if (workspace === "clothing") {
+        setClothingSceneImages(removeImage);
+      } else {
+        setSceneImages(removeImage);
+      }
+    }
+    setGenerationRecords((currentRecords) =>
+      currentRecords.map((record) => {
+        if (record.id !== recordId || record.workspace !== workspace) {
           return record;
         }
         const images = record.images.filter((image) => image.id !== imageId);
@@ -1117,17 +1178,12 @@ export function App() {
   }
 
   function findGeneratedImageRecord(imageId: string, workspace: GenerationRecord["workspace"]) {
-    if (workspace === "scene") {
-      const displayedRecordId = historyViewingRecordIdRef.current ?? activeGenerationRecordIdRef.current;
-      return generationRecords.find(
-        (record) =>
-          record.id === displayedRecordId &&
-          record.workspace === "scene" &&
-          record.images.some((image) => image.id === imageId),
-      );
-    }
+    const displayedRecordId = displayedGenerationRecordIdsRef.current[workspace];
     return generationRecords.find(
-      (record) => record.workspace === workspace && record.images.some((image) => image.id === imageId),
+      (record) =>
+        record.id === displayedRecordId &&
+        record.workspace === workspace &&
+        record.images.some((image) => image.id === imageId),
     );
   }
 
@@ -1227,13 +1283,7 @@ export function App() {
         status: "complete",
         width: replacement.asset.width ?? option.width,
       });
-      if (parentRecord.workspace === "product") {
-        updateProductDetailImageById(image.id, updateImage);
-      } else if (parentRecord.workspace === "clothing") {
-        updateClothingSceneImageById(image.id, updateImage);
-      } else {
-        updateSceneImageById(parentRecord.id, image.id, updateImage);
-      }
+      updateGeneratedImageForRecord(parentRecord.id, parentRecord.workspace, image.id, updateImage);
       showToast({ message: "图片尺寸已修改", variant: "success" });
     } catch (error) {
       let message = error instanceof Error ? error.message : "图片尺寸修改失败。";
@@ -1628,10 +1678,7 @@ export function App() {
     );
     const publishImages = (nextImages: GeneratedDetailImage[]) => {
       latestImages = nextImages;
-      if (
-        activeGenerationRecordIdRef.current === parentRecord.id &&
-        (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === parentRecord.id)
-      ) {
+      if (isDisplayedGenerationRecord(parentRecord.id, "product")) {
         setProductDetailImages(nextImages);
       }
       setGenerationRecords((currentRecords) =>
@@ -1764,11 +1811,71 @@ export function App() {
     }
   }
 
-  async function persistProductImageRewriteTask(image: GeneratedDetailImage, instruction: string) {
+  async function persistGeneratedImageRewriteTask(image: GeneratedDetailImage, instruction: string) {
     const rewriteInstruction = instruction.trim() || "按当前图片 prompt 重新生成，保持主体和信息区一致。";
-    const basePrompt = image.prompt || `场景描述：${image.title}`;
-    const resolvedPrompt = `${basePrompt}\n\n单图微调要求：${rewriteInstruction}`;
-    const imageNo = resolveGeneratedImageNo(image, productDetailImages);
+    return persistGeneratedImageEditTask(image, {
+      idempotencyScope: "rewrite",
+      inputKind: "result-image-rewrite",
+      input: { rewriteInstruction },
+      taskTitle: `微调 ${image.title}`,
+    });
+  }
+
+  async function recognizeGeneratedImageText(image: GeneratedDetailImage): Promise<ImageTextRecognitionResult> {
+    const workspace = activeWorkspace === "scene" || activeWorkspace === "clothing" ? activeWorkspace : "product";
+    const parentRecord = findGeneratedImageRecord(image.id, workspace);
+    const currentImage = parentRecord?.images.find((recordImage) => recordImage.id === image.id);
+    if (!image.assetId || currentImage?.assetId !== image.assetId) {
+      throw new ImageTextRecognitionError({
+        code: "ASSET_NOT_FOUND",
+        message: "当前图片已变化，请重新打开文字编辑。",
+        retryable: false,
+      });
+    }
+    return localAiAssistPort.recognizeImageText({ assetId: image.assetId });
+  }
+
+  function notifyImageTextRecognitionEmpty() {
+    showToast({ message: "未识别到文字", variant: "warning" });
+  }
+
+  function notifyImageTextRewriteError(message: string) {
+    showToast({ message, variant: "error" });
+  }
+
+  async function persistGeneratedImageTextRewriteTask(
+    image: GeneratedDetailImage,
+    changes: ResultImageTextChange[],
+  ) {
+    const workspace = activeWorkspace === "scene" || activeWorkspace === "clothing" ? activeWorkspace : "product";
+    const parentRecord = findGeneratedImageRecord(image.id, workspace);
+    const currentImage = parentRecord?.images.find((recordImage) => recordImage.id === image.id);
+    if (!image.assetId || currentImage?.assetId !== image.assetId) {
+      throw new Error("当前图片已变化，请重新识别文字。");
+    }
+    await persistGeneratedImageEditTask(image, {
+      idempotencyScope: "text-rewrite",
+      inputKind: "result-image-text-rewrite",
+      input: { changes },
+      taskTitle: `修改文字 ${image.title}`,
+    });
+  }
+
+  async function persistGeneratedImageEditTask(
+    image: GeneratedDetailImage,
+    edit: {
+      idempotencyScope: string;
+      input: Record<string, unknown>;
+      inputKind: string;
+      taskTitle: string;
+    },
+  ) {
+    const workspace = activeWorkspace === "scene" || activeWorkspace === "clothing" ? activeWorkspace : "product";
+    const parentRecord = findGeneratedImageRecord(image.id, workspace);
+    if (!parentRecord?.persistedTaskId || !image.assetId) {
+      throw new Error("AI 改图缺少原生成任务或结果资产，无法建立可追踪的替换关系。");
+    }
+    const imageNo = resolveGeneratedImageNo(image, parentRecord.images);
     const referenceImages = image.assetId
       ? [
           {
@@ -1783,19 +1890,13 @@ export function App() {
     if (inputAssets.length === 0) {
       throw new Error("AI 改图缺少可复用的生成图资产，请等待图片生成完成后再试。");
     }
-    const parentRecord = generationRecords.find(
-      (record) => record.workspace === "product" && record.images.some((recordImage) => recordImage.id === image.id),
-    );
-    if (!parentRecord?.persistedTaskId || !image.assetId) {
-      throw new Error("AI 改图缺少原生成任务或结果资产，无法建立可追踪的替换关系。");
-    }
     const task = await localGenerationPort.createTask({
-      idempotencyKey: `${image.id}:rewrite:${Date.now()}`,
-      workspace: "product",
+      idempotencyKey: `${image.id}:${edit.idempotencyScope}:${Date.now()}`,
+      workspace: parentRecord.workspace,
       kind: "image-edit",
-      title: `微调 ${image.title}`,
+      title: edit.taskTitle,
       input: {
-        kind: "product-detail-image-rewrite",
+        kind: edit.inputKind,
         parentTaskId: parentRecord.persistedTaskId,
         targetImageId: image.id,
         imageNo,
@@ -1803,22 +1904,7 @@ export function App() {
         sourceImageId: image.id,
         sourceImageNo: imageNo,
         sourceImageTitle: image.title,
-        basePrompt,
-        rewriteInstruction,
-        resolvedPrompt,
-        prompt: {
-          messages: [
-            {
-              role: "system",
-              content: "你是专业电商商品图局部微调助手。必须保持商品主体、颜色、版型、图案和已提供事实一致。",
-            },
-            {
-              role: "user",
-              content: resolvedPrompt,
-            },
-          ],
-          rolelessPrompt: resolvedPrompt,
-        },
+        ...edit.input,
       },
       inputAssets,
     });
@@ -1849,7 +1935,7 @@ export function App() {
         replacementAssetId: replacement.asset.id,
       });
       unmergedSucceededTaskId = null;
-      updateProductDetailImageById(image.id, (currentImage) => ({
+      updateGeneratedImageForRecord(parentRecord.id, parentRecord.workspace, image.id, (currentImage) => ({
         ...currentImage,
         assetId: replacement.asset.id,
         assetLocalPath: replacement.asset.localPath,
@@ -1857,7 +1943,9 @@ export function App() {
         errorMessage: undefined,
         height: replacement.asset.height,
         referenceImages,
-        src: replacement.asset.url ?? replacement.asset.localPath,
+        src: normalizeAssetSrc(
+          replacement.asset.url ?? replacement.asset.localPath ?? replacement.asset.relativePath,
+        ),
         status: "complete",
         width: replacement.asset.width,
       }));
@@ -1872,8 +1960,9 @@ export function App() {
 
   function handleOpenGenerationRecord(record: GenerationRecord) {
     setActiveWorkspace(record.workspace);
+    setDisplayedGenerationRecordId(record.workspace, record.id);
     setActiveGenerationRecordId(record.id);
-    setHistoryViewingRecordId(record.id);
+    setHistoryViewingRecordId(record.workspace, record.id);
     if (record.workspace === "product") {
       setProductDetailImages(record.images);
     } else if (record.workspace === "clothing") {
@@ -1892,19 +1981,28 @@ export function App() {
     deletedGenerationRecordIdsRef.current.add(recordId);
     setGenerationRecords((currentRecords) => currentRecords.filter((record) => record.id !== recordId));
     deletePersistedGenerationRecord(deletedRecord);
-    if (activeGenerationRecordId !== recordId || !deletedRecord) {
+    if (!deletedRecord) {
+      return;
+    }
+
+    if (isDisplayedGenerationRecord(recordId, deletedRecord.workspace)) {
+      setDisplayedGenerationRecordId(deletedRecord.workspace, null);
+      if (deletedRecord.workspace === "product") {
+        setProductDetailImages([]);
+      } else if (deletedRecord.workspace === "clothing") {
+        setClothingSceneImages([]);
+      } else {
+        setSceneImages([]);
+      }
+    }
+    if (historyViewingRecordIdsRef.current[deletedRecord.workspace] === recordId) {
+      setHistoryViewingRecordId(deletedRecord.workspace, null);
+    }
+    if (activeGenerationRecordId !== recordId) {
       return;
     }
 
     setActiveGenerationRecordId(null);
-    setHistoryViewingRecordId((currentId) => (currentId === recordId ? null : currentId));
-    if (deletedRecord.workspace === "product") {
-      setProductDetailImages([]);
-    } else if (deletedRecord.workspace === "clothing") {
-      setClothingSceneImages([]);
-    } else {
-      setSceneImages([]);
-    }
   }
 
   function handleClearGenerationRecords() {
@@ -1913,8 +2011,13 @@ export function App() {
       deletePersistedGenerationRecord(record);
     });
     setGenerationRecords([]);
+    setDisplayedGenerationRecordId("product", null);
+    setDisplayedGenerationRecordId("clothing", null);
+    setDisplayedGenerationRecordId("scene", null);
+    const clearedHistoryRecordIds = { clothing: null, product: null, scene: null };
+    historyViewingRecordIdsRef.current = clearedHistoryRecordIds;
+    setHistoryViewingRecordIds(clearedHistoryRecordIds);
     setActiveGenerationRecordId(null);
-    setHistoryViewingRecordId(null);
     setProductDetailImages([]);
     setClothingSceneImages([]);
     setSceneImages([]);
@@ -1925,7 +2028,7 @@ export function App() {
     setProductStrategyDrafting(false);
     setProductDetailGenerating(false);
     setProductDetailImages([]);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("product", null);
   }
 
   async function handleGenerateClothingScenePlan(config: ClothingConfigState) {
@@ -2125,8 +2228,9 @@ export function App() {
 
     deletedGenerationRecordIdsRef.current.delete(recordId);
     setGenerationRecords((currentRecords) => [record, ...currentRecords]);
+    setDisplayedGenerationRecordId("clothing", recordId);
     setActiveGenerationRecordId(recordId);
-    setHistoryViewingRecordId(null);
+    setHistoryViewingRecordId("clothing", null);
     setClothingGeneratingRecordId(recordId);
     clothingGeneratingRecordIdRef.current = recordId;
     setClothingSceneImages(images);
@@ -2145,7 +2249,7 @@ export function App() {
     let latestImages = resultItems;
     const publishImages = (nextImages: GeneratedDetailImage[], status: GenerationRecord["status"] = "generating") => {
       latestImages = nextImages;
-      if (activeGenerationRecordIdRef.current === recordId) {
+      if (isDisplayedGenerationRecord(recordId, "clothing")) {
         setClothingSceneImages(nextImages);
       }
       setGenerationRecords((currentRecords) =>
@@ -2430,10 +2534,10 @@ export function App() {
         workspace: "scene",
       };
       setGenerationRecords((records) => mergeGenerationRecords(records, [record]));
+      setDisplayedGenerationRecordId("scene", task.id);
       activeGenerationRecordIdRef.current = task.id;
-      historyViewingRecordIdRef.current = null;
+      setHistoryViewingRecordId("scene", null);
       setActiveGenerationRecordId(task.id);
-      setHistoryViewingRecordId(null);
       await requestGenerationTaskStart(task.id, "场景图片任务未能启动，请稍后重试。");
       const detail = await pollSceneTask(task.id, requestId, "generation", (nextDetail) => {
         images = applySceneGeneratedAssetOutputs(images, nextDetail);
@@ -2469,10 +2573,7 @@ export function App() {
     if (sceneGenerationRequestIdRef.current !== requestId || deletedGenerationRecordIdsRef.current.has(recordId)) {
       return;
     }
-    if (
-      activeGenerationRecordIdRef.current === recordId &&
-      (historyViewingRecordIdRef.current === null || historyViewingRecordIdRef.current === recordId)
-    ) {
+    if (isDisplayedGenerationRecord(recordId, "scene")) {
       setSceneImages(images);
     }
     setGenerationRecords((records) =>
@@ -2741,7 +2842,7 @@ export function App() {
         return;
       }
       const viewingRestoredRecord =
-        activeGenerationRecordIdRef.current === recordId && historyViewingRecordIdRef.current === recordId;
+        isDisplayedGenerationRecord(recordId, "scene") && historyViewingRecordIdsRef.current.scene === recordId;
       if (viewingRestoredRecord) {
         setSceneImages(images);
         if (status !== "generating") {
@@ -2988,7 +3089,7 @@ export function App() {
           historyOpen={historyOpen}
           historyPopover={
             <GenerationHistoryPopover
-              activeRecordId={activeGenerationRecordId}
+              activeRecordId={activeHistoryRecordId}
               onClearRecords={handleClearGenerationRecords}
               onClose={closeHistory}
               onDeleteRecord={handleDeleteGenerationRecord}
@@ -3079,10 +3180,16 @@ export function App() {
             <PreviewCanvas
               boards={previewBoards}
               detailImages={sceneImages}
+              textEditScopeId={displayedGenerationRecordIdsRef.current.scene ?? "scene-live"}
               onImageDelete={deleteGeneratedImage}
               onImageResize={resizeGeneratedImage}
+              onImageRewrite={persistGeneratedImageRewriteTask}
+              onImageTextRecognitionEmpty={notifyImageTextRecognitionEmpty}
+              onImageTextRewrite={persistGeneratedImageTextRewriteTask}
+              onImageTextRewriteError={notifyImageTextRewriteError}
               onImageRetry={retrySceneImage}
               onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
+              onRecognizeImageText={recognizeGeneratedImageText}
             />
           ) : (
             <ScenePreviewCanvas />
@@ -3092,10 +3199,16 @@ export function App() {
             <PreviewCanvas
               boards={previewBoards}
               detailImages={clothingSceneImages}
+              textEditScopeId={displayedGenerationRecordIdsRef.current.clothing ?? "clothing-live"}
               onImageDelete={deleteGeneratedImage}
               onImageResize={resizeGeneratedImage}
+              onImageRewrite={persistGeneratedImageRewriteTask}
+              onImageTextRecognitionEmpty={notifyImageTextRecognitionEmpty}
+              onImageTextRewrite={persistGeneratedImageTextRewriteTask}
+              onImageTextRewriteError={notifyImageTextRewriteError}
               onImageRetry={retryClothingSceneImage}
               onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
+              onRecognizeImageText={recognizeGeneratedImageText}
             />
           ) : (
             <ClothingPreviewCanvas />
@@ -3104,12 +3217,17 @@ export function App() {
           <PreviewCanvas
             boards={previewBoards}
             detailImages={productDetailImages}
+            textEditScopeId={displayedGenerationRecordIdsRef.current.product ?? "product-live"}
             onImageDelete={deleteGeneratedImage}
             onImageResize={resizeGeneratedImage}
-            onImageRewrite={persistProductImageRewriteTask}
+            onImageRewrite={persistGeneratedImageRewriteTask}
+            onImageTextRecognitionEmpty={notifyImageTextRecognitionEmpty}
+            onImageTextRewrite={persistGeneratedImageTextRewriteTask}
+            onImageTextRewriteError={notifyImageTextRewriteError}
             onImageRetry={retryProductDetailImage}
             onLoadImageSizeOptions={loadGeneratedImageSizeOptions}
             onListingCopyRetry={retryProductListingCopy}
+            onRecognizeImageText={recognizeGeneratedImageText}
           />
         )
       }

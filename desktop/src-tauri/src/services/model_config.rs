@@ -35,6 +35,12 @@ pub const CAPABILITIES: &[ModelCapabilityDefinition] = &[
         "mock-product-selling-points-v1",
     ),
     ModelCapabilityDefinition::new(
+        "image-text-recognition",
+        "image-to-text",
+        "图片文字识别",
+        "mock-image-text-recognition-v1",
+    ),
+    ModelCapabilityDefinition::new(
         "clothing-scene-planning",
         "image-to-text",
         "服饰场景动作规划",
@@ -109,6 +115,7 @@ impl ModelCapabilityDefinition {
 
     pub(crate) fn max_input_assets(&self) -> i64 {
         match self.id {
+            "image-text-recognition" => 1,
             "clothing-scene-planning" | "clothing-tryon-generation" => 6,
             "scene-prompt-planning" | "scene-image-generation" => 3,
             _ => match self.category {
@@ -145,7 +152,9 @@ impl ModelCapabilityDefinition {
 pub(crate) fn capability_requires_real_provider(capability_id: &str) -> bool {
     matches!(
         capability_id,
-        "clothing-scene-planning"
+        "image-edit"
+            | "image-text-recognition"
+            | "clothing-scene-planning"
             | "clothing-base-model-generation"
             | "clothing-tryon-generation"
             | "scene-prompt-planning"
@@ -172,6 +181,7 @@ pub const ALL_CAPABILITY_IDS: &[&str] = &[
     "listing-copy",
     "prompt-plan",
     "product-selling-points",
+    "image-text-recognition",
     "clothing-scene-planning",
     "scene-prompt-planning",
     "viral-style-analysis",
@@ -195,6 +205,7 @@ pub const OPENAI_CAPABILITY_IDS: &[&str] = &[
     "listing-copy",
     "prompt-plan",
     "product-selling-points",
+    "image-text-recognition",
     "clothing-scene-planning",
     "scene-prompt-planning",
     "viral-style-analysis",
@@ -1674,8 +1685,8 @@ mod tests {
     use crate::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
 
     use super::{
-        image_size_options, validate_image_size, ModelConfigService, SaveLocalModelConfigInput,
-        SetDefaultModelConfigInput,
+        capability_requires_real_provider, image_size_options, validate_image_size,
+        ModelConfigService, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
     };
 
     fn label_has_expected_direction(width: i64, height: i64, label: &str) -> bool {
@@ -1684,6 +1695,11 @@ mod tests {
             std::cmp::Ordering::Less => label.contains("竖图"),
             std::cmp::Ordering::Greater => label.contains("横图"),
         }
+    }
+
+    #[test]
+    fn image_edit_requires_a_real_provider() {
+        assert!(capability_requires_real_provider("image-edit"));
     }
 
     #[test]

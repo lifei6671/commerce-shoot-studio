@@ -106,7 +106,7 @@ impl GenerationService {
         input: CreateGenerationTaskInput,
     ) -> Result<GenerationTask, GenerationError> {
         validate_title(&input.title)?;
-        validate_persisted_task_input(input.workspace, input.input.as_ref())?;
+        validate_persisted_task_input(input.workspace, input.kind, input.input.as_ref())?;
         let database = open_database(workspace_directory)?;
         let idempotency_key = input.idempotency_key.unwrap_or_else(create_idempotency_key);
 
@@ -169,6 +169,16 @@ impl GenerationService {
         let database = open_database(workspace_directory)?;
         let original = find_task_by_id(&database, &input.task_id)?
             .ok_or_else(|| GenerationError::NotFound(input.task_id.clone()))?;
+        let original_input_json: Option<String> = database.connection().query_row(
+            "SELECT input_json FROM generation_tasks WHERE id = ?1",
+            params![original.task.id],
+            |row| row.get(0),
+        )?;
+        let original_input = original_input_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()?;
+        validate_result_image_task_kind(original.task.kind, original_input.as_ref())?;
         let task_id = create_task_id();
         let attempt_no = original.task.attempt_no + 1;
         let idempotency_key = format!("retry:{}:{attempt_no}", original.task.id);
@@ -255,15 +265,37 @@ impl GenerationService {
     ) -> Result<(), GenerationError> {
         let database = open_database(workspace_directory)?;
         ensure_task_exists(&database, task_id)?;
-        database.connection().execute(
+        let transaction = database.connection().unchecked_transaction()?;
+        let is_unmerged_text_rewrite: bool = transaction.query_row(
             "
-            UPDATE generation_tasks
-            SET hidden_at = COALESCE(hidden_at, datetime('now')),
-                updated_at = datetime('now')
+            SELECT COALESCE(
+                kind = 'image-edit'
+                AND CASE
+                        WHEN json_valid(input_json)
+                        THEN json_extract(input_json, '$.kind')
+                    END = 'result-image-text-rewrite',
+                0
+            )
+            FROM generation_tasks
             WHERE id = ?1
             ",
             params![task_id],
+            |row| row.get(0),
         )?;
+        if is_unmerged_text_rewrite {
+            cleanup_derived_result_task(&transaction, task_id)?;
+        } else {
+            transaction.execute(
+                "
+                UPDATE generation_tasks
+                SET hidden_at = COALESCE(hidden_at, datetime('now')),
+                    updated_at = datetime('now')
+                WHERE id = ?1
+                ",
+                params![task_id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -319,7 +351,15 @@ impl GenerationService {
             .and_then(serde_json::Value::as_str);
         let (target_image_id, image_no, source_asset_id) =
             match (kind.as_str(), replacement_input_kind) {
-                ("image-edit", Some("result-image-resize" | "product-detail-image-rewrite")) => {
+                (
+                    "image-edit",
+                    Some(
+                        "result-image-resize"
+                        | "result-image-rewrite"
+                        | "result-image-text-rewrite"
+                        | "product-detail-image-rewrite",
+                    ),
+                ) => {
                     let target_image_id = replacement_input
                         .get("targetImageId")
                         .and_then(serde_json::Value::as_str)
@@ -939,16 +979,7 @@ fn hide_superseded_result_tasks(
             continue;
         }
         displayed_task_matched |= owns_displayed_asset;
-        let output_asset_ids = {
-            let mut output_statement = connection.prepare(
-                "SELECT asset_id FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
-            )?;
-            let output_asset_ids = output_statement
-                .query_map([task_id.as_str()], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            output_asset_ids
-        };
-        matched_tasks.push((task_id, output_asset_ids));
+        matched_tasks.push(task_id);
     }
     if displayed_asset_id.is_some() && !displayed_task_matched {
         return Err(GenerationError::Validation(
@@ -956,40 +987,57 @@ fn hide_superseded_result_tasks(
         ));
     }
 
-    for (task_id, output_asset_ids) in matched_tasks {
-        connection.execute(
-            "DELETE FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
-            [task_id.as_str()],
+    for task_id in matched_tasks {
+        cleanup_derived_result_task(connection, &task_id)?;
+    }
+    Ok(())
+}
+
+fn cleanup_derived_result_task(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+) -> Result<(), GenerationError> {
+    let output_asset_ids = {
+        let mut statement = connection.prepare(
+            "SELECT asset_id FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
         )?;
-        connection.execute(
-            "DELETE FROM generation_task_input_assets WHERE task_id = ?1",
-            [task_id.as_str()],
-        )?;
-        connection.execute(
-            "
-            UPDATE generation_tasks
-            SET status = CASE
-                    WHEN status IN ('queued', 'running') THEN 'cancelled'
-                    ELSE status
-                END,
-                stage = CASE
-                    WHEN status IN ('queued', 'running') THEN 'failed'
-                    ELSE stage
-                END,
-                completed_at = CASE
-                    WHEN status IN ('queued', 'running')
-                    THEN COALESCE(completed_at, datetime('now'))
-                    ELSE completed_at
-                END,
-                hidden_at = COALESCE(hidden_at, datetime('now')),
-                updated_at = datetime('now')
-            WHERE id = ?1
-            ",
-            params![task_id],
-        )?;
-        for output_asset_id in output_asset_ids {
-            soft_delete_asset_without_visible_references(connection, &output_asset_id)?;
-        }
+        let asset_ids = statement
+            .query_map([task_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        asset_ids
+    };
+    connection.execute(
+        "DELETE FROM generation_assets WHERE task_id = ?1 AND role = 'output'",
+        [task_id],
+    )?;
+    connection.execute(
+        "DELETE FROM generation_task_input_assets WHERE task_id = ?1",
+        [task_id],
+    )?;
+    connection.execute(
+        "
+        UPDATE generation_tasks
+        SET status = CASE
+                WHEN status IN ('queued', 'running') THEN 'cancelled'
+                ELSE status
+            END,
+            stage = CASE
+                WHEN status IN ('queued', 'running') THEN 'failed'
+                ELSE stage
+            END,
+            completed_at = CASE
+                WHEN status IN ('queued', 'running')
+                THEN COALESCE(completed_at, datetime('now'))
+                ELSE completed_at
+            END,
+            hidden_at = COALESCE(hidden_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE id = ?1
+        ",
+        params![task_id],
+    )?;
+    for output_asset_id in output_asset_ids {
+        soft_delete_asset_without_visible_references(connection, &output_asset_id)?;
     }
     Ok(())
 }
@@ -1001,6 +1049,17 @@ fn validate_result_image_identity(
     image_id: &str,
     image_no: Option<i64>,
 ) -> Result<(), GenerationError> {
+    validate_result_image_identity_anchored(connection, task_id, sort_order, image_id, image_no)
+        .map(|_| ())
+}
+
+fn validate_result_image_identity_anchored(
+    connection: &rusqlite::Connection,
+    task_id: &str,
+    sort_order: i64,
+    image_id: &str,
+    image_no: Option<i64>,
+) -> Result<bool, GenerationError> {
     if image_id.trim().is_empty() {
         return Err(GenerationError::Validation(
             "结果图标识不能为空。".to_string(),
@@ -1071,6 +1130,58 @@ fn validate_result_image_identity(
     {
         return Err(GenerationError::Validation(
             "结果图标识与任务快照不匹配。".to_string(),
+        ));
+    }
+    Ok(!expected_image_ids.is_empty())
+}
+
+pub(crate) fn validate_result_image_rewrite_source(
+    workspace_directory: &Path,
+    parent_task_id: &str,
+    target_image_id: &str,
+    image_no: i64,
+    source_asset_id: &str,
+) -> Result<(), GenerationError> {
+    if image_no <= 0 || parent_task_id.trim().is_empty() || source_asset_id.trim().is_empty() {
+        return Err(GenerationError::Validation(
+            "图片文字修改来源结果无效。".to_string(),
+        ));
+    }
+    let database = open_database(workspace_directory)?;
+    let identity_anchored = validate_result_image_identity_anchored(
+        database.connection(),
+        parent_task_id,
+        image_no - 1,
+        target_image_id,
+        Some(image_no),
+    )?;
+    let legacy_fallback_image_id = format!("{parent_task_id}:{}", image_no - 1);
+    if !identity_anchored && target_image_id != legacy_fallback_image_id {
+        return Err(GenerationError::Validation(
+            "图片文字修改缺少稳定结果图标识。".to_string(),
+        ));
+    }
+    let current_source_count: i64 = database.connection().query_row(
+        "
+        SELECT COUNT(*)
+        FROM generation_assets rel
+        JOIN generation_tasks parent ON parent.id = rel.task_id
+        JOIN assets asset ON asset.id = rel.asset_id
+        WHERE rel.task_id = ?1
+          AND rel.role = 'output'
+          AND rel.sort_order = ?2
+          AND rel.asset_id = ?3
+          AND parent.hidden_at IS NULL
+          AND asset.kind = 'generated'
+          AND asset.lifecycle = 'active'
+          AND asset.deleted_at IS NULL
+        ",
+        params![parent_task_id, image_no - 1, source_asset_id],
+        |row| row.get(0),
+    )?;
+    if current_source_count != 1 {
+        return Err(GenerationError::Validation(
+            "图片文字修改来源已失效。".to_string(),
         ));
     }
     Ok(())
@@ -1448,6 +1559,7 @@ fn validate_title(title: &str) -> Result<(), GenerationError> {
 
 fn validate_persisted_task_input(
     workspace: WorkspaceKind,
+    task_kind: GenerationTaskKind,
     input: Option<&serde_json::Value>,
 ) -> Result<(), GenerationError> {
     if workspace == WorkspaceKind::Scene
@@ -1457,7 +1569,105 @@ fn validate_persisted_task_input(
             "场景任务参考图只能通过 inputAssets 关联。".to_string(),
         ));
     }
+    let Some(input) = input else {
+        return Ok(());
+    };
+    validate_result_image_task_kind(task_kind, Some(input))?;
+    let input_kind = input.get("kind").and_then(serde_json::Value::as_str);
+    let is_result_rewrite = matches!(
+        input_kind,
+        Some("result-image-rewrite" | "product-detail-image-rewrite" | "result-image-text-rewrite")
+    );
+    if !is_result_rewrite {
+        return Ok(());
+    }
+    if contains_forbidden_persisted_rewrite_value(input) {
+        return Err(GenerationError::Validation(
+            "结果图片修改任务包含禁止持久化的模型输入。".to_string(),
+        ));
+    }
+    if input.get("kind").and_then(serde_json::Value::as_str) == Some("result-image-text-rewrite") {
+        let changes = input
+            .get("changes")
+            .and_then(serde_json::Value::as_array)
+            .filter(|changes| !changes.is_empty() && changes.len() <= 100)
+            .ok_or_else(|| {
+                GenerationError::Validation("图片文字修改 changes 数量无效。".to_string())
+            })?;
+        if serde_json::to_vec(changes)?.len() > 512 * 1024 {
+            return Err(GenerationError::Validation(
+                "图片文字修改 changes 体积超过限制。".to_string(),
+            ));
+        }
+        for change in changes {
+            let change = change.as_object().ok_or_else(|| {
+                GenerationError::Validation("图片文字修改 change 格式无效。".to_string())
+            })?;
+            if change.keys().any(|field| {
+                !matches!(
+                    field.as_str(),
+                    "lineId" | "operation" | "originalText" | "replacementText" | "box"
+                )
+            }) {
+                return Err(GenerationError::Validation(
+                    "图片文字修改 change 包含未知字段。".to_string(),
+                ));
+            }
+            for field in ["lineId", "originalText", "replacementText"] {
+                if let Some(value) = change.get(field) {
+                    let value = value.as_str().ok_or_else(|| {
+                        GenerationError::Validation(format!("图片文字修改 {field} 必须是字符串。"))
+                    })?;
+                    if value.chars().count() > 500 {
+                        return Err(GenerationError::Validation(
+                            "图片文字修改文本长度超过限制。".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+fn validate_result_image_task_kind(
+    task_kind: GenerationTaskKind,
+    input: Option<&serde_json::Value>,
+) -> Result<(), GenerationError> {
+    let input_kind = input
+        .and_then(|value| value.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    let is_result_image_edit = matches!(
+        input_kind,
+        Some(
+            "result-image-resize"
+                | "result-image-rewrite"
+                | "product-detail-image-rewrite"
+                | "result-image-text-rewrite"
+        )
+    );
+    if is_result_image_edit && task_kind != GenerationTaskKind::ImageEdit {
+        return Err(GenerationError::Validation(
+            "结果图片修改任务的外层 kind 必须是 image-edit。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn contains_forbidden_persisted_rewrite_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "prompt" | "messages" | "rolelessPrompt" | "userImages"
+            ) || contains_forbidden_persisted_rewrite_value(value)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(contains_forbidden_persisted_rewrite_value),
+        serde_json::Value::String(value) => value.trim_start().starts_with("data:image/"),
+        _ => false,
+    }
 }
 
 fn serialize_optional_json(
@@ -1516,8 +1726,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CreateGenerationTaskInput, DeleteGenerationResultImageInput, GenerationService,
-        GenerationTaskQuery, ReplaceGenerationResultImageInput,
+        validate_result_image_rewrite_source, CreateGenerationTaskInput,
+        DeleteGenerationResultImageInput, GenerationService, GenerationTaskQuery,
+        ReplaceGenerationResultImageInput, RetryGenerationTaskInput,
     };
     use crate::domain::generation::{GenerationError, GenerationTaskKind, WorkspaceKind};
     use crate::infrastructure::database::WorkspaceDatabase;
@@ -1587,6 +1798,319 @@ mod tests {
             })
             .expect("查询任务数量");
         assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn create_result_rewrite_rejects_model_payloads_before_inserting() {
+        let workspace = TestWorkspace::new("rewrite-sensitive-persistence");
+        let cases = [
+            json!({
+                "kind": "result-image-rewrite",
+                "rewriteInstruction": "换背景",
+                "prompt": { "rolelessPrompt": "完整 Prompt" }
+            }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "delete",
+                    "originalText": "旧文",
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }],
+                "userImages": [{ "dataUrl": "data:image/png;base64,AA==" }]
+            }),
+            json!({
+                "kind": "result-image-rewrite",
+                "rewriteInstruction": "data:image/png;base64,AA=="
+            }),
+        ];
+
+        for (index, input) in cases.into_iter().enumerate() {
+            GenerationService::new()
+                .create_task(
+                    workspace.path(),
+                    CreateGenerationTaskInput {
+                        idempotency_key: Some(format!("rewrite-sensitive-{index}")),
+                        workspace: WorkspaceKind::Product,
+                        kind: GenerationTaskKind::ImageEdit,
+                        title: "结果图修改".to_string(),
+                        prompt_plan_id: None,
+                        input: Some(input),
+                        prompt_plan_snapshot: None,
+                        input_assets: Vec::new(),
+                    },
+                )
+                .expect_err("模型 Prompt 或内联图片必须在写库前拒绝");
+        }
+
+        let task_count: i64 = workspace
+            .database()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .expect("查询任务数量");
+        assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn create_text_rewrite_rejects_oversized_changes_before_inserting() {
+        let workspace = TestWorkspace::new("rewrite-changes-persistence");
+        let cases = [
+            json!({ "kind": "result-image-text-rewrite", "changes": [] }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "replace",
+                    "originalText": "旧文",
+                    "replacementText": "字".repeat(501),
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "replace",
+                    "originalText": "旧文",
+                    "replacementText": ["新文"],
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "replace",
+                    "originalText": "旧文",
+                    "replacementText": ["字".repeat(600_000)],
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "delete",
+                    "originalText": "旧文",
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 },
+                    "payload": "unexpected"
+                }]
+            }),
+        ];
+
+        for (index, input) in cases.into_iter().enumerate() {
+            GenerationService::new()
+                .create_task(
+                    workspace.path(),
+                    CreateGenerationTaskInput {
+                        idempotency_key: Some(format!("rewrite-changes-{index}")),
+                        workspace: WorkspaceKind::Product,
+                        kind: GenerationTaskKind::ImageEdit,
+                        title: "结果图改字".to_string(),
+                        prompt_plan_id: None,
+                        input: Some(input),
+                        prompt_plan_snapshot: None,
+                        input_assets: Vec::new(),
+                    },
+                )
+                .expect_err("过量或超长改字输入必须在写库前拒绝");
+        }
+
+        let task_count: i64 = workspace
+            .database()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .expect("查询任务数量");
+        assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn create_result_image_internal_kinds_reject_non_image_edit_before_inserting() {
+        let workspace = TestWorkspace::new("result-image-kind-binding");
+        let cases = [
+            json!({
+                "kind": "result-image-resize",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "size": "1024x1024"
+            }),
+            json!({
+                "kind": "result-image-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "rewriteInstruction": "换成浅灰背景"
+            }),
+            json!({
+                "kind": "product-detail-image-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "rewriteInstruction": "换成浅灰背景"
+            }),
+            json!({
+                "kind": "result-image-text-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "replace",
+                    "originalText": "旧文",
+                    "replacementText": "新文",
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+        ];
+
+        for (index, input) in cases.into_iter().enumerate() {
+            let error = GenerationService::new()
+                .create_task(
+                    workspace.path(),
+                    CreateGenerationTaskInput {
+                        idempotency_key: Some(format!("result-image-kind-binding-{index}")),
+                        workspace: WorkspaceKind::Product,
+                        kind: GenerationTaskKind::PromptPlan,
+                        title: "错误外层类型的结果图编辑".to_string(),
+                        prompt_plan_id: None,
+                        input: Some(input),
+                        prompt_plan_snapshot: None,
+                        input_assets: Vec::new(),
+                    },
+                )
+                .expect_err("结果图编辑内部 kind 必须绑定外层 image-edit");
+            assert!(matches!(error, GenerationError::Validation(_)));
+        }
+
+        let task_count: i64 = workspace
+            .database()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .expect("查询任务数量");
+        assert_eq!(task_count, 0);
+    }
+
+    #[test]
+    fn retry_rejects_legacy_result_image_task_with_mismatched_outer_kind() {
+        let workspace = TestWorkspace::new("retry-result-image-kind-binding");
+        let database = workspace.database();
+        insert_derived_result_task(
+            &database,
+            "legacy-mismatched-task",
+            "prompt-plan",
+            json!({
+                "kind": "result-image-text-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "delete",
+                    "originalText": "旧文",
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+        );
+        drop(database);
+
+        let error = GenerationService::new()
+            .retry_task(
+                workspace.path(),
+                RetryGenerationTaskInput {
+                    task_id: "legacy-mismatched-task".to_string(),
+                },
+            )
+            .expect_err("历史错误类型任务不能继续复制出新的非法任务");
+        assert!(matches!(error, GenerationError::Validation(_)));
+
+        let task_count: i64 = workspace
+            .database()
+            .connection()
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .expect("查询任务数量");
+        assert_eq!(task_count, 1);
+    }
+
+    #[test]
+    fn retry_allows_legacy_image_edit_with_historical_prompt_payload() {
+        let workspace = TestWorkspace::new("retry-legacy-image-edit-prompt");
+        let database = workspace.database();
+        insert_derived_result_task(
+            &database,
+            "legacy-valid-image-edit",
+            "image-edit",
+            json!({
+                "kind": "product-detail-image-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "rewriteInstruction": "换成浅灰背景",
+                "prompt": {
+                    "messages": [{ "role": "user", "content": "历史完整 Prompt" }],
+                    "rolelessPrompt": "历史完整 Prompt"
+                }
+            }),
+        );
+        drop(database);
+
+        let retry = GenerationService::new()
+            .retry_task(
+                workspace.path(),
+                RetryGenerationTaskInput {
+                    task_id: "legacy-valid-image-edit".to_string(),
+                },
+            )
+            .expect("外层类型正确的历史图片编辑任务仍应可重试");
+
+        assert_eq!(retry.kind, GenerationTaskKind::ImageEdit);
+        assert_eq!(
+            retry.retry_of_task_id.as_deref(),
+            Some("legacy-valid-image-edit")
+        );
+    }
+
+    #[test]
+    fn result_rewrite_source_accepts_only_exact_legacy_fallback_identity() {
+        let workspace = TestWorkspace::new("legacy-fallback-rewrite");
+        let database = workspace.database();
+        insert_task(&database, "legacy-task", false);
+        insert_asset(&database, "current-asset");
+        link_output(&database, "legacy-task", "current-asset", 0);
+        drop(database);
+
+        validate_result_image_rewrite_source(
+            workspace.path(),
+            "legacy-task",
+            "legacy-task:0",
+            1,
+            "current-asset",
+        )
+        .expect("旧历史零基 sortOrder fallback 应可定位当前唯一槽位");
+
+        let error = validate_result_image_rewrite_source(
+            workspace.path(),
+            "legacy-task",
+            "legacy-task:wrong",
+            1,
+            "current-asset",
+        )
+        .expect_err("任意未锚定标识不能冒充旧历史 fallback");
+        assert!(matches!(error, GenerationError::Validation(_)));
     }
 
     fn insert_task(database: &WorkspaceDatabase, task_id: &str, hidden: bool) {
@@ -1789,8 +2313,90 @@ mod tests {
     }
 
     #[test]
-    fn replace_result_image_accepts_product_detail_rewrite_with_matching_lineage() {
-        let workspace = TestWorkspace::new("replace-product-rewrite");
+    fn delete_unmerged_text_rewrite_cleans_child_assets_and_keeps_parent_result() {
+        let workspace = TestWorkspace::new("delete-unmerged-text-rewrite");
+        let database = workspace.database();
+        insert_task(&database, "parent-task", false);
+        insert_derived_result_task(
+            &database,
+            "text-rewrite-task",
+            "image-edit",
+            json!({
+                "kind": "result-image-text-rewrite",
+                "parentTaskId": "parent-task",
+                "targetImageId": "parent-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "source-asset",
+                "changes": [{
+                    "lineId": "line-001",
+                    "operation": "replace",
+                    "originalText": "旧文",
+                    "replacementText": "新文",
+                    "box": { "x": 0.1, "y": 0.1, "width": 0.2, "height": 0.1 }
+                }]
+            }),
+        );
+        insert_asset(&database, "source-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "parent-task", "source-asset", 0);
+        link_input(&database, "text-rewrite-task", "source-asset", 0);
+        link_output(&database, "text-rewrite-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .delete_task(workspace.path(), "text-rewrite-task")
+            .expect("删除未归并改字任务");
+
+        let database = workspace.database();
+        assert_eq!(
+            output_relation_count(&database, "text-rewrite-task", "replacement-asset"),
+            0
+        );
+        assert_eq!(
+            input_relation_count(&database, "text-rewrite-task", "source-asset"),
+            0
+        );
+        assert_eq!(
+            output_relation_count(&database, "parent-task", "source-asset"),
+            1
+        );
+        assert_eq!(asset_lifecycle(&database, "source-asset").0, "active");
+        assert_eq!(asset_lifecycle(&database, "replacement-asset").0, "deleted");
+        let hidden_at: Option<String> = database
+            .connection()
+            .query_row(
+                "SELECT hidden_at FROM generation_tasks WHERE id = 'text-rewrite-task'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("读取改字任务隐藏状态");
+        assert!(hidden_at.is_some());
+    }
+
+    #[test]
+    fn delete_ordinary_task_remains_hide_only() {
+        let workspace = TestWorkspace::new("delete-ordinary-task");
+        let database = workspace.database();
+        insert_derived_result_task(&database, "ordinary-task", "image-edit", json!({}));
+        insert_asset(&database, "ordinary-output");
+        link_output(&database, "ordinary-task", "ordinary-output", 0);
+        drop(database);
+
+        GenerationService::new()
+            .delete_task(workspace.path(), "ordinary-task")
+            .expect("隐藏普通任务");
+
+        let database = workspace.database();
+        assert_eq!(
+            output_relation_count(&database, "ordinary-task", "ordinary-output"),
+            1
+        );
+        assert_eq!(asset_lifecycle(&database, "ordinary-output").0, "active");
+    }
+
+    #[test]
+    fn replace_result_image_accepts_result_rewrite_with_matching_lineage() {
+        let workspace = TestWorkspace::new("replace-result-rewrite");
         let database = workspace.database();
         insert_task(&database, "original-task", false);
         set_task_items(
@@ -1803,7 +2409,7 @@ mod tests {
             "rewrite-task",
             "image-edit",
             json!({
-                "kind": "product-detail-image-rewrite",
+                "kind": "result-image-rewrite",
                 "parentTaskId": "original-task",
                 "targetImageId": "original-task:item-1",
                 "imageNo": 1,
@@ -1839,6 +2445,53 @@ mod tests {
             .expect("列出可见任务");
         assert_eq!(visible.items.len(), 1);
         assert_eq!(visible.items[0].id, "original-task");
+    }
+
+    #[test]
+    fn replace_result_image_accepts_text_rewrite_with_matching_lineage() {
+        let workspace = TestWorkspace::new("replace-result-text-rewrite");
+        let database = workspace.database();
+        insert_task(&database, "original-task", false);
+        set_task_items(
+            &database,
+            "original-task",
+            json!([{ "imageId": "original-task:item-1", "imageNo": 1, "sortOrder": 0 }]),
+        );
+        insert_derived_result_task(
+            &database,
+            "rewrite-task",
+            "image-edit",
+            json!({
+                "kind": "result-image-text-rewrite",
+                "parentTaskId": "original-task",
+                "targetImageId": "original-task:item-1",
+                "imageNo": 1,
+                "sourceAssetId": "old-asset",
+            }),
+        );
+        insert_asset(&database, "old-asset");
+        insert_asset(&database, "replacement-asset");
+        link_output(&database, "original-task", "old-asset", 0);
+        link_output(&database, "rewrite-task", "replacement-asset", 0);
+        drop(database);
+
+        GenerationService::new()
+            .replace_result_image(
+                workspace.path(),
+                ReplaceGenerationResultImageInput {
+                    task_id: "original-task".into(),
+                    current_asset_id: Some("old-asset".into()),
+                    displayed_asset_id: Some("old-asset".into()),
+                    replacement_task_id: "rewrite-task".into(),
+                    replacement_asset_id: "replacement-asset".into(),
+                },
+            )
+            .expect("匹配父槽位的文字改写结果应可替换原图");
+
+        let original = GenerationService::new()
+            .get_task_detail(workspace.path(), "original-task")
+            .expect("读取父任务");
+        assert_eq!(original.output_assets[0].asset.id, "replacement-asset");
     }
 
     #[test]

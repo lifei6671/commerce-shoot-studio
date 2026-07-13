@@ -1,6 +1,7 @@
 use crate::infrastructure::filesystem::default_workspace_directory;
 use crate::services::ai_assist::{
-    AiAssistResult, AiAssistService, ProductSellingPointsImageInput, ProductSellingPointsInput,
+    AiAssistResult, AiAssistService, ImageTextRecognitionError, ImageTextRecognitionResult,
+    ProductSellingPointsImageInput, ProductSellingPointsInput, RecognizeImageTextInput,
     ViralStyleAnalysisInput,
 };
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,21 @@ pub async fn ai_assist_viral_style_analysis(
     })
     .await
     .map_err(|error| format!("爆款风格分析任务执行失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn ai_assist_recognize_image_text(
+    input: RecognizeImageTextInput,
+) -> Result<ImageTextRecognitionResult, ImageTextRecognitionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        AiAssistService::new().recognize_image_text(&default_workspace_directory(), input)
+    })
+    .await
+    .map_err(|_| ImageTextRecognitionError {
+        code: "IMAGE_TEXT_RECOGNITION_FAILED".to_string(),
+        message: "文字识别任务执行失败，请重试。".to_string(),
+        retryable: true,
+    })?
 }
 
 #[derive(Debug, Clone, Deserialize)]

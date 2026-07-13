@@ -108,6 +108,7 @@ const categoryCapabilityIds = {
   "image-to-image": ["scene-image-generation", "clothing-tryon-generation", "image-edit"],
   "image-to-text": [
     "product-selling-points",
+    "image-text-recognition",
     "clothing-scene-planning",
     "scene-prompt-planning",
   ],

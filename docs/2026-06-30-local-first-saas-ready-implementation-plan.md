@@ -503,6 +503,8 @@ export interface GenerationPort {
 - 提供历史记录。
 - 编排图片生成、图片编辑、服饰试穿、商品详情图等所有会产生资产的能力。
 - 对单张结果图执行原子替换或删除；替换保留原结果槽位，删除只移除该结果关系并软删除不再被可见任务引用的资产。
+- 商品、服饰和场景的实时结果及历史恢复结果统一支持 AI 改图：创建 `image-edit` 任务时只关联当前展示图资产，并持久化用户微调要求与结果 lineage；完整 system/user/roleless Prompt 由执行器在内存组装，不进入 task JSON。执行器在运行时解析当前默认真实 `image-edit` 模型配置，`mock-local` 不得产生可归并结果；成功后原子替换父任务稳定槽位，失败时保留原图。
+- 商品、服饰、场景三类实时结果及对应三类历史结果入口统一支持“编辑文字”：先通过 `AiAssistPort` 的 `image-text-recognition` 能力只提交当前 active generated `assetId`，由 Rust 在内存读取图片并使用执行时最新真实图生文配置识别文字、阅读顺序和归一化位置；空结果提示“未识别到文字”并关闭浮层。用户只提交发生变化的行，非空值生成 `replace`，清空值生成 `delete`；随后创建 `result-image-text-rewrite` 的 `image-edit` 任务，由执行时最新真实图生图配置按位置改字或擦除。识别 Prompt、改字 Prompt、图片 Base64 和 Provider 原始响应均不得进入 task JSON、SQLite 或前端 DTO。
 
 本地实现：
 
@@ -639,12 +641,13 @@ MVP 适用范围：
 export interface AiAssistPort {
   generateListingCopy(input: ListingCopyAssistInput): Promise<AiAssistResult>;
   analyzeViralStyle(input: ViralStyleAnalysisInput): Promise<AiAssistResult>;
+  recognizeImageText(input: RecognizeImageTextInput): Promise<ImageTextRecognitionResult>;
 }
 ```
 
 职责：
 
-- 承接不产生图片资产的轻量文本辅助能力。
+- 承接不产生图片资产的轻量文本和图片理解辅助能力；文字识别只接收 workspace `assetId`，不接收前端图片数据。
 - 不暴露模型参数和 raw prompt。
 
 说明：
@@ -738,6 +741,7 @@ export type ModelCapability = {
     | "listing-copy"
     | "prompt-plan"
     | "product-selling-points"
+    | "image-text-recognition"
     | "scene-prompt-planning"
     | "viral-style-analysis"
     | "scene-image-generation"
@@ -761,7 +765,7 @@ export type ModelCapability = {
 
 local mode 下限制来自本地 ProviderProfile；remote mode 下限制来自 SaaS 后端。UI 不要硬编码图片数量、比例和输入数量限制。
 
-`clothing-scene-planning`、`clothing-base-model-generation`、
+`image-edit`、`image-text-recognition`、`clothing-scene-planning`、`clothing-base-model-generation`、
 `clothing-tryon-generation`、`scene-prompt-planning` 和
 `scene-image-generation` 是 real-provider-only 能力：`mock-local` 默认配置只用于
 模型配置和自动化测试，不得让 `CapabilityPort.available` 返回 `true`。场景规划和
@@ -769,6 +773,8 @@ local mode 下限制来自本地 ProviderProfile；remote mode 下限制来自 S
 比例；前者类别为 `image-to-text`，后者为 `image-to-image`。基准模特能力固定
 `maxInputAssets = 0`、`supportedAspectRatios = ["2:3"]`、`maxImageCount = 1`；
 服饰规划和试穿最多接收 5 张服装图加 1 张模特图。
+图片文字识别固定 `maxInputAssets = 1`，category 为 `image-to-text`；前端只传 active generated
+`assetId`，Rust 读取资产后在内存构造 Provider 图片输入。
 
 `PromptPlanPort` 是面向业务流程的生成方案端口，不等同于模型路由能力；当前 local runtime 同时公开 `prompt-plan` 作为 `ModelCapability`，用于模型配置、可用性计算和内部模型调用。页面仍只通过 `PromptPlanPort` 创建、编辑和确认方案，不直接读取 provider、model、baseUrl 或 Prompt 模板。
 

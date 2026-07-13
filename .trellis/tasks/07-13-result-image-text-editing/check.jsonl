@@ -1,0 +1,2 @@
+{"file": "desktop/src/app/App.test.tsx", "reason": "四 workspace 与历史结果交互回归入口"}
+{"file": "desktop/src-tauri/src/services/local_task_executor.rs", "reason": "OCR 校验与内存 Prompt 执行边界"}

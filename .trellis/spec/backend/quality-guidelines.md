@@ -235,3 +235,157 @@ persist(normalize_plan_against_route(plan, route)?)?;
 - Assert the Seedream 5 Pro connection probe remains 1K.
 - Assert an implicit 3:4 real scene request resolves to `1776x2368`.
 - Preserve explicit-size validation and unknown-model rejection coverage.
+
+## Scenario: Persisted result-image rewrite versus in-memory Provider Prompt
+
+### 1. Scope / Trigger
+
+- Trigger: a generated product, clothing, or scene image is rewritten through `kind = "image-edit"`.
+
+### 2. Signatures
+
+- Persisted input kind: `result-image-rewrite` (legacy `product-detail-image-rewrite` remains readable).
+- Required persisted fields: `parentTaskId`, `targetImageId`, `imageNo`, `sourceAssetId`, and `rewriteInstruction`.
+- The current image is linked once through `generation_task_input_assets(role = "reference")`.
+
+### 3. Contracts
+
+- `generation_tasks.input_json` must not contain `prompt.messages`, `rolelessPrompt`, Base64, or the prior full generation Prompt.
+- `LocalTaskExecutor` trims `rewriteInstruction` and builds the generic fidelity-preserving system/user/roleless Prompt only after input assets have been loaded in memory.
+- `image-edit` requires a real Provider; `mock-local` must fail or resolve an available real same-category config, never return a mergeable transparent placeholder.
+- A successful Provider result is merged only through `replace_result_image`; failures preserve the parent slot.
+- Every persisted result-image edit internal kind must pair with outer `GenerationTaskKind::ImageEdit`.
+  Reject mismatches before create or retry inserts a new task. Retry applies only this pairing check;
+  do not retroactively reject a correctly typed legacy task for fields that newer create requests may
+  no longer persist.
+
+### 4. Validation & Error Matrix
+
+- Blank `rewriteInstruction` -> validation failure before Provider invocation.
+- Missing current reference asset -> input validation failure.
+- No available real image-to-image config -> `MODEL_CAPABILITY_UNAVAILABLE`; no replacement.
+- Lineage mismatch or changed displayed asset -> replacement rejected and derived task cleaned up.
+- Deleting an unmerged `result-image-text-rewrite` keeps task/event audit rows but transactionally removes
+  its input/output relations, hides or cancels the child, and soft-deletes unreferenced replacement assets.
+  Ordinary task deletion remains hide-only.
+- Do not unconditionally soft-delete the child input source during direct cleanup: it is still the parent
+  task's current output. A later parent-slot replacement or deletion owns old-source cleanup after it removes
+  superseded child relations in the same transaction.
+
+### 5. Good/Base/Bad Cases
+
+- Good: persist one business instruction, construct the full Prompt in memory, call a real Provider, then atomically replace the matching slot.
+- Base: read a legacy rewrite kind but still construct its Prompt in memory.
+- Bad: persist `prompt.rolelessPrompt` or let deterministic `image-edit` replace a real result with a 1x1 image.
+
+### 6. Tests Required
+
+- Assert the executor builds generic fidelity language and preserves the in-memory `userImages` array.
+- Assert persisted frontend task input contains no messages, roleless Prompt, Base64, or prior full Prompt.
+- Assert `image-edit` is classified as requiring a real Provider.
+- Keep `replace_result_image` lineage and rollback tests for the new and legacy input kinds.
+- Assert unmerged text-rewrite cleanup leaves the parent source active, and keep a regression proving
+  ordinary delete retains its relations. Keep parent replacement/deletion coverage proving the old source is
+  reclaimed only after superseded child input relations are removed. Assert create/retry reject internal/outer
+  kind mismatches before insert.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"kind":"result-image-rewrite","prompt":{"rolelessPrompt":"raw full prompt"}}
+```
+
+#### Correct
+
+```json
+{"kind":"result-image-rewrite","rewriteInstruction":"把背景改成浅灰色","sourceAssetId":"asset-current"}
+```
+
+## Scenario: Asset-only image text recognition and positioned text rewrite
+
+### 1. Scope / Trigger
+
+- Trigger: a generated result image is inspected by an image-to-text model and selected text lines are
+  replaced or deleted by an image-edit model.
+
+### 2. Signatures
+
+- Tauri command: `ai_assist_recognize_image_text({ assetId })`.
+- Recognition result: `items[{ id, text, box{x,y,width,height} }]`.
+- Persisted edit input kind: `result-image-text-rewrite` with `changes` plus the existing result lineage.
+
+### 3. Contracts
+
+- The frontend sends only an active generated `assetId`; Rust reads the workspace file and constructs
+  the image data and Prompt in memory.
+- Recognition uses the execution-time real `image-text-recognition` config. Rewrite uses the
+  execution-time real `image-edit` config. Neither capability may produce a mergeable mock result.
+- Recognition explicitly requests 12,000 output tokens so the declared 100-line JSON contract does
+  not silently inherit the gateway's smaller default budget.
+- Rust ignores model-supplied IDs and assigns ordered `line-001...line-100` IDs.
+- The approximate target box is only a spatial hint. A replace/delete runs only after `originalText`
+  uniquely identifies the visual line in or immediately near that region. A delete erases only the
+  matched glyphs and original occupancy, fills from neighboring background, and never treats the
+  whole box as a mask or changes any other subject, logo, pattern, layout, or text.
+- Prompt messages, roleless Prompt, Base64, and raw Provider responses are never persisted.
+
+### 4. Validation & Error Matrix
+
+- Non-active/non-generated/missing asset -> a safe non-retryable asset error before Provider invocation.
+- Missing/unavailable model configuration -> non-retryable `MODEL_CAPABILITY_UNAVAILABLE`. Provider
+  response read, parse, or response-shape failures -> safe retryable
+  `IMAGE_TEXT_RECOGNITION_PROVIDER_UNAVAILABLE`; never collapse both categories into one validation error.
+- Invalid recognition JSON/top-level/items structure, more than 100 raw lines, or blank/overlong text ->
+  `IMAGE_TEXT_RECOGNITION_OUTPUT_INVALID` without raw output. A valid text item with a missing, mistyped,
+  non-finite, out-of-range, reversed-edge, or ambiguous legacy bbox is skipped individually; other items
+  remain ordered and receive new continuous runtime line IDs. If every bbox is skipped, return empty items.
+- Prefer an unambiguous OCR Provider schema using normalized `left/top/right/bottom`, validate edge
+  order, and deterministically convert it to the public canonical `x/y/width/height` contract. If a
+  model still returns legacy xywh, require every member to remain finite and individually normalized.
+  Interpret the last two members as right/bottom only when an overflowing legacy batch consistently
+  satisfies edge ordering for every legacy item; otherwise keep canonical xywh items and skip only
+  ambiguous overflowing items. Never expand an unreliable box to the image edge, guess pixel/percentage
+  coordinates, or move the anchor. Every invalid persisted text-rewrite bbox remains a strict failure.
+- An OCR bbox is an approximate spatial hint, not an edit mask. The image-edit Prompt must use
+  `originalText` as the primary visual anchor, edit only a unique reliable match, leave ambiguous or
+  missing matches unchanged, and never erase or redraw the whole approximate box. Fidelity boundaries
+  must protect everything outside the matched glyphs and original occupancy, not treat the approximate
+  box edge as an absolute boundary that conflicts with nearby matching.
+- Pure JSON and one complete `json` Markdown fence are accepted; prose-wrapped or partially fenced JSON
+  remains invalid. Both whole-output failures and per-item skips may include only a fixed reason, item index,
+  field name, output length, and fence presence, never recognized text, coordinate values, or raw Provider
+  output.
+- Empty recognition `items` -> successful empty result.
+- Empty/duplicate/overlong rewrite changes, invalid bbox, conflicting replace/delete fields, or unchanged
+  replace -> `IMAGE_TEXT_REWRITE_INPUT_INVALID` before Provider invocation.
+
+### 5. Good/Base/Bad Cases
+
+- Good: recognize one active asset, submit only changed lines, then atomically replace its stable slot.
+- Base: recognition returns an empty list and no generation task is created.
+- Bad: accept a frontend Data URL, trust the previous OCR bbox, or persist the complete edit Prompt.
+
+### 6. Tests Required
+
+- Assert the command input contains only `assetId` and the gateway request is constructed in Rust memory.
+- Assert the OCR gateway input carries the explicit 12,000-token output budget and that Provider response
+  failures remain retryable without exposing their raw message.
+- Assert empty OCR output, normalization, stable IDs, bounds, over-limit text, and safe typed errors.
+- Assert every invalid rewrite form fails before Provider invocation and creates no output asset.
+- Assert delete Prompt boundaries and persisted task JSON exclusions.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```json
+{"assetDataUrl":"data:image/png;base64,...","recognizedBoxes":[{"x":2,"width":-1}]}
+```
+
+#### Correct
+
+```json
+{"assetId":"asset-current"}
+```

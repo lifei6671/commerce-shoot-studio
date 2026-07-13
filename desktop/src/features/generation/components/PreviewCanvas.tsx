@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -22,7 +22,14 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../../../shared/lib/cn";
-import type { ImageSizeOption, ModelImageSizeOptions } from "../../../runtime";
+import {
+  ImageTextRecognitionError,
+  type ImageSizeOption,
+  type ImageTextRecognitionResult,
+  type ModelImageSizeOptions,
+  type RecognizedImageTextItem,
+  type ResultImageTextChange,
+} from "../../../runtime";
 import type { ProductImageAsset } from "../lib/productImagePicker";
 
 export type PreviewBoard = {
@@ -35,6 +42,11 @@ export type PreviewBoard = {
 type PreviewCanvasProps = {
   boards: PreviewBoard[];
   detailImages?: GeneratedDetailImage[];
+  textEditScopeId?: string;
+  onImageTextRecognitionEmpty?: () => void;
+  onImageTextRewriteError?: (message: string) => void;
+  onRecognizeImageText?: (image: GeneratedDetailImage) => Promise<ImageTextRecognitionResult>;
+  onImageTextRewrite?: (image: GeneratedDetailImage, changes: ResultImageTextChange[]) => Promise<void> | void;
   onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
   onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
   onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
@@ -96,9 +108,64 @@ type LongPreviewImageItem = {
   title: string;
 };
 
+type TextEditPhase = "recognizing" | "ready" | "error" | "submitting";
+
+type TextEditDialogIdentity = {
+  scopeId: string;
+  sessionId: number;
+  sourceAssetId: string;
+  targetImageId: string;
+};
+
+type TextEditRecognitionError = {
+  code: string;
+  message: string;
+  retryable: boolean;
+};
+
+type ImageOperationMarker = {
+  imageId: string;
+  scopeId: string;
+  token: string;
+};
+
+let textEditOperationSequence = 0;
+let textEditOperationMarkers: ImageOperationMarker[] = [];
+const textEditOperationListeners = new Set<() => void>();
+
+function subscribeTextEditOperations(listener: () => void) {
+  textEditOperationListeners.add(listener);
+  return () => textEditOperationListeners.delete(listener);
+}
+
+function getTextEditOperationsSnapshot() {
+  return textEditOperationMarkers;
+}
+
+function publishTextEditOperations(nextMarkers: ImageOperationMarker[]) {
+  textEditOperationMarkers = nextMarkers;
+  textEditOperationListeners.forEach((listener) => listener());
+}
+
+function markTextEditOperation(imageId: string, scopeId: string, sessionId: number) {
+  textEditOperationSequence += 1;
+  const token = `text-edit-${sessionId}-${textEditOperationSequence}`;
+  publishTextEditOperations([...textEditOperationMarkers, { imageId, scopeId, token }]);
+  return token;
+}
+
+function clearTextEditOperation(operationToken: string) {
+  publishTextEditOperations(textEditOperationMarkers.filter((operation) => operation.token !== operationToken));
+}
+
 export function PreviewCanvas({
   boards,
   detailImages = [],
+  textEditScopeId = "",
+  onImageTextRecognitionEmpty,
+  onImageTextRewriteError,
+  onRecognizeImageText,
+  onImageTextRewrite,
   onImageRewrite,
   onImageRetry,
   onImageDelete,
@@ -110,6 +177,11 @@ export function PreviewCanvas({
     return (
       <GeneratedDetailCanvas
         detailImages={detailImages}
+        textEditScopeId={textEditScopeId}
+        onImageTextRecognitionEmpty={onImageTextRecognitionEmpty}
+        onImageTextRewriteError={onImageTextRewriteError}
+        onRecognizeImageText={onRecognizeImageText}
+        onImageTextRewrite={onImageTextRewrite}
         onImageRewrite={onImageRewrite}
         onImageRetry={onImageRetry}
         onImageDelete={onImageDelete}
@@ -167,6 +239,11 @@ export function PreviewCanvas({
 
 function GeneratedDetailCanvas({
   detailImages,
+  textEditScopeId,
+  onImageTextRecognitionEmpty,
+  onImageTextRewriteError,
+  onRecognizeImageText,
+  onImageTextRewrite,
   onImageRewrite,
   onImageRetry,
   onImageDelete,
@@ -175,6 +252,11 @@ function GeneratedDetailCanvas({
   onListingCopyRetry,
 }: {
   detailImages: GeneratedDetailImage[];
+  textEditScopeId: string;
+  onImageTextRecognitionEmpty?: () => void;
+  onImageTextRewriteError?: (message: string) => void;
+  onRecognizeImageText?: (image: GeneratedDetailImage) => Promise<ImageTextRecognitionResult>;
+  onImageTextRewrite?: (image: GeneratedDetailImage, changes: ResultImageTextChange[]) => Promise<void> | void;
   onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
   onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
   onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
@@ -184,7 +266,12 @@ function GeneratedDetailCanvas({
 }) {
   const [removedImageIds, setRemovedImageIds] = useState<Set<string>>(() => new Set());
   const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(() => new Set());
-  const [regeneratingImageIds, setRegeneratingImageIds] = useState<Set<string>>(() => new Set());
+  const [regeneratingImageOperations, setRegeneratingImageOperations] = useState<ImageOperationMarker[]>([]);
+  const pendingTextEditOperations = useSyncExternalStore(
+    subscribeTextEditOperations,
+    getTextEditOperationsSnapshot,
+    getTextEditOperationsSnapshot,
+  );
   const [imageRewriteTargetId, setImageRewriteTargetId] = useState<string | null>(null);
   const [imageRewritePrompt, setImageRewritePrompt] = useState("");
   const [resizeTargetId, setResizeTargetId] = useState<string | null>(null);
@@ -198,15 +285,36 @@ function GeneratedDetailCanvas({
   const [bulkDeleteSubmitting, setBulkDeleteSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [textEditTargetId, setTextEditTargetId] = useState<string | null>(null);
+  const [textEditSourceAssetId, setTextEditSourceAssetId] = useState<string | null>(null);
+  const [textEditPhase, setTextEditPhase] = useState<TextEditPhase>("recognizing");
+  const [textEditItems, setTextEditItems] = useState<RecognizedImageTextItem[]>([]);
+  const [textEditError, setTextEditError] = useState<TextEditRecognitionError | null>(null);
   const [listingCopyTargetId, setListingCopyTargetId] = useState<string | null>(null);
-  const [textEditValues, setTextEditValues] = useState(() => defaultEditableTexts);
+  const [textEditValues, setTextEditValues] = useState<string[]>([]);
   const [longPreviewOpen, setLongPreviewOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const resizeRequestIdRef = useRef(0);
+  const imageOperationSequenceRef = useRef(0);
+  const textEditSessionIdRef = useRef(0);
+  const textEditRecognitionRequestIdRef = useRef(0);
+  const textEditDialogIdentityRef = useRef<TextEditDialogIdentity | null>(null);
+  const detailImagesRef = useRef(detailImages);
+  const textEditScopeIdRef = useRef(textEditScopeId);
+  detailImagesRef.current = detailImages;
+  textEditScopeIdRef.current = textEditScopeId;
   const visibleImages = detailImages
     .filter((image) => !removedImageIds.has(image.id))
-    .map((image) => (regeneratingImageIds.has(image.id) ? { ...image, status: "generating" as const } : image));
+    .map((image) =>
+      regeneratingImageOperations.some(
+        (operation) => operation.scopeId === textEditScopeId && operation.imageId === image.id,
+      ) ||
+      pendingTextEditOperations.some(
+        (operation) => operation.scopeId === textEditScopeId && operation.imageId === image.id,
+      )
+        ? { ...image, status: "generating" as const }
+        : image,
+    );
   const visibleImageItems = visibleImages.filter((image) => image.kind !== "listing-copy" && image.kind !== "source-image");
   const longPreviewItems = createLongPreviewImageItems(visibleImages);
   const groupedResultSections = createGeneratedResultGroups(visibleImages);
@@ -221,7 +329,15 @@ function GeneratedDetailCanvas({
   const imageRewriteTarget = completedImages.find((image) => image.id === imageRewriteTargetId) ?? null;
   const resizeTarget = completedImages.find((image) => image.id === resizeTargetId) ?? null;
   const deleteTarget = visibleImageItems.find((image) => image.id === deleteTargetId) ?? null;
-  const textEditTarget = completedImages.find((image) => image.id === textEditTargetId) ?? null;
+  const textEditTarget =
+    detailImages.find(
+      (image) =>
+        image.id === textEditTargetId &&
+        image.kind !== "listing-copy" &&
+        image.kind !== "source-image" &&
+        (image.status === "complete" || textEditPhase === "submitting"),
+    ) ?? null;
+  const textEditChanges = createResultImageTextChanges(textEditItems, textEditValues);
   const listingCopyTarget =
     visibleImages.find((image) => image.id === listingCopyTargetId && image.kind === "listing-copy" && image.status === "complete") ??
     null;
@@ -393,7 +509,7 @@ function GeneratedDetailCanvas({
 
     setResizeSubmitting(true);
     setResizeTargetId(null);
-    markImageRegenerating(target.id);
+    const operationToken = markImageRegenerating(target.id);
     try {
       await onImageResize(target, option);
       setResizeOptions(null);
@@ -403,11 +519,7 @@ function GeneratedDetailCanvas({
       showCopyToast(errorMessage(error, "图片尺寸修改失败。"));
     } finally {
       setResizeSubmitting(false);
-      setRegeneratingImageIds((currentIds) => {
-        const nextIds = new Set(currentIds);
-        nextIds.delete(target.id);
-        return nextIds;
-      });
+      clearImageRegenerating(operationToken);
     }
   }
 
@@ -440,8 +552,14 @@ function GeneratedDetailCanvas({
     }
   }
 
-  function markImageRegenerating(targetId: string) {
-    setRegeneratingImageIds((currentIds) => new Set([...currentIds, targetId]));
+  function markImageRegenerating(targetId: string, scopeId = textEditScopeIdRef.current, sessionId?: number) {
+    const sequence = imageOperationSequenceRef.current + 1;
+    imageOperationSequenceRef.current = sequence;
+    const operationToken = sessionId === undefined ? `operation-${sequence}` : `text-edit-${sessionId}-${sequence}`;
+    setRegeneratingImageOperations((currentOperations) => [
+      ...currentOperations,
+      { imageId: targetId, scopeId, token: operationToken },
+    ]);
     setSelectedImageIds((currentIds) => {
       const nextIds = new Set(currentIds);
       nextIds.delete(targetId);
@@ -450,30 +568,29 @@ function GeneratedDetailCanvas({
     if (previewImageId === targetId) {
       closeImagePreview();
     }
+    return operationToken;
+  }
+
+  function clearImageRegenerating(operationToken: string) {
+    setRegeneratingImageOperations((currentOperations) =>
+      currentOperations.filter((operation) => operation.token !== operationToken),
+    );
   }
 
   function regenerateImageById(targetId: string) {
-    markImageRegenerating(targetId);
+    const operationToken = markImageRegenerating(targetId);
     window.setTimeout(() => {
-      setRegeneratingImageIds((currentIds) => {
-        const nextIds = new Set(currentIds);
-        nextIds.delete(targetId);
-        return nextIds;
-      });
+      clearImageRegenerating(operationToken);
     }, 3000);
   }
 
   async function retryImage(image: GeneratedDetailImage) {
     if (onImageRetry) {
-      markImageRegenerating(image.id);
+      const operationToken = markImageRegenerating(image.id);
       try {
         await onImageRetry(image);
       } finally {
-        setRegeneratingImageIds((currentIds) => {
-          const nextIds = new Set(currentIds);
-          nextIds.delete(image.id);
-          return nextIds;
-        });
+        clearImageRegenerating(operationToken);
       }
       return;
     }
@@ -487,15 +604,11 @@ function GeneratedDetailCanvas({
       return;
     }
 
-    markImageRegenerating(image.id);
+    const operationToken = markImageRegenerating(image.id);
     try {
       await onListingCopyRetry(image);
     } finally {
-      setRegeneratingImageIds((currentIds) => {
-        const nextIds = new Set(currentIds);
-        nextIds.delete(image.id);
-        return nextIds;
-      });
+      clearImageRegenerating(operationToken);
     }
   }
 
@@ -510,17 +623,13 @@ function GeneratedDetailCanvas({
     closeImageRewriteDialog();
 
     if (target && onImageRewrite) {
-      markImageRegenerating(target.id);
+      const operationToken = markImageRegenerating(target.id);
       try {
         await onImageRewrite(target, instruction);
       } catch (error) {
         showCopyToast(errorMessage(error, "AI 改图失败。"));
       } finally {
-        setRegeneratingImageIds((currentIds) => {
-          const nextIds = new Set(currentIds);
-          nextIds.delete(target.id);
-          return nextIds;
-        });
+        clearImageRegenerating(operationToken);
       }
       return;
     }
@@ -529,8 +638,95 @@ function GeneratedDetailCanvas({
   }
 
   function openTextEditDialog(image: GeneratedDetailImage) {
+    const sessionId = textEditSessionIdRef.current + 1;
+    const identity = {
+      scopeId: textEditScopeIdRef.current,
+      sessionId,
+      sourceAssetId: image.assetId ?? "",
+      targetImageId: image.id,
+    };
+    textEditSessionIdRef.current = sessionId;
+    textEditDialogIdentityRef.current = identity;
     setTextEditTargetId(image.id);
-    setTextEditValues(defaultEditableTexts);
+    setTextEditSourceAssetId(identity.sourceAssetId);
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
+    void recognizeImageText(image, identity);
+  }
+
+  async function recognizeImageText(image: GeneratedDetailImage, identity: TextEditDialogIdentity) {
+    const requestId = textEditRecognitionRequestIdRef.current + 1;
+    textEditRecognitionRequestIdRef.current = requestId;
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
+
+    if (!onRecognizeImageText) {
+      if (isCurrentTextEditRequest(identity, requestId)) {
+        setTextEditError({
+          code: "MODEL_CAPABILITY_UNAVAILABLE",
+          message: "当前页面未提供图片文字识别能力。",
+          retryable: false,
+        });
+        setTextEditPhase("error");
+      }
+      return;
+    }
+
+    try {
+      const result = await onRecognizeImageText(image);
+      if (!isCurrentTextEditRequest(identity, requestId)) {
+        return;
+      }
+      if (result.items.length === 0) {
+        onImageTextRecognitionEmpty?.();
+        resetTextEditDialog(identity);
+        return;
+      }
+      setTextEditItems(result.items);
+      setTextEditValues(result.items.map((item) => item.text));
+      setTextEditPhase("ready");
+    } catch (error) {
+      if (!isCurrentTextEditRequest(identity, requestId)) {
+        return;
+      }
+      setTextEditError(normalizeTextRecognitionError(error));
+      setTextEditPhase("error");
+    }
+  }
+
+  function isCurrentTextEditRequest(identity: TextEditDialogIdentity, requestId: number) {
+    return textEditRecognitionRequestIdRef.current === requestId && isCurrentTextEditIdentity(identity);
+  }
+
+  function isCurrentTextEditIdentity(identity: TextEditDialogIdentity) {
+    return (
+      textEditScopeIdRef.current === identity.scopeId &&
+      matchesTextEditIdentity(textEditDialogIdentityRef.current, identity)
+    );
+  }
+
+  function isTextEditSourceCurrent(identity: TextEditDialogIdentity) {
+    return textEditScopeIdRef.current === identity.scopeId && detailImagesRef.current.some(
+      (image) =>
+        image.id === identity.targetImageId &&
+        image.assetId === identity.sourceAssetId &&
+        image.status === "complete" &&
+        image.kind !== "listing-copy" &&
+        image.kind !== "source-image",
+    );
+  }
+
+  function retryTextRecognition() {
+    const identity = textEditDialogIdentityRef.current;
+    const target = textEditTarget;
+    if (!identity || !target || textEditPhase === "submitting") {
+      return;
+    }
+    void recognizeImageText(target, identity);
   }
 
   function openListingCopyDialog(image: GeneratedDetailImage) {
@@ -572,21 +768,77 @@ function GeneratedDetailCanvas({
   }
 
   function closeTextEditDialog() {
+    if (textEditPhase === "submitting") {
+      return;
+    }
+    resetTextEditDialog(textEditDialogIdentityRef.current);
+  }
+
+  function resetTextEditDialog(identity: TextEditDialogIdentity | null) {
+    if (identity && !matchesTextEditIdentity(textEditDialogIdentityRef.current, identity)) {
+      return;
+    }
+    textEditRecognitionRequestIdRef.current += 1;
+    textEditDialogIdentityRef.current = null;
     setTextEditTargetId(null);
-    setTextEditValues(defaultEditableTexts);
+    setTextEditSourceAssetId(null);
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
   }
 
   function updateTextEditValue(index: number, value: string) {
-    setTextEditValues((currentValues) => currentValues.map((currentValue, currentIndex) => (currentIndex === index ? value : currentValue)));
+    setTextEditValues((currentValues) =>
+      currentValues.map((currentValue, currentIndex) => (currentIndex === index ? value : currentValue)),
+    );
   }
 
-  function confirmTextEdit() {
-    if (!textEditTargetId) {
+  async function confirmTextEdit() {
+    const identity = textEditDialogIdentityRef.current;
+    const target = textEditTarget;
+    const changes = textEditChanges;
+    if (
+      !identity ||
+      !target ||
+      !onImageTextRewrite ||
+      textEditPhase !== "ready" ||
+      changes.length === 0 ||
+      target.assetId !== textEditSourceAssetId ||
+      textEditSourceAssetId !== identity.sourceAssetId
+    ) {
       return;
     }
 
-    regenerateImageById(textEditTargetId);
-    closeTextEditDialog();
+    setTextEditPhase("submitting");
+    const operationToken = markTextEditOperation(target.id, identity.scopeId, identity.sessionId);
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(target.id);
+      return nextIds;
+    });
+    if (previewImageId === target.id) {
+      closeImagePreview();
+    }
+    try {
+      await onImageTextRewrite(target, changes);
+      if (isCurrentTextEditIdentity(identity)) {
+        resetTextEditDialog(identity);
+      }
+    } catch (error) {
+      if (!isCurrentTextEditIdentity(identity)) {
+        return;
+      }
+      if (!isTextEditSourceCurrent(identity)) {
+        onImageTextRewriteError?.("当前图片已变化，请重新识别文字。");
+        resetTextEditDialog(identity);
+        return;
+      }
+      onImageTextRewriteError?.(errorMessage(error, "图片文字修改失败。"));
+      setTextEditPhase("ready");
+    } finally {
+      clearTextEditOperation(operationToken);
+    }
   }
 
   useEffect(() => {
@@ -596,19 +848,35 @@ function GeneratedDetailCanvas({
 
     setRemovedImageIds(new Set());
     setSelectedImageIds(new Set());
-    setRegeneratingImageIds(new Set());
     setImageRewriteTargetId(null);
     setImageRewritePrompt("");
-    setTextEditTargetId(null);
     setListingCopyTargetId(null);
-    setTextEditValues(defaultEditableTexts);
     setLongPreviewOpen(false);
     setPreviewImageId(null);
     setPreviewZoom(1);
   }, [detailImages]);
 
   useEffect(() => {
+    const identity = textEditDialogIdentityRef.current;
+    if (!identity) {
+      return;
+    }
+    if (textEditScopeIdRef.current !== identity.scopeId) {
+      resetTextEditDialog(identity);
+      return;
+    }
+    if (textEditPhase === "submitting") {
+      return;
+    }
+    if (!isTextEditSourceCurrent(identity)) {
+      resetTextEditDialog(identity);
+    }
+  }, [detailImages, textEditPhase, textEditScopeId]);
+
+  useEffect(() => {
     return () => {
+      textEditRecognitionRequestIdRef.current += 1;
+      textEditDialogIdentityRef.current = null;
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
@@ -1099,14 +1367,12 @@ function GeneratedDetailCanvas({
                 />
                 <div className="mt-4 flex justify-end">
                   <button
-                    aria-label="重新生成 15"
+                    aria-label="重新生成"
                     className="inline-flex h-8 items-center justify-center gap-1 rounded-control border border-slate-900 bg-[#1f1f21] px-3 text-[13px] font-medium text-white shadow-none transition-colors hover:bg-black"
                     onClick={regenerateImage}
                     type="button"
                   >
                     重新生成
-                    <span aria-hidden="true">🔥</span>
-                    15
                   </button>
                 </div>
               </div>
@@ -1121,7 +1387,7 @@ function GeneratedDetailCanvas({
               aria-modal="true"
               className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/32 p-8 backdrop-blur-[2px]"
               onClick={(event) => {
-                if (event.target === event.currentTarget) {
+                if (event.target === event.currentTarget && textEditPhase !== "submitting") {
                   closeTextEditDialog();
                 }
               }}
@@ -1132,41 +1398,64 @@ function GeneratedDetailCanvas({
                   <h2 className="text-[16px] font-semibold text-slate-950">编辑文字</h2>
                   <button
                     aria-label="关闭编辑文字"
-                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={textEditPhase === "submitting"}
                     onClick={closeTextEditDialog}
                     type="button"
                   >
                     <X className="size-5" />
                   </button>
                 </div>
-                <div className="min-h-0 max-h-72 flex-1 space-y-3 overflow-y-auto pr-2 [scrollbar-color:rgba(148,163,184,0.72)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]">
-                  {textEditValues.map((value, index) => (
-                    <input
-                      aria-label={`编辑文字 ${index + 1}`}
-                      className="h-10 w-full rounded-[9px] border border-slate-200 bg-slate-50/70 px-3 text-[14px] text-slate-700 outline-none transition-colors focus:border-app-blue focus:bg-white"
-                      key={`${textEditTarget.id}-${index}`}
-                      onChange={(event) => updateTextEditValue(index, event.target.value)}
-                      value={value}
-                    />
-                  ))}
+                <div
+                  aria-busy={textEditPhase === "recognizing"}
+                  className="min-h-0 max-h-72 flex-1 space-y-3 overflow-y-auto pr-2 [scrollbar-color:rgba(148,163,184,0.72)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
+                >
+                  {textEditPhase === "recognizing" ? <TextRecognitionSkeleton /> : null}
+                  {textEditPhase === "error" && textEditError ? (
+                    <div className="rounded-[9px] border border-rose-100 bg-rose-50/70 p-4 text-[13px] leading-6 text-rose-700">
+                      <p>{textEditError.message}</p>
+                      {textEditError.retryable ? (
+                        <button
+                          className="mt-3 inline-flex h-8 items-center justify-center rounded-control border border-rose-200 bg-white px-3 font-medium text-rose-700 transition-colors hover:bg-rose-50"
+                          onClick={retryTextRecognition}
+                          type="button"
+                        >
+                          重试
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {textEditPhase === "ready" || textEditPhase === "submitting"
+                    ? textEditValues.map((value, index) => (
+                        <input
+                          aria-label={`编辑文字 ${index + 1}`}
+                          className="h-10 w-full rounded-[9px] border border-slate-200 bg-slate-50/70 px-3 text-[14px] text-slate-700 outline-none transition-colors focus:border-app-blue focus:bg-white disabled:cursor-wait disabled:opacity-70"
+                          disabled={textEditPhase === "submitting"}
+                          key={textEditItems[index]?.id ?? `${textEditTarget.id}-${index}`}
+                          onChange={(event) => updateTextEditValue(index, event.target.value)}
+                          value={value}
+                        />
+                      ))
+                    : null}
                 </div>
                 <div className="mt-4 flex justify-end gap-2">
                   <button
-                    className="inline-flex h-8 items-center justify-center rounded-control border border-slate-100 bg-slate-100 px-3 text-[13px] font-medium text-slate-800 shadow-none transition-colors hover:bg-slate-200/80"
+                    className="inline-flex h-8 items-center justify-center rounded-control border border-slate-100 bg-slate-100 px-3 text-[13px] font-medium text-slate-800 shadow-none transition-colors hover:bg-slate-200/80 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={textEditPhase === "submitting"}
                     onClick={closeTextEditDialog}
                     type="button"
                   >
                     取消
                   </button>
                   <button
-                    aria-label="确认改字 15"
-                    className="inline-flex h-8 items-center justify-center gap-1 rounded-control border border-slate-900 bg-[#1f1f21] px-3 text-[13px] font-medium text-white shadow-none transition-colors hover:bg-black"
-                    onClick={confirmTextEdit}
+                    aria-busy={textEditPhase === "submitting"}
+                    aria-label="确认改字"
+                    className="inline-flex h-8 items-center justify-center rounded-control border border-slate-900 bg-[#1f1f21] px-3 text-[13px] font-medium text-white shadow-none transition-colors hover:bg-black disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-400"
+                    disabled={!onImageTextRewrite || textEditPhase !== "ready" || textEditChanges.length === 0}
+                    onClick={() => void confirmTextEdit()}
                     type="button"
                   >
                     确认改字
-                    <span aria-hidden="true">🔥</span>
-                    15
                   </button>
                 </div>
               </div>
@@ -1825,6 +2114,72 @@ function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message.trim() ? error.message : fallback;
 }
 
+function matchesTextEditIdentity(
+  current: TextEditDialogIdentity | null,
+  expected: TextEditDialogIdentity,
+) {
+  return (
+    current?.sessionId === expected.sessionId &&
+    current.scopeId === expected.scopeId &&
+    current.targetImageId === expected.targetImageId &&
+    current.sourceAssetId === expected.sourceAssetId
+  );
+}
+
+function normalizeTextRecognitionError(error: unknown): TextEditRecognitionError {
+  if (error instanceof ImageTextRecognitionError) {
+    return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  return {
+    code: "UNKNOWN_ERROR",
+    message: errorMessage(error, "图片文字识别失败。"),
+    retryable: false,
+  };
+}
+
+function createResultImageTextChanges(
+  items: RecognizedImageTextItem[],
+  values: string[],
+): ResultImageTextChange[] {
+  return items.flatMap((item, index): ResultImageTextChange[] => {
+    const originalText = item.text.trim();
+    const replacementText = (values[index] ?? "").trim();
+    if (replacementText === originalText) {
+      return [];
+    }
+    if (!replacementText) {
+      return [{ box: item.box, lineId: item.id, operation: "delete", originalText }];
+    }
+    return [
+      {
+        box: item.box,
+        lineId: item.id,
+        operation: "replace",
+        originalText,
+        replacementText,
+      },
+    ];
+  });
+}
+
+function TextRecognitionSkeleton() {
+  return (
+    <div data-testid="image-text-recognition-skeleton">
+      <span className="sr-only" role="status">
+        正在识别图片文字
+      </span>
+      <div aria-hidden="true" className="space-y-3">
+        {Array.from({ length: 5 }, (_, index) => (
+          <div
+            className="h-10 animate-pulse rounded-[9px] border border-slate-100 bg-slate-100"
+            key={index}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function imageSizeOptionLabel(option: ImageSizeOption) {
   return option.label.replace(/(\d)x(\d)/g, "$1×$2");
 }
@@ -1889,19 +2244,6 @@ const generatedImageSubtitles = [
   "清晰展示尺码参数，降低选码误差",
   "展示完整产品信息，打消决策顾虑",
   "传递品牌运动潮流理念，建立用户信任",
-];
-
-const defaultEditableTexts = [
-  "Size Guide",
-  "Size",
-  "Length (CM)",
-  "Chest (CM)",
-  "Shoulder (CM)",
-  "XS",
-  "S",
-  "M",
-  "L",
-  "XL",
 ];
 
 const generatedCanvasGradients = [

@@ -333,6 +333,94 @@ function createRestoredClothingTaskDetail(taskId: string, title: string) {
   };
 }
 
+function createTextEditHistoryTaskDetail({
+  imageId,
+  imageTitle,
+  sourceAssetId,
+  taskId,
+  taskTitle,
+  workspace,
+}: {
+  imageId: string;
+  imageTitle: string;
+  sourceAssetId: string;
+  taskId: string;
+  taskTitle: string;
+  workspace: "product" | "clothing";
+}) {
+  const createdAt = taskId.endsWith("new")
+    ? "2026-07-13T10:10:00.000Z"
+    : "2026-07-13T10:00:00.000Z";
+  return {
+    events: [],
+    input:
+      workspace === "product"
+        ? {
+            items: [{ imageId }],
+            kind: "product-detail-generation",
+            market: "中国",
+            platform: "淘宝天猫",
+            ratio: "1:1",
+          }
+        : {
+            items: [
+              {
+                id: `${taskId}-item`,
+                imageId,
+                imageNo: 1,
+                poseAction: "自然站立展示服装文字",
+                ratio: "3:4",
+                scene: imageTitle,
+              },
+            ],
+            kind: "clothing-tryon-generation",
+            ratio: "3:4",
+          },
+    inputAssets: [],
+    outputAssets: [
+      {
+        asset: {
+          id: sourceAssetId,
+          localPath: `/workspace/current/assets/generated/${sourceAssetId}.png`,
+          relativePath: `assets/generated/${sourceAssetId}.png`,
+        },
+        role: "output",
+        sortOrder: 0,
+      },
+    ],
+    ...(workspace === "product"
+      ? {
+          promptPlanSnapshot: {
+            items: [
+              {
+                id: `${taskId}-plan-item`,
+                intent: {
+                  imageNo: 1,
+                  imagePrompt: `${imageTitle} prompt`,
+                  ratio: "1:1",
+                  sceneDescription: `${imageTitle} description`,
+                },
+                title: imageTitle,
+              },
+            ],
+            planId: `${taskId}-plan`,
+          },
+        }
+      : {}),
+    task: {
+      completedAt: "2026-07-13T10:01:00.000Z",
+      createdAt,
+      id: taskId,
+      kind: "image-generation",
+      stage: "completed",
+      status: "succeeded",
+      title: taskTitle,
+      updatedAt: "2026-07-13T10:01:00.000Z",
+      workspace,
+    },
+  };
+}
+
 class MockAudioParam {
   setValueAtTime = vi.fn();
   linearRampToValueAtTime = vi.fn();
@@ -1408,7 +1496,7 @@ describe("App shell", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "输入调整要求" }), {
       target: { value: "把背景换成浅灰色" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "重新生成 15" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
@@ -6384,6 +6472,7 @@ describe("App shell", () => {
         }),
       ),
     );
+
   });
 
   it.each([
@@ -6409,6 +6498,17 @@ describe("App shell", () => {
     const deletedSortOrders = new Set<number>();
 
     invokeMock.mockImplementation((command, args) => {
+      if (command === "ai_assist_recognize_image_text") {
+        return Promise.resolve({
+          items: [
+            {
+              box: { height: 0.08, width: 0.24, x: 0.12, y: 0.16 },
+              id: "line-001",
+              text: "SUMMER",
+            },
+          ],
+        });
+      }
       if (command === "generation_get_task_detail") {
         const taskId = (args as { taskId?: string } | undefined)?.taskId ?? "";
         if (taskId === "task_clothing-scene-planning") {
@@ -6564,7 +6664,67 @@ describe("App shell", () => {
         "src",
         expect.stringContaining("clothing-resize-slot-2.png"),
       );
+      return;
     }
+
+    await user.click(screen.getByRole("button", { name: "AI改图 稳定尺寸场景" }));
+    await user.type(screen.getByRole("textbox", { name: "输入调整要求" }), "把人物移动到画面左侧");
+    await user.click(screen.getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              kind: "result-image-rewrite",
+              rewriteInstruction: "把人物移动到画面左侧",
+              sourceAssetId: "asset_clothing_resized_slot_2",
+            }),
+            inputAssets: [{ assetId: "asset_clothing_resized_slot_2", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "clothing",
+          }),
+        }),
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "编辑文字 稳定尺寸场景" })).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "编辑文字 稳定尺寸场景" }));
+    expect(await screen.findByDisplayValue("SUMMER")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset_clothing_resized_slot_2" },
+    });
+    await user.clear(screen.getByDisplayValue("SUMMER"));
+    await user.type(screen.getByRole("textbox", { name: "编辑文字 1" }), "盛夏");
+    await user.click(screen.getByRole("button", { name: "确认改字" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              changes: [
+                expect.objectContaining({
+                  lineId: "line-001",
+                  operation: "replace",
+                  originalText: "SUMMER",
+                  replacementText: "盛夏",
+                }),
+              ],
+              kind: "result-image-text-rewrite",
+              sourceAssetId: "asset_clothing_resized_slot_2",
+            }),
+            inputAssets: [{ assetId: "asset_clothing_resized_slot_2", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "clothing",
+          }),
+        }),
+      ),
+    );
   });
 
   it.each([
@@ -8517,7 +8677,7 @@ describe("App shell", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "输入调整要求" }), {
       target: { value: "把背景改成浅灰色，商品向左移动一点" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "重新生成 15" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
@@ -8532,11 +8692,10 @@ describe("App shell", () => {
               },
             ],
             input: expect.objectContaining({
-              basePrompt: expect.stringContaining("首屏主视觉"),
               imageNo: 1,
+              kind: "result-image-rewrite",
               parentTaskId: "task_image-generation",
               rewriteInstruction: "把背景改成浅灰色，商品向左移动一点",
-              resolvedPrompt: expect.stringContaining("把背景改成浅灰色，商品向左移动一点"),
               sourceAssetId: "asset_generated_1",
               sourceImageTitle: "首屏主视觉",
               targetImageId: expect.any(String),
@@ -8552,7 +8711,10 @@ describe("App shell", () => {
       const input = (args as { input?: { kind?: string } } | undefined)?.input;
       return command === "generation_create_task" && input?.kind === "image-edit";
     });
-    expect(JSON.stringify((rewriteTaskCreateCall?.[1] as { input?: unknown }).input)).not.toContain("data:image/");
+    const persistedRewriteTask = JSON.stringify((rewriteTaskCreateCall?.[1] as { input?: unknown }).input);
+    expect(persistedRewriteTask).not.toContain("data:image/");
+    expect(persistedRewriteTask).not.toContain("rolelessPrompt");
+    expect(persistedRewriteTask).not.toContain('"messages"');
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("generation_run_task", {
         taskId: "task_image-edit",
@@ -8644,7 +8806,7 @@ describe("App shell", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "输入调整要求" }), {
       target: { value: "把背景改成浅灰色" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "重新生成 15" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
@@ -8732,7 +8894,7 @@ describe("App shell", () => {
 
     await user.hover(sceneResultCard);
     await user.click(within(sceneResultCard).getByRole("button", { name: "AI改图 首屏主视觉" }));
-    fireEvent.click(await screen.findByRole("button", { name: "重新生成 15" }));
+    fireEvent.click(await screen.findByRole("button", { name: "重新生成" }));
 
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("AI 改图失败。"));
     expect(within(sceneResultCard).getByRole("img", { name: "首屏主视觉" })).toHaveAttribute(
@@ -9012,6 +9174,38 @@ describe("App shell", () => {
 
   it("locks strategy modules and shows generated detail image actions after starting detail generation", async () => {
     const user = userEvent.setup();
+    const recognizedTextItems = [
+      {
+        box: { height: 0.08, width: 0.3, x: 0.12, y: 0.16 },
+        id: "line-001",
+        text: "Size Guide",
+      },
+      {
+        box: { height: 0.07, width: 0.24, x: 0.14, y: 0.3 },
+        id: "line-002",
+        text: "Length (CM)",
+      },
+    ];
+    let recognizeRequestCount = 0;
+    let resolveFirstRecognition:
+      | ((result: { items: typeof recognizedTextItems }) => void)
+      | undefined;
+    const baseInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "ai_assist_recognize_image_text") {
+        recognizeRequestCount += 1;
+        if (recognizeRequestCount === 1) {
+          return new Promise((resolve) => {
+            resolveFirstRecognition = resolve;
+          });
+        }
+        if (recognizeRequestCount === 4) {
+          return Promise.resolve({ items: [] });
+        }
+        return Promise.resolve({ items: recognizedTextItems });
+      }
+      return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -9110,8 +9304,10 @@ describe("App shell", () => {
     const imageRewriteDialog = screen.getByRole("dialog", { name: "输入微调方向" });
     expect(imageRewriteDialog).toBeInTheDocument();
     expect(screen.queryByText("输入微调方向（选填）")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重新生成 15" })).toHaveClass("h-8", "px-3");
-    expect(screen.getByRole("button", { name: "重新生成 15" })).not.toHaveClass("w-full", "h-11");
+    const rewriteSubmitButton = screen.getByRole("button", { name: "重新生成" });
+    expect(rewriteSubmitButton).toHaveClass("h-8", "px-3");
+    expect(rewriteSubmitButton).not.toHaveClass("w-full", "h-11");
+    expect(rewriteSubmitButton).toHaveTextContent(/^重新生成$/);
 
     fireEvent.click(imageRewriteDialog);
     expect(screen.queryByRole("dialog", { name: "输入微调方向" })).not.toBeInTheDocument();
@@ -9121,7 +9317,7 @@ describe("App shell", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "输入调整要求" }), {
       target: { value: "商品向左移动一点，换成浅灰色背景" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "重新生成 15" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
 
     expect(screen.queryByRole("dialog", { name: "输入微调方向" })).not.toBeInTheDocument();
     expect(firstDetailImageCard).toHaveTextContent("AI 生成中");
@@ -9134,33 +9330,108 @@ describe("App shell", () => {
 
     const textEditDialog = screen.getByRole("dialog", { name: "编辑文字" });
     expect(textEditDialog).toBeInTheDocument();
-    expect(screen.getByDisplayValue("Size Guide")).toBeInTheDocument();
+    expect(screen.getByTestId("image-text-recognition-skeleton")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("正在识别图片文字");
+    expect(textEditDialog.querySelector('[aria-busy="true"]')).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset_generated_1" },
+    });
+
+    resolveFirstRecognition?.({ items: recognizedTextItems });
+    expect(await screen.findByDisplayValue("Size Guide")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Length (CM)")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认改字 15" })).toHaveClass("h-8", "px-3");
-    expect(screen.getByRole("button", { name: "确认改字 15" })).not.toHaveClass("h-[42px]");
+    const textRewriteSubmitButton = screen.getByRole("button", { name: "确认改字" });
+    expect(textRewriteSubmitButton).toHaveClass("h-8", "px-3");
+    expect(textRewriteSubmitButton).not.toHaveClass("h-[42px]");
+    expect(textRewriteSubmitButton).toBeDisabled();
+    expect(textRewriteSubmitButton).toHaveTextContent(/^确认改字$/);
+    expect(textRewriteSubmitButton.querySelector("svg")).not.toBeInTheDocument();
+    expect(textRewriteSubmitButton).not.toHaveTextContent("15");
 
     fireEvent.click(textEditDialog);
     expect(screen.queryByRole("dialog", { name: "编辑文字" })).not.toBeInTheDocument();
 
     await user.click(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" }));
 
+    expect(await screen.findByDisplayValue("Length (CM)")).toBeInTheDocument();
+
     fireEvent.change(screen.getByDisplayValue("Length (CM)"), {
       target: { value: "Length / 长度" },
     });
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "确认改字 15" }));
+    expect(screen.getByRole("button", { name: "确认改字" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "确认改字" }));
 
-    expect(screen.queryByRole("dialog", { name: "编辑文字" })).not.toBeInTheDocument();
-    expect(firstDetailImageCard).toHaveTextContent("AI 生成中");
-    expect(within(firstDetailImageCard).queryByRole("button", { name: "编辑文字 首屏主视觉" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              changes: [
+                {
+                  box: { height: 0.07, width: 0.24, x: 0.14, y: 0.3 },
+                  lineId: "line-002",
+                  operation: "replace",
+                  originalText: "Length (CM)",
+                  replacementText: "Length / 长度",
+                },
+              ],
+              kind: "result-image-text-rewrite",
+              sourceAssetId: "asset_generated_1",
+            }),
+            inputAssets: [{ assetId: "asset_generated_1", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "product",
+          }),
+        }),
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑文字" })).not.toBeInTheDocument());
 
-    act(() => {
-      vi.advanceTimersByTime(3200);
+    await waitFor(() =>
+      expect(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" })).toBeInTheDocument(),
+    );
+    await user.click(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" }));
+    expect(await screen.findByDisplayValue("Size Guide")).toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue("Size Guide"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认改字" }));
+
+    await waitFor(() => {
+      const textRewriteCalls = invokeMock.mock.calls.filter(([command, args]) => {
+        if (command !== "generation_create_task") {
+          return false;
+        }
+        const input = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input;
+        return input?.kind === "result-image-text-rewrite";
+      });
+      expect(textRewriteCalls).toHaveLength(2);
+      expect(textRewriteCalls[1]?.[1]).toEqual(
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              changes: [
+                {
+                  box: { height: 0.08, width: 0.3, x: 0.12, y: 0.16 },
+                  lineId: "line-001",
+                  operation: "delete",
+                  originalText: "Size Guide",
+                },
+              ],
+            }),
+          }),
+        }),
+      );
     });
-    vi.useRealTimers();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑文字" })).not.toBeInTheDocument());
 
-    expect(firstDetailImageCard).toHaveTextContent("首屏主视觉");
-    expect(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" })).toBeInTheDocument(),
+    );
+    await user.click(within(firstDetailImageCard).getByRole("button", { name: "编辑文字 首屏主视觉" }));
+    const emptyRecognitionToast = await screen.findByRole("status");
+    expect(emptyRecognitionToast).toHaveTextContent("未识别到文字");
+    expect(emptyRecognitionToast).toHaveClass("text-amber-50");
+    expect(screen.queryByRole("dialog", { name: "编辑文字" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "预览长图" }));
 
@@ -11019,6 +11290,351 @@ describe("App shell", () => {
     });
   });
 
+  it.each([
+    {
+      imageId: "shared-history-image-id",
+      imageTitle: "历史商品图",
+      replacementAssetId: "asset_product_history_rewritten",
+      sourceAssetId: "asset_product_history_current",
+      taskId: "task_product_text_new",
+      taskTitle: "当前商品历史",
+      workspace: "product" as const,
+      workspaceLabel: "商品",
+    },
+    {
+      imageId: "clothing-history-image-id",
+      imageTitle: "历史服饰图",
+      replacementAssetId: "asset_clothing_history_rewritten",
+      sourceAssetId: "asset_clothing_history_current",
+      taskId: "task_clothing_text_history",
+      taskTitle: "当前服饰历史",
+      workspace: "clothing" as const,
+      workspaceLabel: "服饰",
+    },
+  ])(
+    "routes text recognition and replacement through the opened $workspaceLabel history record",
+    async ({
+      imageId,
+      imageTitle,
+      replacementAssetId,
+      sourceAssetId,
+      taskId,
+      taskTitle,
+      workspace,
+      workspaceLabel,
+    }) => {
+      const user = userEvent.setup();
+      const defaultInvoke = invokeMock.getMockImplementation();
+      const currentDetail = createTextEditHistoryTaskDetail({
+        imageId,
+        imageTitle,
+        sourceAssetId,
+        taskId,
+        taskTitle,
+        workspace,
+      });
+      const listedDetails = workspace === "product"
+        ? [
+            currentDetail,
+            createTextEditHistoryTaskDetail({
+              imageId,
+              imageTitle: "旧商品图",
+              sourceAssetId: "asset_product_history_old",
+              taskId: "task_product_text_old",
+              taskTitle: "旧商品历史",
+              workspace,
+            }),
+          ]
+        : [currentDetail];
+      const rewriteTaskId = `task_${workspace}_history_text_rewrite`;
+
+      invokeMock.mockImplementation((command, args) => {
+        const requestedTaskId = (args as { taskId?: string } | undefined)?.taskId;
+        const requestedWorkspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+        const taskInputKind = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind;
+        if (command === "generation_list_tasks") {
+          const items = requestedWorkspace === workspace ? listedDetails.map((detail) => detail.task) : [];
+          return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+        }
+        if (command === "generation_get_task_detail") {
+          const parentDetail = listedDetails.find((detail) => detail.task.id === requestedTaskId);
+          if (parentDetail) {
+            return Promise.resolve(parentDetail);
+          }
+          if (requestedTaskId === rewriteTaskId) {
+            return Promise.resolve({
+              events: [],
+              inputAssets: [],
+              outputAssets: [
+                {
+                  asset: {
+                    id: replacementAssetId,
+                    localPath: `/workspace/current/assets/generated/${replacementAssetId}.png`,
+                    relativePath: `assets/generated/${replacementAssetId}.png`,
+                  },
+                  role: "output",
+                  sortOrder: 0,
+                },
+              ],
+              task: {
+                id: rewriteTaskId,
+                kind: "image-edit",
+                stage: "completed",
+                status: "succeeded",
+                workspace,
+              },
+            });
+          }
+        }
+        if (command === "ai_assist_recognize_image_text") {
+          return Promise.resolve({
+            items: [
+              {
+                box: { height: 0.08, width: 0.3, x: 0.12, y: 0.16 },
+                id: "line-history",
+                text: "SUMMER",
+              },
+            ],
+          });
+        }
+        if (command === "generation_create_task" && taskInputKind === "result-image-text-rewrite") {
+          return Promise.resolve({
+            attemptNo: 1,
+            createdAt: "2026-07-13T10:20:00.000Z",
+            id: rewriteTaskId,
+            kind: "image-edit",
+            stage: "queued",
+            status: "queued",
+            title: `修改文字 ${imageTitle}`,
+            updatedAt: "2026-07-13T10:20:00.000Z",
+            workspace,
+          });
+        }
+        if (command === "generation_run_task" && requestedTaskId === rewriteTaskId) {
+          return Promise.resolve({ invocationId: `inv_${rewriteTaskId}`, taskId: rewriteTaskId });
+        }
+        return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+      });
+
+      renderApp();
+
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", expect.any(Object)));
+      await user.click(screen.getByRole("button", { name: /生成记录/ }));
+      const historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+      await user.click(within(historyDialog).getByRole("button", { name: workspaceLabel }));
+      await user.click(within(historyDialog).getByText(taskTitle).closest("button") as HTMLButtonElement);
+      expect(screen.getByRole("img", { name: imageTitle })).toHaveAttribute(
+        "src",
+        expect.stringContaining(sourceAssetId),
+      );
+
+      await user.click(screen.getByRole("button", { name: `编辑文字 ${imageTitle}` }));
+      expect(await screen.findByDisplayValue("SUMMER")).toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+        input: { assetId: sourceAssetId },
+      });
+      await user.clear(screen.getByDisplayValue("SUMMER"));
+      await user.type(screen.getByRole("textbox", { name: "编辑文字 1" }), "盛夏");
+      await user.click(screen.getByRole("button", { name: "确认改字" }));
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          "generation_create_task",
+          expect.objectContaining({
+            input: expect.objectContaining({
+              input: expect.objectContaining({
+                kind: "result-image-text-rewrite",
+                parentTaskId: taskId,
+                sourceAssetId,
+                targetImageId: imageId,
+              }),
+              inputAssets: [{ assetId: sourceAssetId, role: "reference", sortOrder: 0 }],
+              kind: "image-edit",
+              workspace,
+            }),
+          }),
+        ),
+      );
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          "generation_replace_result_image",
+          expect.objectContaining({
+            input: {
+              currentAssetId: sourceAssetId,
+              displayedAssetId: sourceAssetId,
+              replacementAssetId,
+              replacementTaskId: rewriteTaskId,
+              taskId,
+            },
+          }),
+        ),
+      );
+      expect(screen.getByRole("img", { name: imageTitle })).toHaveAttribute(
+        "src",
+        expect.stringContaining(replacementAssetId),
+      );
+    },
+  );
+
+  it("keeps each workspace result bound to its own record after navigating between retained canvases", async () => {
+    const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+    const productDetail = createTextEditHistoryTaskDetail({
+      imageId: "retained-product-image",
+      imageTitle: "保留商品图",
+      sourceAssetId: "asset_retained_product",
+      taskId: "task_retained_product",
+      taskTitle: "保留商品记录",
+      workspace: "product",
+    });
+    const clothingDetail = createTextEditHistoryTaskDetail({
+      imageId: "retained-clothing-image",
+      imageTitle: "保留服饰图",
+      sourceAssetId: "asset_retained_clothing",
+      taskId: "task_retained_clothing",
+      taskTitle: "保留服饰记录",
+      workspace: "clothing",
+    });
+    const rewriteTaskId = "task_retained_product_text_rewrite";
+
+    invokeMock.mockImplementation((command, args) => {
+      const requestedTaskId = (args as { taskId?: string } | undefined)?.taskId;
+      const requestedWorkspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
+      const taskInputKind = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind;
+      if (command === "generation_list_tasks") {
+        const detail = requestedWorkspace === "product"
+          ? productDetail
+          : requestedWorkspace === "clothing"
+            ? clothingDetail
+            : undefined;
+        const items = detail ? [detail.task] : [];
+        return Promise.resolve({ items, page: 1, pageSize: 20, total: items.length });
+      }
+      if (command === "generation_get_task_detail") {
+        if (requestedTaskId === productDetail.task.id) {
+          return Promise.resolve(productDetail);
+        }
+        if (requestedTaskId === clothingDetail.task.id) {
+          return Promise.resolve(clothingDetail);
+        }
+        if (requestedTaskId === rewriteTaskId) {
+          return Promise.resolve({
+            events: [],
+            inputAssets: [],
+            outputAssets: [
+              {
+                asset: {
+                  id: "asset_retained_product_rewritten",
+                  localPath: "/workspace/current/assets/generated/retained-product-rewritten.png",
+                  relativePath: "assets/generated/retained-product-rewritten.png",
+                },
+                role: "output",
+                sortOrder: 0,
+              },
+            ],
+            task: {
+              id: rewriteTaskId,
+              kind: "image-edit",
+              stage: "completed",
+              status: "succeeded",
+              workspace: "product",
+            },
+          });
+        }
+      }
+      if (command === "ai_assist_recognize_image_text") {
+        return Promise.resolve({
+          items: [
+            {
+              box: { height: 0.08, width: 0.3, x: 0.12, y: 0.16 },
+              id: "line-retained-product",
+              text: "SUMMER",
+            },
+          ],
+        });
+      }
+      if (command === "generation_create_task" && taskInputKind === "result-image-text-rewrite") {
+        return Promise.resolve({
+          attemptNo: 1,
+          createdAt: "2026-07-13T10:30:00.000Z",
+          id: rewriteTaskId,
+          kind: "image-edit",
+          stage: "queued",
+          status: "queued",
+          title: "修改文字 保留商品图",
+          updatedAt: "2026-07-13T10:30:00.000Z",
+          workspace: "product",
+        });
+      }
+      if (command === "generation_run_task" && requestedTaskId === rewriteTaskId) {
+        return Promise.resolve({ invocationId: `inv_${rewriteTaskId}`, taskId: rewriteTaskId });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
+
+    renderApp();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("generation_list_tasks", expect.any(Object)));
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    let historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "商品" }));
+    await user.click(within(historyDialog).getByText("保留商品记录").closest("button") as HTMLButtonElement);
+    expect(screen.getByRole("img", { name: "保留商品图" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("asset_retained_product"),
+    );
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "服饰" }));
+    await user.click(within(historyDialog).getByText("保留服饰记录").closest("button") as HTMLButtonElement);
+    expect(screen.getByRole("img", { name: "保留服饰图" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "商品" }));
+    expect(screen.getByRole("img", { name: "保留商品图" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("asset_retained_product"),
+    );
+    expect(screen.queryByRole("complementary", { name: "生成配置" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    historyDialog = screen.getByRole("dialog", { name: "生成记录" });
+    await user.click(within(historyDialog).getByRole("button", { name: "全部" }));
+    const productHistoryRow = within(historyDialog).getByText("保留商品记录").closest("button")?.parentElement;
+    const clothingHistoryRow = within(historyDialog).getByText("保留服饰记录").closest("button")?.parentElement;
+    expect(productHistoryRow).toHaveClass("border-slate-950/20");
+    expect(clothingHistoryRow).not.toHaveClass("border-slate-950/20");
+    await user.click(within(historyDialog).getByRole("button", { name: "关闭生成记录" }));
+
+    await user.click(screen.getByRole("button", { name: "编辑文字 保留商品图" }));
+    expect(await screen.findByDisplayValue("SUMMER")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset_retained_product" },
+    });
+    await user.clear(screen.getByDisplayValue("SUMMER"));
+    await user.type(screen.getByRole("textbox", { name: "编辑文字 1" }), "盛夏");
+    await user.click(screen.getByRole("button", { name: "确认改字" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              kind: "result-image-text-rewrite",
+              parentTaskId: "task_retained_product",
+              sourceAssetId: "asset_retained_product",
+              targetImageId: "retained-product-image",
+            }),
+            inputAssets: [{ assetId: "asset_retained_product", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "product",
+          }),
+        }),
+      ),
+    );
+  });
+
   it("keeps a viewed scene history record visible while another scene task finishes polling", async () => {
     const user = userEvent.setup();
     const baseInvoke = invokeMock.getMockImplementation();
@@ -11070,6 +11686,20 @@ describe("App shell", () => {
     invokeMock.mockImplementation((command, args) => {
       const taskKind = (args as { input?: { input?: { kind?: string } } } | undefined)?.input?.input?.kind;
       const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "ai_assist_recognize_image_text") {
+        return Promise.resolve({
+          items: [
+            {
+              box: { height: 0.08, width: 0.32, x: 0.1, y: 0.12 },
+              id: "line-001",
+              text: "历史场景",
+            },
+          ],
+        });
+      }
+      if (command === "generation_create_task" && taskKind === "result-image-text-rewrite") {
+        return Promise.reject(new Error("历史场景改字失败"));
+      }
       if (command === "generation_list_tasks") {
         const workspace = (args as { query?: { workspace?: string } } | undefined)?.query?.workspace;
         const items = workspace === "scene" ? [historyDetail.task] : [];
@@ -11094,6 +11724,30 @@ describe("App shell", () => {
       if (command === "generation_get_task_detail" && taskId === "task_scene_live") {
         return new Promise((resolve) => {
           resolveLiveDetail = resolve;
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_image-edit") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_scene_history_rewritten",
+                localPath: "/workspace/current/assets/generated/scene-history-rewritten.png",
+                relativePath: "assets/generated/scene-history-rewritten.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-edit",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "scene",
+          },
         });
       }
       return baseInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
@@ -11147,6 +11801,60 @@ describe("App shell", () => {
 
     await waitFor(() => expect(screen.getByRole("img", { name: "S1 历史场景" })).toBeInTheDocument());
     expect(screen.queryByRole("img", { name: "H1 首屏主视觉" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "AI改图 S1 历史场景" }));
+    await user.type(screen.getByRole("textbox", { name: "输入调整要求" }), "把背景改成浅灰色");
+    await user.click(screen.getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              parentTaskId: "task_scene_history",
+              rewriteInstruction: "把背景改成浅灰色",
+              sourceAssetId: "asset_scene_history",
+            }),
+            inputAssets: [{ assetId: "asset_scene_history", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "scene",
+          }),
+        }),
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "编辑文字 S1 历史场景" })).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "编辑文字 S1 历史场景" }));
+    expect(await screen.findByDisplayValue("历史场景")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset_scene_history_rewritten" },
+    });
+    await user.clear(screen.getByDisplayValue("历史场景"));
+    await user.type(screen.getByRole("textbox", { name: "编辑文字 1" }), "经典场景");
+    await user.click(screen.getByRole("button", { name: "确认改字" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              kind: "result-image-text-rewrite",
+              sourceAssetId: "asset_scene_history_rewritten",
+            }),
+            inputAssets: [{ assetId: "asset_scene_history_rewritten", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "scene",
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent("历史场景改字失败");
+    expect(screen.getByRole("dialog", { name: "编辑文字" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("经典场景")).toBeInTheDocument();
   });
 
   it("returns to scene configuration when prompt planning validation fails", async () => {
@@ -11202,6 +11910,47 @@ describe("App shell", () => {
 
   it("guides scene generation through reference images, prompt review, and image results", async () => {
     const user = userEvent.setup();
+    const defaultInvoke = invokeMock.getMockImplementation();
+
+    invokeMock.mockImplementation((command, args) => {
+      const taskId = (args as { taskId?: string } | undefined)?.taskId;
+      if (command === "ai_assist_recognize_image_text") {
+        return Promise.resolve({
+          items: [
+            {
+              box: { height: 0.08, width: 0.3, x: 0.12, y: 0.16 },
+              id: "line-scene-live",
+              text: "SUMMER",
+            },
+          ],
+        });
+      }
+      if (command === "generation_get_task_detail" && taskId === "task_image-edit") {
+        return Promise.resolve({
+          events: [],
+          inputAssets: [],
+          outputAssets: [
+            {
+              asset: {
+                id: "asset_scene_live_text_rewritten",
+                localPath: "/workspace/current/assets/generated/scene-live-text-rewritten.png",
+                relativePath: "assets/generated/scene-live-text-rewritten.png",
+              },
+              role: "output",
+              sortOrder: 0,
+            },
+          ],
+          task: {
+            id: taskId,
+            kind: "image-edit",
+            stage: "completed",
+            status: "succeeded",
+            workspace: "scene",
+          },
+        });
+      }
+      return defaultInvoke?.(command, args) ?? Promise.reject(new Error(`Unhandled command ${command}`));
+    });
 
     selectProductImagesMock.mockResolvedValue([
       {
@@ -11302,6 +12051,48 @@ describe("App shell", () => {
     );
     expect(screen.queryByTestId("failed-result-card")).not.toBeInTheDocument();
     expect(screen.getByText("H1 首屏主视觉")).toBeInTheDocument();
+
+    await user.click(within(sceneGeneratedCards[0]).getByRole("button", { name: "编辑文字 H1 首屏主视觉" }));
+    expect(await screen.findByDisplayValue("SUMMER")).toBeInTheDocument();
+    expect(invokeMock).toHaveBeenCalledWith("ai_assist_recognize_image_text", {
+      input: { assetId: "asset_generated_1" },
+    });
+    await user.clear(screen.getByDisplayValue("SUMMER"));
+    await user.type(screen.getByRole("textbox", { name: "编辑文字 1" }), "盛夏");
+    await user.click(screen.getByRole("button", { name: "确认改字" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_create_task",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            input: expect.objectContaining({
+              kind: "result-image-text-rewrite",
+              parentTaskId: "task_scene-image-generation",
+              sourceAssetId: "asset_generated_1",
+              targetImageId: "scene-h1",
+            }),
+            inputAssets: [{ assetId: "asset_generated_1", role: "reference", sortOrder: 0 }],
+            kind: "image-edit",
+            workspace: "scene",
+          }),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "generation_replace_result_image",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            currentAssetId: "asset_generated_1",
+            displayedAssetId: "asset_generated_1",
+            replacementAssetId: "asset_scene_live_text_rewritten",
+            replacementTaskId: "task_image-edit",
+            taskId: "task_scene-image-generation",
+          }),
+        }),
+      ),
+    );
 
     await user.click(sceneSourceCard);
     expect(screen.queryByRole("dialog", { name: "图片相册预览" })).not.toBeInTheDocument();

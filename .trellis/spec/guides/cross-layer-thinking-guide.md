@@ -120,6 +120,8 @@ After implementation:
       casting payload fields locally
 - [ ] Checked that derived state points back to the source event identifier
       (`seq`, `id`, `version`) instead of inventing a second cursor
+- [ ] If an async lock must survive navigation or conditional rendering, tested a real component unmount and
+      remount; a prop rerender does not prove that component-local state has the correct lifetime
 
 ---
 
@@ -436,3 +438,32 @@ When changing an image model matrix:
 correct but its total pixel area was below the 5.0 minimum, so planning succeeded and the real image
 request failed with HTTP 400. The fix split the model matrices, mapped 5.0 3:4 to `1728x2304`, and
 locked both the runtime size registry and final request body with tests.
+
+---
+
+## Approximate Model Coordinates Versus Canonical Runtime Geometry
+
+Visual models may return useful approximate locations while failing an exact geometry contract, or
+may confuse `width/height` with `right/bottom`. Do not make every downstream consumer understand that
+ambiguity. Use an unambiguous edge-based Provider schema when possible, then normalize once at the
+external model boundary into the application's canonical geometry type.
+
+Boundary rules:
+
+- keep finite/range checks strict and never guess pixels, percentages, negative anchors, or moved
+  origins;
+- interpret legacy members as endpoints only when a whole batch has an overflowing xywh interpretation
+  and every legacy item has valid edge ordering; otherwise skip ambiguous overflow instead of expanding
+  an unreliable box to the image edge;
+- pass only canonical, in-bounds geometry to UI, persistence, and task execution;
+- keep persisted/user-submitted geometry validation strict;
+- when collection items are independently useful, distinguish collection/text contract failures from
+  optional per-item geometry failures: reject malformed collection structure, but skip a geometry-invalid
+  item before assigning runtime IDs so one unreliable location does not discard all valid siblings;
+- when approximate geometry drives a destructive edit, treat it as a location hint and require a
+  second semantic anchor such as uniquely matched source text. Ambiguous matches must fail closed or
+  remain unchanged instead of treating the whole approximate region as an edit mask.
+
+Regression tests should cover the preferred schema conversion, consistent legacy endpoint conversion,
+valid-invalid-valid ordering, all-invalid empty output, strict collection/text rejection, strict downstream
+validation, and the fail-closed semantic Prompt.

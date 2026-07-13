@@ -121,6 +121,7 @@ describe("Runtime public contract", () => {
         analyzeViralStyle: vi.fn(),
         generateListingCopy: vi.fn(),
         generateProductSellingPoints: vi.fn(),
+        recognizeImageText: vi.fn(),
       },
       assets: {
         deleteAsset: vi.fn(),

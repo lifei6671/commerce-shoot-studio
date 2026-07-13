@@ -204,6 +204,7 @@ M7 真实场景生图闭环
 - 点击测试连接、保存、清理等异步动作时，按钮必须有 loading / disabled 状态，防止重复点击。
 - 异步失败必须用全局 toast 展示明确错误原因，不能静默失败。
 - 全局 toast 统一从 `desktop/src/shared/ui/toast.tsx` 使用，分为 success / error / warning，默认 3 秒自动消失。
+- 商品、服饰、场景及历史结果卡的“编辑文字”必须先用当前 active generated `assetId` 调用真实 `image-text-recognition`，识别期间显示骨架屏；未识别到文字时全局 warning toast 后关闭。只有变化行可提交，清空行必须显式表示删除；改字使用执行时最新真实 `image-edit` 配置并复用稳定槽位替换。提交锁必须按 record scope、图片和 operation token 隔离，并跨结果画布卸载/重挂载保持有效。前端不得传 Base64、完整 Prompt 或 Provider 原始响应，也不得用静态示例文字伪装识别结果。
 
 ### 设置页规则
 
