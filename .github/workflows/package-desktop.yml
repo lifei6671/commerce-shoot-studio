@@ -1,0 +1,94 @@
+name: 桌面安装包
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - name: macOS Intel x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - name: Windows ARM64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            bundles: nsis,msi
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 安装 Rust 1.96.0 与目标架构
+        run: >-
+          rustup toolchain install 1.96.0
+          --profile minimal
+          --target ${{ matrix.target }}
+          --no-self-update
+
+      - name: 固定当前 Rust 工具链
+        run: rustup default 1.96.0
+
+      - name: 检查 Windows MSI 的 VBScript 前置能力
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $capability = Get-WindowsCapability -Online |
+            Where-Object Name -Like "VBSCRIPT*" |
+            Select-Object -First 1
+          if ($capability -and $capability.State -ne "Installed") {
+            throw "当前 GitHub runner 未启用 VBScript capability，无法构建 MSI：$($capability.Name)"
+          }
+          if (-not (Get-Command "cscript.exe" -ErrorAction SilentlyContinue)) {
+            throw "当前 GitHub runner 缺少 cscript.exe，无法构建 MSI。"
+          }
+
+      - name: 安装前端依赖
+        run: npm ci --prefix desktop
+
+      - name: 构建并上传安装包
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: desktop
+          tauriScript: npm run tauri
+          args: >-
+            --target ${{ matrix.target }}
+            --bundles ${{ matrix.bundles }}
+            --ci
+            --no-sign
+            -- --locked
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: commerce-shoot-studio-unsigned-[platform]-[arch]-[bundle]

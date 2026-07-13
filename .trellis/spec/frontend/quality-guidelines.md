@@ -261,6 +261,48 @@ const record = records.find((item) => item.id === displayedRecordId && item.work
 updateGeneratedImageForRecord(record.id, workspace, imageId, replacement);
 ```
 
+## Scenario: Generated result downloads
+
+### 1. Scope / Trigger
+
+- Product, clothing, scene, and restored-history result pages share the download behavior owned by
+  `PreviewCanvas`.
+- Download inputs contain only completed generated assets. Source/reference cards, listing copy, generating
+  cards, and failed cards never enter long previews or archives.
+
+### 2. Contracts
+
+- A long-image download must fetch each workspace asset into a `Blob` before decoding it for Canvas. Never
+  draw an `asset://` image element directly onto Canvas, because the resulting canvas may be origin-tainted.
+- Decode through `createImageBitmap` or a temporary object URL, and release the bitmap/object URL after each
+  section is drawn.
+- The saved `.png` must contain PNG bytes produced by Canvas. Do not use SVG markup, gradients, or other
+  placeholder content as a fallback for a PNG filename.
+- Bound long-image allocation by both maximum Canvas dimension and maximum pixel count, applying one uniform
+  scale to every section so image order and aspect ratios remain stable.
+- ZIP downloads contain the original generated asset bytes and preserve supported file extensions. Set the
+  ZIP UTF-8 filename flag for Chinese titles. Read archive sources sequentially and reject more than 32 MiB
+  of source bytes with an actionable split-download toast; the current JSON IPC is not a streaming transport.
+- Before converting any single image, long PNG, or ZIP to a JavaScript number array, reject a final payload
+  larger than 32 MiB. This final-payload check is mandatory even when an earlier source-size check exists.
+- Every async download entry has a loading/disabled state, blocks duplicate submission, and reports fetch,
+  decode, Canvas, encoding, and native-save failures through a visible toast. Cancelling the native save
+  dialog is not an error.
+- Single-image, long-image, and ZIP downloads share one synchronous operation mutex. While any download is
+  reading assets, encoding bytes, or waiting for the native save flow, every other download entry is disabled;
+  separate per-button loading states are not sufficient because they allow multiple 32 MiB operations to run
+  concurrently.
+
+### 3. Tests Required
+
+- Exercise the real Canvas path with fetched asset bytes and assert a PNG signature is sent to the native
+  save command; a jsdom-only SVG fallback is not valid coverage.
+- Assert Canvas security/encoding failure restores the button and displays an error.
+- Assert repeated clicks while the save dialog is pending produce one save request.
+- Start one download type with an unresolved save request and assert the other download types are disabled and
+  cannot open a second save request until the first operation releases its mutex.
+- Assert ZIP output contains the original generated image byte sequence.
+
 ## Scenario: Generated-image text editing dialog
 
 ### 1. Scope / Trigger

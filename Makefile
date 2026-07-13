@@ -4,7 +4,7 @@ DESKTOP_DIR := desktop
 NPM := npm --prefix $(DESKTOP_DIR)
 CARGO_MANIFEST := $(DESKTOP_DIR)/src-tauri/Cargo.toml
 
-.PHONY: help install dev build package check test frontend-build cargo-check audit clean
+.PHONY: help install dev build package package-macos package-windows-info check test frontend-build cargo-check audit clean
 
 help:
 	@echo "商拍工坊常用命令"
@@ -13,6 +13,8 @@ help:
 	@echo "  make dev            一键启动 Tauri 桌面开发环境"
 	@echo "  make build          一键编译桌面端可执行文件（不打包安装包）"
 	@echo "  make package        一键打包桌面端安装产物"
+	@echo "  make package-macos  按当前 Mac 架构运行未签名打包脚本"
+	@echo "  make package-windows-info 打印 Windows PowerShell 打包命令"
 	@echo "  make check          运行测试、前端构建、Rust 检查和 npm audit"
 	@echo "  make test           运行前端测试"
 	@echo "  make frontend-build 只构建前端产物"
@@ -31,6 +33,13 @@ build:
 
 package:
 	$(NPM) run tauri -- build
+
+package-macos:
+	./build/package-macos.sh
+
+package-windows-info:
+	@echo '请在 Windows PowerShell 中运行（默认 all/MSI 需管理员权限，纯 NSIS 可用普通权限）：'
+	@echo '  .\build\package-windows.ps1'
 
 check: test frontend-build cargo-check audit
 

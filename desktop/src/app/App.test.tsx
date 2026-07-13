@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { App, createSceneRetryTaskInput } from "./App";
+import { App } from "./App";
+import { createSceneRetryTaskInput } from "../features/history/lib/generationHistory";
 import { selectProductImages } from "../features/generation/lib/productImagePicker";
 import { PreviewCanvas } from "../features/generation/components/PreviewCanvas";
 import { GenerationHistoryPopover } from "../features/history/components/GenerationHistoryPopover";
@@ -991,7 +992,7 @@ describe("App shell", () => {
     await user.click(within(navigation).getByRole("button", { name: /模型/ }));
     const toolbar = screen.getByRole("banner", { name: "应用工具栏" });
 
-    expect(screen.getByRole("main", { name: "AI 模型配置" })).toBeInTheDocument();
+    expect(await screen.findByRole("main", { name: "AI 模型配置" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "AI 模型配置" })).toBeInTheDocument();
     expect(within(navigation).getByRole("button", { name: /模型/ })).toHaveAttribute("aria-pressed", "true");
     expect(within(toolbar).queryByRole("button", { name: "新建任务" })).not.toBeInTheDocument();
@@ -1457,7 +1458,13 @@ describe("App shell", () => {
     expect(screen.getByText("服饰场景图")).toBeInTheDocument();
     expect(screen.queryByTestId("generation-history-empty-state")).not.toBeInTheDocument();
     expect(screen.getByText(/都市街头 · 3:4 · 2 张/)).toBeInTheDocument();
-    await user.click(within(historyDialog).getByRole("button", { name: "商品" }));
+    await user.click(within(historyDialog).getByRole("button", { name: "关闭生成记录" }));
+    expect(screen.queryByRole("dialog", { name: "生成记录" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /生成记录/ }));
+    const reopenedHistoryDialog = screen.getByRole("dialog", { name: "生成记录" });
+    expect(within(reopenedHistoryDialog).getByText("服饰场景图")).toBeInTheDocument();
+    expect(within(reopenedHistoryDialog).queryByText("商品详情图")).not.toBeInTheDocument();
+    await user.click(within(reopenedHistoryDialog).getByRole("button", { name: "商品" }));
     expect(screen.queryByText("重新生成 核心卖点图")).not.toBeInTheDocument();
     expect(screen.getByText(/淘宝天猫 · 中国 · 中文/)).toBeInTheDocument();
 
@@ -4395,7 +4402,7 @@ describe("App shell", () => {
     const toolbar = screen.getByRole("banner", { name: "应用工具栏" });
     await user.click(within(toolbar).getByRole("button", { name: "设置" }));
 
-    expect(screen.getByRole("main", { name: "设置" })).toBeInTheDocument();
+    expect(await screen.findByRole("main", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
     const navigation = screen.getByRole("navigation", { name: "主导航" });
     expect(within(navigation).getByRole("button", { name: /设置/ })).toHaveAttribute("aria-pressed", "true");
@@ -9441,20 +9448,42 @@ describe("App shell", () => {
     expect(within(longPreviewDialog).queryByText("首屏主视觉")).not.toBeInTheDocument();
     expect(within(longPreviewDialog).queryByText("突出商品核心卖点，强化购买决策")).not.toBeInTheDocument();
 
+    const canvasContext = {
+      drawImage: vi.fn(),
+      fillRect: vi.fn(),
+      scale: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    const imageBitmap = {
+      close: vi.fn(),
+      height: 600,
+      width: 970,
+    } as unknown as ImageBitmap;
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => imageBitmap));
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(canvasContext);
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
+      const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const blob = new Blob([bytes], { type: "image/png" });
+      Object.defineProperty(blob, "arrayBuffer", {
+        value: async () => bytes.buffer.slice(0),
+      });
+      callback(blob);
+    });
     saveMock.mockResolvedValueOnce("/Users/demo/Desktop/detail-long.png");
     await user.click(screen.getByRole("button", { name: "下载长图" }));
 
     expect(saveMock).toHaveBeenLastCalledWith(expect.objectContaining({
       defaultPath: "生成结果-2026-06-29-1552-长图.png",
     }));
-    expect(invokeMock).toHaveBeenLastCalledWith("save_generated_asset", expect.objectContaining({
-      path: "/Users/demo/Desktop/detail-long.png",
-      bytes: expect.any(Array),
-    }));
+    await waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith(
+      "save_generated_asset",
+      expect.objectContaining({
+        path: "/Users/demo/Desktop/detail-long.png",
+        bytes: expect.any(Array),
+      }),
+    ));
     const longImagePayload = invokeMock.mock.calls[invokeMock.mock.calls.length - 1]?.[1] as { bytes: number[] };
-    const longImageMarkup = new TextDecoder().decode(new Uint8Array(longImagePayload.bytes));
-    expect(longImageMarkup).not.toContain("首屏主视觉");
-    expect(longImageMarkup).not.toContain("突出商品核心卖点，强化购买决策");
+    expect(longImagePayload.bytes.slice(0, 8)).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(canvasContext.drawImage).toHaveBeenCalledTimes(3);
 
     await user.click(screen.getByRole("button", { name: "关闭长图预览" }));
 

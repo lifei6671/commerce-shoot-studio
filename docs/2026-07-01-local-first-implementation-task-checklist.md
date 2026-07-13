@@ -467,6 +467,13 @@ M7 真实场景生图闭环
   - `make test`、`make frontend-build` 通过。
 - 退出条件：History 不再依赖 mock/local state。
 
+2026-07-13 列表流式分页：生成记录弹窗按当前分类默认渲染 10 条，滚动接近底部时
+每次追加 10 条；切换“全部 / 商品 / 场景 / 服饰”会重置为该分类前 10 条，删除已显示
+记录后自动补位。缩略图使用原生延迟加载和异步解码。该实现只减少弹窗首次打开时的
+DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并和未完成任务续跑语义。
+组件定向测试 4/4、前端全量 288/288、`make frontend-build` 与 `git diff --check`
+均通过；真实桌面长列表滚动手感仍待人工验收，本项不标记完成。
+
 ## 9. M4：PromptPlan
 
 目标：生成方案可创建、编辑、确认，并在任务创建时冻结快照。
@@ -946,6 +953,16 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
   276/276、Rust 全量测试、
   `make check`、`cargo fmt --check` 与 `git diff --check` 均通过；真实 OpenAI/火山付费改图仍待手工验收。
   真实桌面快速新建、取消和重启重试竞态仍待手工验收。
+  同日补齐商品、服饰、场景和历史共享结果画布的下载契约：长图读取真实 asset 后合成受限尺寸的
+  PNG，全部/分组/已选 ZIP 写入真实图片字节并保留扩展名；下载入口具备 loading、防重复提交和
+  错误 toast。ZIP 按顺序读取图片并在原始资产累计超过 32 MiB 时提示分组或分批下载，避免当前
+  JSON IPC 的 number array 造成 WebView 内存失控。自动化覆盖 Canvas 安全失败、PNG 字节、真实 ZIP
+  内容、单图/归档最终 IPC 体积上限和保存期间重复点击；本轮 `make check` 前端全量 283/283 通过，
+  macOS / Windows 原生保存对话框与下载文件打开仍待真机验收。
+  后续复审进一步把单图、长图和 ZIP 收口到同一个同步操作锁：任一下载读取资产、编码或等待
+  原生保存时，其余所有下载入口均禁用，避免多个 32 MiB 任务并发占用 WebView 内存。跨类型互斥
+  回归测试与下载定向测试 8/8、当前 `make check` 前端全量 289/289 通过；真实原生保存行为仍按
+  上述边界待 macOS / Windows 真机验收。
 - 主要文件：
   - `desktop/src-tauri/src/services/generation*`
   - `desktop/src/features/history/*`
@@ -1126,6 +1143,36 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
 - [ ] Windows 下 workspace 目录和 SQLite 文件仅当前用户可读写。
 - [ ] Explorer reveal 通过 `ShellPort`。
 - [ ] Windows 真机完成导入、删除、GC、生成结果保存验收。
+
+### 桌面双架构打包脚本
+
+2026-07-13 已提供宿主原生打包入口：macOS 脚本支持 `arm64`、`x64`、`all` 与
+`app`、`dmg`、`all`；Windows PowerShell 脚本支持 `x64`、`arm64`、`all` 与
+`nsis`、`msi`、`all`。默认构建当前宿主架构并执行一次 `npm ci`，可显式跳过依赖
+安装。`all` 表示依次构建两个独立 target，不是 universal 或多架构合并安装包。
+第一版始终生成未签名产物，不包含 Apple 公证、Windows Authenticode、自动更新或
+发布上传。本记录只确认脚本接口已提供，不勾选现有 Windows 兼容大项。
+
+同日复审补强 Windows 本地脚本：`-Arch all` 会从同一个 Visual Studio 安装为 x64 与
+ARM64 target 分别调用 `Launch-VsDevShell.ps1`，并校验 `VSCMD_ARG_TGT_ARCH`，避免复用
+错误架构的 `cl` / `link` / `rc` 环境；`msi` / `all` 还会在构建前要求管理员 PowerShell，
+检查 VBSCRIPT capability 与 `cscript.exe`，纯 NSIS 不增加该要求。当前只有官方契约和
+脚本结构证据，Windows 真机构建、安装与启动仍未验证，因此不勾选平台验收项。
+
+同日已配置 `.github/workflows/package-desktop.yml`：支持手动和 `v*` tag 触发，固定
+macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵项；使用
+锁定提交 SHA 的 checkout、setup-node、Tauri Action，固定 Node.js `22.22.0`、Rust
+`1.96.0`，并以 `contents: read`、`--no-sign` 只上传名称隔离的 Actions Artifacts。
+Windows Job 在 MSI 构建前检查 VBScript capability 与 `cscript.exe`。本地 YAML 解析和
+结构复审已通过，但 workflow 尚未推送运行；`windows-11-arm` runner 仍处于 Public
+Preview。`v*` tag 触发不会创建或更新 GitHub Release，因此 workflow 配置不等于发布完成。
+
+- [ ] macOS ARM64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
+- [ ] macOS x64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
+- [ ] Windows x64 的 NSIS、MSI 在对应宿主完成构建、安装、资源和启动验收。
+- [ ] Windows ARM64 的 NSIS、MSI 在对应宿主完成构建、安装、资源和启动验收。
+- [ ] GitHub Actions 四个 Job 在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
+- [ ] 正式发布前完成 macOS 签名/公证与 Windows Authenticode 策略确认和验证。
 
 ## 14. 推进建议
 

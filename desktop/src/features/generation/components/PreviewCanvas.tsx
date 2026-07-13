@@ -102,10 +102,25 @@ export type ProductListingCopy = {
 
 type LongPreviewImageItem = {
   badge?: string;
-  fallbackIndex: number;
+  height?: number;
   id: string;
   src?: string;
   title: string;
+  width?: number;
+};
+
+type LongImageAsset = {
+  blob: Blob;
+  height: number;
+  item: LongPreviewImageItem;
+  width: number;
+};
+
+type DecodedCanvasImage = {
+  height: number;
+  release: () => void;
+  source: CanvasImageSource;
+  width: number;
 };
 
 type TextEditPhase = "recognizing" | "ready" | "error" | "submitting";
@@ -292,7 +307,11 @@ function GeneratedDetailCanvas({
   const [listingCopyTargetId, setListingCopyTargetId] = useState<string | null>(null);
   const [textEditValues, setTextEditValues] = useState<string[]>([]);
   const [longPreviewOpen, setLongPreviewOpen] = useState(false);
+  const [longImageDownloading, setLongImageDownloading] = useState(false);
+  const [archiveDownloading, setArchiveDownloading] = useState(false);
+  const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const downloadOperationLockedRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
   const resizeRequestIdRef = useRef(0);
   const imageOperationSequenceRef = useRef(0);
@@ -322,6 +341,7 @@ function GeneratedDetailCanvas({
   const completedImages = visibleImageItems.filter((image) => image.status === "complete");
   const selectedImages = completedImages.filter((image) => selectedImageIds.has(image.id));
   const allCompletedSelected = completedImages.length > 0 && completedImages.every((image) => selectedImageIds.has(image.id));
+  const downloadInProgress = longImageDownloading || archiveDownloading || downloadingImageId !== null;
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [previewZoom, setPreviewZoom] = useState(1);
   const previewImage = completedImages.find((image) => image.id === previewImageId) ?? null;
@@ -883,7 +903,11 @@ function GeneratedDetailCanvas({
     };
   }, []);
 
-  async function saveBytes(defaultPath: string, bytes: Uint8Array, extension: string) {
+  async function saveGeneratedFile(
+    defaultPath: string,
+    extension: string,
+    createBytes: () => Promise<Uint8Array> | Uint8Array,
+  ) {
     const path = await save({
       defaultPath,
       filters: [{ extensions: [extension], name: extension.toUpperCase() }],
@@ -892,53 +916,97 @@ function GeneratedDetailCanvas({
       return;
     }
 
+    const bytes = await createBytes();
+    if (bytes.length > maxIpcDownloadBytes) {
+      throw new Error(extension === "zip" ? archiveSizeLimitMessage : fileSizeLimitMessage);
+    }
     await invoke("save_generated_asset", {
       bytes: Array.from(bytes),
       path,
     });
   }
 
-  async function downloadImage(image: GeneratedDetailImage, index: number) {
-    try {
-      if (image.src) {
-        const response = await fetch(image.src);
-        if (!response.ok) {
-          throw new Error(`读取生成资产失败：${response.status}`);
-        }
-        const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
-        const extension = generatedImageFileExtension(image, mimeType);
-        await saveBytes(
-          `${sanitizeFilename(image.title)}.${extension}`,
-          new Uint8Array(await response.arrayBuffer()),
-          extension,
-        );
-        return;
-      }
+  async function downloadImage(image: GeneratedDetailImage) {
+    if (!beginDownloadOperation()) {
+      return;
+    }
 
-      const bytes = await blobToBytes(await createGeneratedImageBlob(image, index));
-      await saveBytes(`${sanitizeFilename(image.title)}.png`, bytes, "png");
-    } catch {
-      showCopyToast("图片下载失败，请重试");
+    setDownloadingImageId(image.id);
+    try {
+      const file = await readGeneratedImageFile(image, maxIpcDownloadBytes, fileSizeLimitMessage);
+      await saveGeneratedFile(
+        `${sanitizeFilename(image.title)}.${file.extension}`,
+        file.extension,
+        () => file.bytes,
+      );
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "图片下载失败，请重试"));
+    } finally {
+      setDownloadingImageId(null);
+      finishDownloadOperation();
     }
   }
 
   async function downloadLongImage() {
-    const bytes = await blobToBytes(await createLongImageBlob(longPreviewItems));
-    await saveBytes(`${generatedResultFilePrefix}-长图.png`, bytes, "png");
-  }
-
-  async function downloadImagesZip(images: GeneratedDetailImage[], zipLabel: string) {
-    if (images.length === 0) {
+    if (longPreviewItems.length === 0 || !beginDownloadOperation()) {
       return;
     }
 
-    const files = await Promise.all(
-      images.map(async (image, index) => ({
-        bytes: await blobToBytes(await createGeneratedImageBlob(image, index)),
-        name: `${String(index + 1).padStart(2, "0")}-${sanitizeFilename(image.title)}.png`,
-      })),
-    );
-    await saveBytes(`${generatedResultFilePrefix}-${zipLabel}.zip`, createZipBytes(files), "zip");
+    setLongImageDownloading(true);
+    try {
+      await saveGeneratedFile(`${generatedResultFilePrefix}-长图.png`, "png", async () =>
+        blobToBytes(await createLongImageBlob(longPreviewItems)),
+      );
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "长图下载失败，请重试"));
+    } finally {
+      setLongImageDownloading(false);
+      finishDownloadOperation();
+    }
+  }
+
+  async function downloadImagesZip(images: GeneratedDetailImage[], zipLabel: string) {
+    if (images.length === 0 || !beginDownloadOperation()) {
+      return;
+    }
+
+    setArchiveDownloading(true);
+    try {
+      await saveGeneratedFile(`${generatedResultFilePrefix}-${zipLabel}.zip`, "zip", async () => {
+        const files: Array<{ bytes: Uint8Array; name: string }> = [];
+        let sourceBytes = 0;
+        for (const [index, image] of images.entries()) {
+          const file = await readGeneratedImageFile(
+            image,
+            maxArchiveSourceBytes - sourceBytes,
+            archiveSizeLimitMessage,
+          );
+          sourceBytes += file.bytes.length;
+          files.push({
+            bytes: file.bytes,
+            name: `${String(index + 1).padStart(2, "0")}-${sanitizeFilename(image.title)}.${file.extension}`,
+          });
+        }
+        return createZipBytes(files);
+      });
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "图片下载失败，请重试"));
+    } finally {
+      setArchiveDownloading(false);
+      finishDownloadOperation();
+    }
+  }
+
+  function beginDownloadOperation() {
+    if (downloadOperationLockedRef.current) {
+      return false;
+    }
+    downloadOperationLockedRef.current = true;
+    return true;
+  }
+
+  function finishDownloadOperation() {
+    downloadOperationLockedRef.current = false;
   }
 
   function renderGeneratedResultCard(image: GeneratedDetailImage) {
@@ -977,10 +1045,12 @@ function GeneratedDetailCanvas({
       <GeneratedDetailImageCard
         image={image}
         index={imageIndex}
+        downloadBusy={downloadingImageId === image.id}
+        downloadDisabled={downloadInProgress}
         key={image.id}
         onOpenPreview={openImagePreview}
         onSelect={(selected) => toggleImageSelection(image.id, selected)}
-        onDownload={() => void downloadImage(image, imageIndex)}
+        onDownload={() => void downloadImage(image)}
         onDelete={() => openDeleteDialog(image)}
         onResize={() => void openResizeDialog(image)}
         onRewrite={() => openImageRewriteDialog(image)}
@@ -1079,13 +1149,15 @@ function GeneratedDetailCanvas({
                   </button>
                   {selectedImages.length > 0 ? (
                     <button
+                      aria-busy={archiveDownloading}
                       aria-label="批量下载所选图片"
                       className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[#1f1f21] px-2.5 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.16)] transition-colors hover:bg-black"
+                      disabled={downloadInProgress}
                       onClick={() => void downloadImagesZip(selectedImages, "已选图片")}
                       type="button"
                     >
                       <Download className="size-3.5" />
-                      批量下载
+                      {archiveDownloading ? "下载中…" : "批量下载"}
                     </button>
                   ) : null}
                 </>
@@ -1111,13 +1183,15 @@ function GeneratedDetailCanvas({
                   预览长图
                 </button>
                 <button
+                  aria-busy={archiveDownloading}
                   aria-label="下载全部"
                   className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                  disabled={downloadInProgress}
                   onClick={() => void downloadImagesZip(completedImages, "全部图片")}
                   type="button"
                 >
                   <Download className="size-3.5" />
-                  下载
+                  {archiveDownloading ? "下载中…" : "下载"}
                 </button>
                 <button
                   aria-label="更多生成结果操作"
@@ -1158,14 +1232,15 @@ function GeneratedDetailCanvas({
                     </label>
                     <div className="flex shrink-0 items-center gap-1.5">
                       <button
+                        aria-busy={archiveDownloading}
                         aria-label={`下载 ${group.title}`}
                         className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
-                        disabled={groupCompletedImages.length === 0}
+                        disabled={groupCompletedImages.length === 0 || downloadInProgress}
                         onClick={() => void downloadImagesZip(groupCompletedImages, group.title)}
                         type="button"
                       >
                         <Download className="size-3.5" />
-                        下载
+                        {archiveDownloading ? "下载中…" : "下载"}
                       </button>
                       <button
                         aria-label={`更多 ${group.title} 操作`}
@@ -1476,22 +1551,26 @@ function GeneratedDetailCanvas({
                   <div className="text-[13px] font-medium text-slate-700">生成结果 2026-06-29 15:52:34</div>
                   <div className="flex items-center gap-2">
                     <button
+                      aria-busy={longImageDownloading}
                       aria-label="下载长图"
                       className="inline-flex h-7 items-center gap-1.5 rounded-[6px] bg-slate-100 px-2.5 text-[12px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                      disabled={downloadInProgress || longPreviewItems.length === 0}
                       onClick={() => void downloadLongImage()}
                       type="button"
                     >
                       <Download className="size-3.5" />
-                      下载长图
+                      {longImageDownloading ? "下载中…" : "下载长图"}
                     </button>
                     <button
+                      aria-busy={archiveDownloading}
                       aria-label="下载全部图片"
                       className="inline-flex h-7 items-center gap-1.5 rounded-[6px] bg-slate-100 px-2.5 text-[12px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                      disabled={downloadInProgress}
                       onClick={() => void downloadImagesZip(completedImages, "全部图片")}
                       type="button"
                     >
                       <Download className="size-3.5" />
-                      下载全部图片
+                      {archiveDownloading ? "下载中…" : "下载全部图片"}
                     </button>
                     <button
                       aria-label="关闭长图预览"
@@ -1965,6 +2044,8 @@ function ListingCopySection({ title, value }: { title: string; value: string }) 
 function GeneratedDetailImageCard({
   image,
   index,
+  downloadBusy,
+  downloadDisabled,
   onOpenPreview,
   onSelect,
   onDownload,
@@ -1974,6 +2055,8 @@ function GeneratedDetailImageCard({
   onEditText,
   selected,
 }: {
+  downloadBusy: boolean;
+  downloadDisabled: boolean;
   image: GeneratedDetailImage;
   index: number;
   onDownload: () => void;
@@ -2034,7 +2117,13 @@ function GeneratedDetailImageCard({
           </div>
           <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             <IconActionButton icon={Maximize2} label={`修改尺寸 ${image.title}`} onClick={onResize} />
-            <IconActionButton icon={Download} label={`下载 ${image.title}`} onClick={onDownload} />
+            <IconActionButton
+              busy={downloadBusy}
+              disabled={downloadDisabled}
+              icon={Download}
+              label={`下载 ${image.title}`}
+              onClick={onDownload}
+            />
             <IconActionButton icon={Trash2} label={`删除 ${image.title}`} onClick={onDelete} />
           </div>
           <div className="absolute inset-x-0 bottom-0 h-[104px] bg-[linear-gradient(180deg,transparent,rgba(15,23,42,0.58)_24%,rgba(15,23,42,0.88))] px-2.5 pb-2.5 text-white">
@@ -2091,11 +2180,25 @@ function GeneratedDetailImageCard({
   );
 }
 
-function IconActionButton({ icon: Icon, label, onClick }: { icon: LucideIcon; label: string; onClick?: () => void }) {
+function IconActionButton({
+  busy = false,
+  disabled = false,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  busy?: boolean;
+  disabled?: boolean;
+  icon: LucideIcon;
+  label: string;
+  onClick?: () => void;
+}) {
   return (
     <button
+      aria-busy={busy}
       aria-label={label}
-      className="grid size-7 place-items-center rounded-[7px] bg-white/86 text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.14)] backdrop-blur-md transition-all hover:bg-white hover:text-slate-950"
+      className="grid size-7 place-items-center rounded-[7px] bg-white/86 text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.14)] backdrop-blur-md transition-all hover:bg-white hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
+      disabled={disabled}
       onClick={(event) => {
         event.stopPropagation();
         onClick?.();
@@ -2109,9 +2212,25 @@ function IconActionButton({ icon: Icon, label, onClick }: { icon: LucideIcon; la
 
 const generatedResultFilePrefix = "生成结果-2026-06-29-1552";
 const generatedImageSize = { height: 600, width: 970 };
+const maxLongImageCanvasDimension = 16_000;
+const maxLongImageCanvasPixels = 16_000_000;
+const maxIpcDownloadBytes = 32 * 1024 * 1024;
+const maxArchiveSourceBytes = maxIpcDownloadBytes;
+const archiveSizeLimitMessage = "图片总大小超过 32 MB，请分组或分批下载";
+const fileSizeLimitMessage = "图片文件超过 32 MB，当前版本无法下载";
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function downloadErrorMessage(error: unknown, fallback: string) {
+  if (
+    error instanceof Error &&
+    (error.message === archiveSizeLimitMessage || error.message === fileSizeLimitMessage)
+  ) {
+    return error.message;
+  }
+  return fallback;
 }
 
 function matchesTextEditIdentity(
@@ -2246,21 +2365,12 @@ const generatedImageSubtitles = [
   "传递品牌运动潮流理念，建立用户信任",
 ];
 
-const generatedCanvasGradients = [
-  ["#111827", "#334155", "#94a3b8", "#020617"],
-  ["#f8fafc", "#cbd5e1", "#64748b", "#0f172a"],
-  ["#0f172a", "#1d4ed8", "#111827", "#2563eb"],
-  ["#f8fafc", "#e2e8f0", "#94a3b8", "#334155"],
-  ["#f8fafc", "#d1d5db", "#111827", "#020617"],
-];
-
 function sanitizeFilename(name: string) {
   return name.replace(/[\\/:*?"<>|]/g, "-");
 }
 
 function createLongPreviewImageItems(images: GeneratedDetailImage[]): LongPreviewImageItem[] {
   const items: LongPreviewImageItem[] = [];
-  let fallbackIndex = 0;
 
   images.forEach((image) => {
     if (image.status !== "complete" || image.kind === "listing-copy" || image.kind === "source-image") {
@@ -2268,12 +2378,12 @@ function createLongPreviewImageItems(images: GeneratedDetailImage[]): LongPrevie
     }
 
     items.push({
-      fallbackIndex,
+      height: image.height,
       id: image.id,
       src: image.src,
       title: image.title,
+      width: image.width,
     });
-    fallbackIndex += 1;
   });
 
   return items;
@@ -2281,101 +2391,142 @@ function createLongPreviewImageItems(images: GeneratedDetailImage[]): LongPrevie
 
 async function blobToBytes(blob: Blob) {
   if (typeof blob.arrayBuffer !== "function") {
-    return new TextEncoder().encode("generated-image-fallback");
+    throw new Error("当前环境无法读取生成图片。");
   }
 
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-async function createGeneratedImageBlob(image: GeneratedDetailImage, index: number) {
-  const canvas = document.createElement("canvas");
-  canvas.width = generatedImageSize.width;
-  canvas.height = generatedImageSize.height;
-  const context = getCanvasContext(canvas);
-  if (!context) {
-    return createGeneratedImageSvgBlob([image]);
+async function readGeneratedImageFile(
+  image: GeneratedDetailImage,
+  maximumBytes?: number,
+  sizeLimitMessage = fileSizeLimitMessage,
+) {
+  if (!image.src) {
+    throw new Error("生成图片缺少可下载资源。");
   }
 
-  drawGeneratedImage(context, image, index, 0, 0, generatedImageSize.width, generatedImageSize.height, true);
-
-  return canvasToPngBlob(canvas, () => createGeneratedImageSvgBlob([image]));
+  const response = await fetch(image.src);
+  if (!response.ok) {
+    throw new Error(`读取生成资产失败：${response.status}`);
+  }
+  const contentLength = response.headers.get("content-length");
+  if (maximumBytes !== undefined && contentLength !== null && Number(contentLength) > maximumBytes) {
+    throw new Error(sizeLimitMessage);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length === 0) {
+    throw new Error("生成图片内容为空。");
+  }
+  if (maximumBytes !== undefined && bytes.length > maximumBytes) {
+    throw new Error(sizeLimitMessage);
+  }
+  const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+  return {
+    bytes,
+    extension: generatedImageFileExtension(image, mimeType),
+  };
 }
 
 async function createLongImageBlob(items: LongPreviewImageItem[]) {
-  const canvas = document.createElement("canvas");
-  const context = getCanvasContext(canvas);
-  if (!context) {
-    return createLongImageSvgBlob(items);
+  if (items.length === 0) {
+    throw new Error("没有可下载的生成图片。");
   }
 
-  const loadedItems = await Promise.all(
-    items.map(async (item) => {
-      if (!item.src) {
-        return { image: null, item };
-      }
-      try {
-        return {
-          image: await loadImageForCanvas(item.src),
-          item,
-        };
-      } catch {
-        return { image: null, item };
-      }
-    }),
-  );
-  const sections = loadedItems.map((loadedItem) => {
-    if (!loadedItem.image) {
-      return {
-        ...loadedItem,
-        height: generatedImageSize.height,
-      };
+  const assets: LongImageAsset[] = [];
+  let sourceBytes = 0;
+  for (const item of items) {
+    if (!item.src) {
+      throw new Error("生成图片缺少可下载资源。");
     }
-    const naturalWidth = loadedItem.image.naturalWidth || loadedItem.image.width || generatedImageSize.width;
-    const naturalHeight = loadedItem.image.naturalHeight || loadedItem.image.height || generatedImageSize.height;
-    return {
-      ...loadedItem,
-      height: Math.max(1, Math.round((generatedImageSize.width / naturalWidth) * naturalHeight)),
-    };
-  });
-  canvas.width = generatedImageSize.width;
-  canvas.height = Math.max(generatedImageSize.height, sections.reduce((sum, section) => sum + section.height, 0));
+    const response = await fetch(item.src);
+    if (!response.ok) {
+      throw new Error(`读取生成资产失败：${response.status}`);
+    }
+    const contentLength = response.headers.get("content-length");
+    if (
+      contentLength !== null &&
+      Number(contentLength) > maxIpcDownloadBytes - sourceBytes
+    ) {
+      throw new Error(fileSizeLimitMessage);
+    }
+    const blob = await response.blob();
+    if (blob.size === 0) {
+      throw new Error("生成图片内容为空。");
+    }
+    sourceBytes += blob.size;
+    if (sourceBytes > maxIpcDownloadBytes) {
+      throw new Error(fileSizeLimitMessage);
+    }
+
+    let width = item.width;
+    let height = item.height;
+    if (!width || !height || width <= 0 || height <= 0) {
+      const decoded = await decodeImageBlobForCanvas(blob);
+      try {
+        width = decoded.width;
+        height = decoded.height;
+      } finally {
+        decoded.release();
+      }
+    }
+    if (!width || !height || width <= 0 || height <= 0) {
+      throw new Error("无法读取生成图片尺寸。");
+    }
+    assets.push({ blob, height, item, width });
+  }
+
+  const baseHeight = assets.reduce(
+    (sum, asset) => sum + (generatedImageSize.width / asset.width) * asset.height,
+    0,
+  );
+  const scale = Math.min(
+    1,
+    maxLongImageCanvasDimension / generatedImageSize.width,
+    maxLongImageCanvasDimension / baseHeight,
+    Math.sqrt(maxLongImageCanvasPixels / (generatedImageSize.width * baseHeight)),
+  );
+  const canvasWidth = Math.floor(generatedImageSize.width * scale);
+  const actualScale = Math.min(
+    canvasWidth / generatedImageSize.width,
+    maxLongImageCanvasDimension / baseHeight,
+    Math.sqrt(maxLongImageCanvasPixels / (generatedImageSize.width * baseHeight)),
+  );
+  const canvasHeight = Math.floor(baseHeight * actualScale);
+  if (canvasWidth <= 0 || canvasHeight <= 0) {
+    throw new Error("生成图片数量过多，无法合成长图。");
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+  const context = getCanvasContext(canvas);
+  if (!context) {
+    throw new Error("当前环境无法创建长图画布。");
+  }
+  context.scale(actualScale, actualScale);
 
   let y = 0;
-  sections.forEach((section) => {
-    if (section.image) {
+  for (const asset of assets) {
+    const sectionHeight = (generatedImageSize.width / asset.width) * asset.height;
+    const decoded = await decodeImageBlobForCanvas(asset.blob);
+    try {
       context.fillStyle = "#ffffff";
-      context.fillRect(0, y, generatedImageSize.width, section.height);
-      context.drawImage(section.image, 0, y, generatedImageSize.width, section.height);
-    } else {
-      drawGeneratedImage(
-        context,
-        {
-          id: section.item.id,
-          status: "complete",
-          title: section.item.title,
-        },
-        section.item.fallbackIndex,
-        0,
-        y,
-        generatedImageSize.width,
-        section.height,
-        false,
-      );
+      context.fillRect(0, y, generatedImageSize.width, sectionHeight);
+      context.drawImage(decoded.source, 0, y, generatedImageSize.width, sectionHeight);
+      if (asset.item.badge) {
+        drawLongPreviewBadge(context, asset.item.badge, 24, y + 24);
+      }
+    } finally {
+      decoded.release();
     }
-    if (section.item.badge) {
-      drawLongPreviewBadge(context, section.item.badge, 24, y + 24);
-    }
-    y += section.height;
-  });
+    y += sectionHeight;
+  }
 
-  return canvasToPngBlob(canvas, () => createLongImageSvgBlob(items));
+  return canvasToPngBlob(canvas);
 }
 
 function getCanvasContext(canvas: HTMLCanvasElement) {
-  if (typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("jsdom")) {
-    return null;
-  }
-
   try {
     return canvas.getContext("2d");
   } catch {
@@ -2383,15 +2534,34 @@ function getCanvasContext(canvas: HTMLCanvasElement) {
   }
 }
 
-function loadImageForCanvas(src: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
+function decodeImageBlobForCanvas(blob: Blob): Promise<DecodedCanvasImage> {
+  if (typeof createImageBitmap === "function") {
+    return createImageBitmap(blob).then((image) => ({
+      height: image.height,
+      release: () => image.close(),
+      source: image,
+      width: image.width,
+    }));
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
     const image = new Image();
-    if (/^https?:\/\//i.test(src)) {
-      image.crossOrigin = "anonymous";
-    }
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("图片加载失败。"));
-    image.src = src;
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve({
+      height: image.naturalHeight || image.height,
+      release: () => {
+        image.src = "";
+        URL.revokeObjectURL(objectUrl);
+      },
+      source: image,
+      width: image.naturalWidth || image.width,
+    });
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("图片加载失败。"));
+    };
+    image.src = objectUrl;
   });
 }
 
@@ -2425,122 +2595,25 @@ function fillRoundedRect(context: CanvasRenderingContext2D, x: number, y: number
   context.fill();
 }
 
-function drawGeneratedImage(
-  context: CanvasRenderingContext2D,
-  image: GeneratedDetailImage,
-  index: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  includeCaption: boolean,
-) {
-  const colors = generatedCanvasGradients[index % generatedCanvasGradients.length];
-  const gradient = context.createLinearGradient(x, y, x + width, y + height);
-  colors.forEach((color, colorIndex) => gradient.addColorStop(colorIndex / (colors.length - 1), color));
-  context.fillStyle = gradient;
-  context.fillRect(x, y, width, height);
-
-  const shine = context.createRadialGradient(x + width * 0.48, y + height * 0.12, 10, x + width * 0.48, y + height * 0.12, width * 0.45);
-  shine.addColorStop(0, "rgba(255,255,255,0.66)");
-  shine.addColorStop(1, "rgba(255,255,255,0)");
-  context.fillStyle = shine;
-  context.fillRect(x, y, width, height);
-
-  if (includeCaption) {
-    const overlay = context.createLinearGradient(x, y + height * 0.55, x, y + height);
-    overlay.addColorStop(0, "rgba(15,23,42,0)");
-    overlay.addColorStop(0.35, "rgba(15,23,42,0.72)");
-    overlay.addColorStop(1, "rgba(15,23,42,0.92)");
-    context.fillStyle = overlay;
-    context.fillRect(x, y + height * 0.45, width, height * 0.55);
-
-    context.fillStyle = "#ffffff";
-    context.font = "700 54px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-    context.fillText(image.title, x + 56, y + height - 118);
-    context.font = "500 28px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
-    context.fillText(generatedImageSubtitles[index % generatedImageSubtitles.length], x + 56, y + height - 70);
-  }
-}
-
-function canvasToPngBlob(canvas: HTMLCanvasElement, fallback: () => Blob) {
-  return new Promise<Blob>((resolve) => {
+function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
     if (!canvas.toBlob) {
-      resolve(fallback());
+      reject(new Error("当前环境无法生成 PNG 长图。"));
       return;
     }
 
-    canvas.toBlob((blob) => resolve(blob ?? fallback()), "image/png");
+    try {
+      canvas.toBlob((blob) => {
+        if (!blob || blob.type.toLowerCase() !== "image/png") {
+          reject(new Error("当前环境无法生成 PNG 长图。"));
+          return;
+        }
+        resolve(blob);
+      }, "image/png");
+    } catch (error) {
+      reject(error);
+    }
   });
-}
-
-function createGeneratedImageSvgBlob(images: GeneratedDetailImage[], includeCaption = true) {
-  const width = generatedImageSize.width;
-  const height = generatedImageSize.height * Math.max(1, images.length);
-  const sections = images.map((image, index) => {
-    const y = index * generatedImageSize.height;
-    const colors = generatedCanvasGradients[index % generatedCanvasGradients.length];
-    return `
-      <defs>
-        <linearGradient id="g${index}" x1="0" y1="${y}" x2="${width}" y2="${y + generatedImageSize.height}">
-          ${colors.map((color, colorIndex) => `<stop offset="${(colorIndex / (colors.length - 1)) * 100}%" stop-color="${color}" />`).join("")}
-        </linearGradient>
-      </defs>
-      <rect x="0" y="${y}" width="${width}" height="${generatedImageSize.height}" fill="url(#g${index})" />
-      ${
-        includeCaption
-          ? `
-            <rect x="0" y="${y + generatedImageSize.height * 0.45}" width="${width}" height="${generatedImageSize.height * 0.55}" fill="rgba(15,23,42,0.76)" />
-            <text x="56" y="${y + generatedImageSize.height - 118}" fill="white" font-size="54" font-weight="700">${escapeXml(image.title)}</text>
-            <text x="56" y="${y + generatedImageSize.height - 70}" fill="white" font-size="28" font-weight="500">${escapeXml(generatedImageSubtitles[index % generatedImageSubtitles.length])}</text>
-          `
-          : ""
-      }
-    `;
-  });
-
-  return new Blob(
-    [`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${sections.join("")}</svg>`],
-    { type: "image/svg+xml" },
-  );
-}
-
-function createLongImageSvgBlob(items: LongPreviewImageItem[]) {
-  const width = generatedImageSize.width;
-  const sectionHeight = generatedImageSize.height;
-  const height = sectionHeight * Math.max(1, items.length);
-  const sections = items.map((item, index) => {
-    const y = index * sectionHeight;
-    const colors = generatedCanvasGradients[item.fallbackIndex % generatedCanvasGradients.length];
-    return `
-      <defs>
-        <linearGradient id="lg${index}" x1="0" y1="${y}" x2="${width}" y2="${y + sectionHeight}">
-          ${colors.map((color, colorIndex) => `<stop offset="${(colorIndex / (colors.length - 1)) * 100}%" stop-color="${color}" />`).join("")}
-        </linearGradient>
-      </defs>
-      <rect x="0" y="${y}" width="${width}" height="${sectionHeight}" fill="${item.src ? "#ffffff" : `url(#lg${index})`}" />
-      ${
-        item.src
-          ? `<image href="${escapeXml(item.src)}" x="0" y="${y}" width="${width}" height="${sectionHeight}" preserveAspectRatio="xMidYMid meet" />`
-          : ""
-      }
-      ${
-        item.badge
-          ? `<rect x="24" y="${y + 24}" width="82" height="34" rx="10" fill="rgba(15,23,42,0.85)" />
-            <text x="40" y="${y + 47}" fill="white" font-size="22" font-weight="700">${escapeXml(item.badge)}</text>`
-          : ""
-      }
-    `;
-  });
-
-  return new Blob(
-    [`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${sections.join("")}</svg>`],
-    { type: "image/svg+xml" },
-  );
-}
-
-function escapeXml(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function createZipBytes(files: Array<{ bytes: Uint8Array; name: string }>) {
@@ -2556,7 +2629,7 @@ function createZipBytes(files: Array<{ bytes: Uint8Array; name: string }>) {
     const localView = new DataView(localHeader.buffer);
     localView.setUint32(0, 0x04034b50, true);
     localView.setUint16(4, 20, true);
-    localView.setUint16(6, 0, true);
+    localView.setUint16(6, 0x0800, true);
     localView.setUint16(8, 0, true);
     localView.setUint16(10, 0, true);
     localView.setUint16(12, 0, true);
@@ -2572,7 +2645,7 @@ function createZipBytes(files: Array<{ bytes: Uint8Array; name: string }>) {
     centralView.setUint32(0, 0x02014b50, true);
     centralView.setUint16(4, 20, true);
     centralView.setUint16(6, 20, true);
-    centralView.setUint16(8, 0, true);
+    centralView.setUint16(8, 0x0800, true);
     centralView.setUint16(10, 0, true);
     centralView.setUint16(12, 0, true);
     centralView.setUint16(14, 0, true);

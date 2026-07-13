@@ -43,6 +43,9 @@ const statusLabelMap: Record<GenerationRecord["status"], string> = {
   partial: "部分失败",
 };
 
+const historyPageSize = 10;
+const historyLoadMoreThresholdPx = 96;
+
 export function GenerationHistoryPopover({
   activeRecordId,
   onClearRecords,
@@ -53,9 +56,78 @@ export function GenerationHistoryPopover({
   records,
 }: GenerationHistoryPopoverProps) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  const recordListRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
   const [activeFilter, setActiveFilter] = useState<HistoryFilter>("all");
+  const [visibleRecordCount, setVisibleRecordCount] = useState(historyPageSize);
   const filteredRecords =
     activeFilter === "all" ? records : records.filter((record) => record.workspace === activeFilter);
+  const visibleRecords = filteredRecords.slice(0, visibleRecordCount);
+  const hasMoreRecords = visibleRecords.length < filteredRecords.length;
+
+  useEffect(() => {
+    setVisibleRecordCount((currentCount) => {
+      if (filteredRecords.length === 0) {
+        return historyPageSize;
+      }
+      return Math.max(historyPageSize, Math.min(currentCount, filteredRecords.length));
+    });
+  }, [filteredRecords.length]);
+
+  useEffect(() => {
+    if (!open || !hasMoreRecords || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+
+    const recordList = recordListRef.current;
+    const loadMoreSentinel = loadMoreSentinelRef.current;
+    if (!recordList || !loadMoreSentinel) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) {
+          return;
+        }
+        setVisibleRecordCount((currentCount) =>
+          Math.min(currentCount + historyPageSize, filteredRecords.length),
+        );
+      },
+      {
+        root: recordList,
+        rootMargin: `0px 0px ${historyLoadMoreThresholdPx}px 0px`,
+      },
+    );
+    observer.observe(loadMoreSentinel);
+    return () => observer.disconnect();
+  }, [filteredRecords.length, hasMoreRecords, open, visibleRecordCount]);
+
+  useEffect(() => {
+    if (!open || !hasMoreRecords || typeof IntersectionObserver !== "undefined") {
+      return;
+    }
+
+    const recordList = recordListRef.current;
+    if (!recordList) {
+      return;
+    }
+
+    function handleScroll(event: Event) {
+      const currentTarget = event.currentTarget as HTMLDivElement;
+      const distanceToBottom = currentTarget.scrollHeight - currentTarget.scrollTop - currentTarget.clientHeight;
+      if (distanceToBottom > historyLoadMoreThresholdPx) {
+        return;
+      }
+
+      setVisibleRecordCount((currentCount) =>
+        Math.min(currentCount + historyPageSize, filteredRecords.length),
+      );
+    }
+
+    recordList.addEventListener("scroll", handleScroll, { passive: true });
+    return () => recordList.removeEventListener("scroll", handleScroll);
+  }, [filteredRecords.length, hasMoreRecords, open]);
 
   useEffect(() => {
     if (!open) {
@@ -136,7 +208,13 @@ export function GenerationHistoryPopover({
                 : "hover:bg-white/55 hover:text-slate-700",
             )}
             key={option.value}
-            onClick={() => setActiveFilter(option.value)}
+            onClick={() => {
+              setActiveFilter(option.value);
+              setVisibleRecordCount(historyPageSize);
+              if (recordListRef.current) {
+                recordListRef.current.scrollTop = 0;
+              }
+            }}
             type="button"
           >
             {option.label}
@@ -144,9 +222,15 @@ export function GenerationHistoryPopover({
         ))}
       </div>
 
-      <div className="mt-3 max-h-[56vh] space-y-2 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.48)_transparent]">
+      <div
+        aria-label="生成记录列表"
+        className="mt-3 max-h-[56vh] space-y-2 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.48)_transparent]"
+        ref={recordListRef}
+        role="region"
+        tabIndex={0}
+      >
         {filteredRecords.length > 0 ? (
-          filteredRecords.map((record) => (
+          visibleRecords.map((record) => (
             <GenerationHistoryRow
               active={record.id === activeRecordId}
               key={record.id}
@@ -158,6 +242,10 @@ export function GenerationHistoryPopover({
         ) : (
           <GenerationHistoryEmptyState activeFilter={activeFilter} />
         )}
+        {hasMoreRecords ? <div aria-hidden="true" className="!mt-0 h-px" ref={loadMoreSentinelRef} /> : null}
+        <div aria-live="polite" className="sr-only !mt-0">
+          已加载 {visibleRecords.length} / {filteredRecords.length} 条生成记录
+        </div>
       </div>
     </div>
   );
@@ -261,7 +349,9 @@ function HistoryThumbnailStack({ images }: { images: GeneratedDetailImage[] }) {
               <img
                 alt={image.title}
                 className="absolute inset-0 h-full w-full rounded-[9px] object-cover"
+                decoding="async"
                 draggable={false}
+                loading="lazy"
                 src={image.src}
               />
             ) : null}
