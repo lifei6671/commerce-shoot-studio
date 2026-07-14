@@ -1,4 +1,7 @@
-import { Images, Sparkles } from "lucide-react";
+const scenePreviewImageSrc = new URL(
+  "../../../../src-tauri/resources/assets/scenes.png",
+  import.meta.url,
+).href;
 
 export function ScenePreviewCanvas() {
   return (
@@ -17,28 +20,18 @@ export function ScenePreviewCanvas() {
           </p>
         </div>
 
-        <div className="desktop-raised relative grid grid-cols-[120px_160px_120px] gap-3 rounded-[24px] border border-white/90 bg-white/70 p-5 backdrop-blur-2xl">
-          <PreviewBlock label="参考图" tone="light" />
-          <PreviewBlock label="Prompt 方案" tone="blue" />
-          <PreviewBlock label="生成结果" tone="dark" />
+        <div className="desktop-raised relative aspect-[3/1] w-full max-w-[820px] overflow-hidden rounded-[24px] border border-white/90 bg-white/88 backdrop-blur-2xl">
+          <div className="pointer-events-none absolute inset-x-5 top-0 z-10 h-px bg-white" />
+          <img
+            alt="AI 场景图片生成流程示例"
+            className="h-full w-full select-none object-contain"
+            decoding="async"
+            draggable={false}
+            loading="eager"
+            src={scenePreviewImageSrc}
+          />
         </div>
       </section>
     </main>
-  );
-}
-
-function PreviewBlock({ label, tone }: { label: string; tone: "light" | "blue" | "dark" }) {
-  const iconClassName =
-    tone === "dark" ? "bg-slate-950 text-white" : tone === "blue" ? "bg-blue-50 text-app-blue" : "bg-white text-slate-500";
-
-  return (
-    <div className="grid h-32 place-items-center rounded-[18px] border border-white/80 bg-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.82)]">
-      <div className="flex flex-col items-center gap-2 text-[12px] font-medium text-slate-600">
-        <span className={`grid size-9 place-items-center rounded-full ${iconClassName}`}>
-          {tone === "blue" ? <Sparkles className="size-4" /> : <Images className="size-4" />}
-        </span>
-        {label}
-      </div>
-    </div>
   );
 }

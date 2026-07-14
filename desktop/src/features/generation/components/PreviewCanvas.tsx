@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { LucideIcon } from "lucide-react";
 import {
-  ArrowRight,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -31,6 +30,11 @@ import {
   type ResultImageTextChange,
 } from "../../../runtime";
 import type { ProductImageAsset } from "../lib/productImagePicker";
+
+const productPreviewImageSrc = new URL(
+  "../../../../src-tauri/resources/assets/product.png",
+  import.meta.url,
+).href;
 
 export type PreviewBoard = {
   id: string;
@@ -217,7 +221,7 @@ export function PreviewCanvas({
       <section className="relative flex h-full flex-col items-center justify-center px-10">
         <div className="mb-10 text-center">
           <div className="text-[34px] font-bold tracking-normal text-slate-950 drop-shadow-[0_1px_0_rgba(255,255,255,0.8)]">
-            A+ / 详情页
+            AI 商品
           </div>
           <p className="mt-3 text-[14px] text-app-muted drop-shadow-[0_1px_0_rgba(255,255,255,0.8)]">
             上传商品图，AI 即刻生成
@@ -226,21 +230,18 @@ export function PreviewCanvas({
           </p>
         </div>
 
-        <div className="desktop-raised relative flex items-center gap-5 rounded-[24px] border border-white/90 bg-white/70 p-5 backdrop-blur-2xl">
-          <div className="pointer-events-none absolute inset-x-5 top-0 h-px bg-white" />
-          <div className="pointer-events-none absolute inset-0 rounded-[24px] bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.7),transparent_52%)]" />
-          <div className="grid gap-2">
-            {boards.slice(0, 2).map((board) => (
-              <PreviewTile key={board.id} board={board} size="small" />
-            ))}
-          </div>
-          <ArrowRight className="relative size-7 text-slate-300 drop-shadow-[0_1px_0_rgba(255,255,255,0.9)]" />
-          <div className="grid grid-cols-[80px_150px_150px] gap-2">
-            {boards.map((board, index) => (
-              <PreviewTile key={board.id} board={board} size={index === 0 ? "tall" : "wide"} />
-            ))}
-          </div>
+        <div className="desktop-raised relative aspect-[2/1] w-full max-w-[820px] overflow-hidden rounded-[24px] border border-white/90 bg-white/88 backdrop-blur-2xl">
+          <div className="pointer-events-none absolute inset-x-5 top-0 z-10 h-px bg-white" />
+          <img
+            alt="AI 商品详情视觉示例"
+            className="h-full w-full select-none object-contain"
+            decoding="async"
+            draggable={false}
+            loading="eager"
+            src={productPreviewImageSrc}
+          />
         </div>
+        <p className="sr-only">商品生成流程：{boards.map((board) => board.title).join("、")}</p>
       </section>
       <button
         className="absolute bottom-5 right-5 grid size-9 place-items-center rounded-full border border-white/80 bg-white/80 text-[13px] font-semibold text-app-text shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_6px_16px_rgba(15,23,42,0.1)] backdrop-blur-xl transition-all duration-200 hover:bg-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_10px_22px_rgba(15,23,42,0.12)] active:scale-95"
@@ -2716,52 +2717,4 @@ function createGeneratedResultGroups(images: GeneratedDetailImage[]) {
   }
 
   return Array.from(groupMap.values());
-}
-
-function PreviewTile({ board, size }: { board: PreviewBoard; size: "small" | "tall" | "wide" }) {
-  const Icon = board.icon;
-
-  return (
-    <div
-      className={cn(
-        "relative overflow-hidden rounded-[14px] border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),0_7px_16px_rgba(15,23,42,0.08)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.72),0_12px_24px_rgba(15,23,42,0.11)]",
-        size === "small" && "h-[82px] w-[82px]",
-        size === "tall" && "row-span-2 h-[172px] w-[80px]",
-        size === "wide" && "h-[82px] w-[150px]",
-        board.tone === "light" && "bg-[linear-gradient(145deg,#f8fafc,#e8eef6)]",
-        board.tone === "blue" && "bg-[linear-gradient(135deg,#cfe1ff,#2563eb)]",
-        board.tone === "dark" && "bg-[linear-gradient(135deg,#0f172a,#1d4ed8)]",
-      )}
-    >
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_14%,rgba(255,255,255,0.72),transparent_38%)]" />
-      <div className="absolute inset-x-3 top-2 h-px bg-white/60" />
-      <div className="relative flex h-full flex-col justify-between p-3">
-        <Icon className={cn("size-6", board.tone === "light" ? "text-app-blue" : "text-white")} />
-        {size !== "small" ? (
-          <div className="space-y-1" aria-hidden="true">
-            <span
-              className={cn(
-                "block h-1.5 rounded-full",
-                board.tone === "light" ? "bg-slate-300/70" : "bg-white/30",
-              )}
-            />
-            <span
-              className={cn(
-                "block h-1.5 w-2/3 rounded-full",
-                board.tone === "light" ? "bg-slate-200/90" : "bg-white/25",
-              )}
-            />
-          </div>
-        ) : null}
-        <span
-          className={cn(
-            "max-w-full truncate rounded-full px-2 py-1 text-[10px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.28)]",
-            board.tone === "light" ? "bg-white/80 text-slate-700" : "bg-white/20 text-white",
-          )}
-        >
-          {board.title}
-        </span>
-      </div>
-    </div>
-  );
 }
