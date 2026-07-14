@@ -105,6 +105,7 @@
 - 真实生成需要自行配置应用支持的模型服务和 API Key。
 - AI 结果仍需人工检查商品事实、文字准确性、素材授权和平台合规性。
 - 项目面向 macOS 与 Windows 构建，但当前安装包未签名，四种目标架构尚未全部完成真机验收。
+- 版本标签的四平台构建全部成功后，会在 [GitHub Releases](https://github.com/lifei6671/commerce-shoot-studio/releases) 提供对应的 DMG 与 NSIS 安装包。
 - 不同模型支持的能力与图片尺寸不同，应用会按当前模型能力展示可用选项。
 
 ## 开始体验商拍工坊

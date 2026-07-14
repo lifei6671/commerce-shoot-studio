@@ -4,8 +4,9 @@
 平台工具链和 Rust target，默认执行一次 `npm ci --prefix desktop`，然后调用仓库内的
 Tauri CLI。产物保留在 Tauri 的默认 `target` 目录，不会复制到仓库根目录。
 
-> 当前脚本生成的产物均未签名。Apple codesign、公证与 stapling、Windows
-> Authenticode、自动更新和发布上传不在第一版范围内。
+> 当前脚本和 CI 生成的产物均未签名。Apple codesign、公证与 stapling、Windows
+> Authenticode 和自动更新不在第一版范围内；推送版本标签时，CI 会将未签名安装包
+> 上传到对应的 GitHub Release，并在发布说明中明确提示这一风险。
 
 ## 支持矩阵
 
@@ -124,17 +125,30 @@ Action 均锁定到明确的提交 SHA：
 
 - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`（v7.0.0）
 - `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`（v6.4.0）
+- `actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`（v8.0.1）
 - `tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f`（v1）
 
 每个 Job 使用 `desktop/package-lock.json` 执行 `npm ci`，checkout 不持久化凭据，
 Cargo 强制使用 `--locked`，再由 Tauri Action 以 `projectPath: desktop` 调用项目内
 CLI。Windows hosted runner 当前只生成 NSIS，不进入 WiX/VBScript 依赖的 MSI 链路。
-所有构建均传递 `--no-sign`，workflow 权限仅为 `contents: read`，不读取签名 secret，
-也不创建或更新 GitHub Release。
+所有构建均传递 `--no-sign`，不读取签名 secret。四个构建 Job 保持
+`contents: read`；只有依赖整个矩阵成功的发布 Job 拥有 `contents: write` 和
+`actions: read`，用于下载本次运行的 Artifacts 并创建 Release。
 
-成功运行后，在对应 workflow run 的 **Artifacts** 区域下载产物。artifact 名称使用
+成功运行后，可在对应 workflow run 的 **Artifacts** 区域下载产物。artifact 名称使用
 `commerce-shoot-studio-unsigned-[platform]-[arch]-[bundle]` 模式，四个矩阵项及不同
-bundle 不会互相覆盖。Actions Artifact 是有保留期限的 CI 产物，不等同于正式 Release。
+bundle 不会互相覆盖。
+
+手动触发只生成 Actions Artifacts，不创建 Release。推送与
+`desktop/src-tauri/tauri.conf.json` 版本一致的 `v*` 标签时，四个矩阵项必须全部成功，
+随后发布 Job 才会汇总并校验 2 个 DMG 和 2 个 NSIS `setup.exe`。发布流程先创建 Draft，
+确认 macOS 与 Windows 均各有 ARM64、x64 产物，上传并精确复核四个安装包后再公开；
+重跑时可以更新未公开的 Draft，但 Draft 存在额外资产时会停止发布，也不会覆盖已公开
+Release 的资产。`.app` 目录、实验性 MSI 和其它中间文件不会上传到 Release。
+
+例如，应用版本为 `0.1.0` 时应推送 `v0.1.0`。标签不匹配或安装包数量不完整时，发布
+Job 会明确失败且不公开不完整 Release。预发布版本（如 `0.2.0-beta.1`）会创建
+Prerelease。Actions Artifact 仍保留用于逐 Job 调试，并受 GitHub 的保留期限约束。
 
 2026-07-14 的[首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
 已经验证两个 macOS Job 成功；两个 Windows Job 的应用与 NSIS 构建也成功，但同一 Job
@@ -160,7 +174,8 @@ desktop/src-tauri/target/<target-triple>/release/bundle/
 脚本入口和 CI 编译成功都不等于四种架构已经完成发布验收。首次在线运行只证明 macOS
 产物已上传，以及两个 Windows 架构都能走完 NSIS 生成阶段；调整后的 Windows artifact、
 产物架构、内置模特资源、安装/启动/卸载，以及包含空格或中文的本地仓库路径仍需补验。
-MSI、签名、公证和正式发布渠道还需单独设计与验证。
+MSI、签名和公证仍需单独设计与验证。GitHub Release 自动发布链路也需要通过下一次
+真实 `v*` 标签构建核验权限、四个资产名称和安装行为。
 
 本轮新增 Release 模型边界也仍待产物验收：打包应用的 provider profiles、模型配置、
 模型配置 UI 和任务执行链都不能暴露或执行 Mock Local；首次读取或解析含当前 mock

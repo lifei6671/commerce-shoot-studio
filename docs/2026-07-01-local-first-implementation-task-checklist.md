@@ -1165,7 +1165,7 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
 `nsis`、`msi`、`all`。默认构建当前宿主架构并执行一次 `npm ci`，可显式跳过依赖
 安装。`all` 表示依次构建两个独立 target，不是 universal 或多架构合并安装包。
 第一版始终生成未签名产物，不包含 Apple 公证、Windows Authenticode、自动更新或
-发布上传。本记录只确认脚本接口已提供，不勾选现有 Windows 兼容大项。
+由本地脚本执行的发布上传。本记录只确认脚本接口已提供，不勾选现有 Windows 兼容大项。
 
 同日复审补强 Windows 本地脚本：`-Arch all` 会从同一个 Visual Studio 安装为 x64 与
 ARM64 target 分别调用 `Launch-VsDevShell.ps1`，并校验 `VSCMD_ARG_TGT_ARCH`，避免复用
@@ -1177,7 +1177,7 @@ ARM64 target 分别调用 `Launch-VsDevShell.ps1`，并校验 `VSCMD_ARG_TGT_ARC
 macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵项；使用
 锁定提交 SHA 的 checkout、setup-node、Tauri Action。checkout v7 与 setup-node v6
 使用 Node 24 Action runtime，项目构建 Node.js 仍固定为 `22.22.0`，Rust 固定为
-`1.96.0`；workflow 以 `contents: read`、`--no-sign` 只上传名称隔离的 Actions Artifacts。
+`1.96.0`；四个构建 Job 以 `contents: read`、`--no-sign` 上传名称隔离的 Actions Artifacts。
 
 2026-07-14 [首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
 中，两个 macOS Job 成功；Windows x64 与 ARM64 均成功编译应用并生成 NSIS，随后统一
@@ -1185,8 +1185,16 @@ macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵�
 capability 查询结果和 `cscript.exe` 命令存在，不能证明 WiX ICE 所需的 VBScript 引擎
 可用。为避免已成功的 NSIS 被 MSI 连带阻断，稳定 CI 已将两个 Windows Job 收口为
 NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后的 Windows artifact
-仍待下一次在线运行核验；`windows-11-arm` runner 仍处于 Public Preview。`v*` tag
-触发不会创建或更新 GitHub Release，因此 workflow 配置不等于发布完成。
+仍待下一次在线运行核验；`windows-11-arm` runner 仍处于 Public Preview。
+
+2026-07-14 已增加统一发布 Job：仅 `v*` 标签触发，且标签必须与 Tauri 应用版本一致；
+四个矩阵项全部成功后，发布 Job 以独立的 `actions: read`、`contents: write` 权限下载
+Artifacts，严格校验 2 个 DMG 和 2 个 NSIS 安装包，再通过 Draft → 上传 → 复核 → 公开
+的顺序创建对应 GitHub Release；四个安装包必须覆盖 macOS 与 Windows 各自的 ARM64、
+x64 架构，远端资产集合也必须精确匹配，避免 Draft 遗留资产被意外公开。手动触发仍只
+保留 Actions Artifacts；重跑可以覆盖未公开 Draft 的同名资产，但已公开 Release 只
+核验、不覆盖。该链路已有本地 fake `gh` 回归证据，真实权限和 Release 资产仍待下一次
+在线标签构建验收。
 
 - [ ] macOS ARM64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
 - [ ] macOS x64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
@@ -1194,6 +1202,7 @@ NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后
 - [ ] Windows ARM64 的 NSIS 在对应宿主完成 artifact、安装、资源和启动验收。
 - [ ] Windows MSI 的 VBScript/WiX ICE 运行环境修复后，分别完成 x64、ARM64 构建与安装/卸载验收。
 - [ ] GitHub Actions 四个 Job（Windows 为 NSIS-only）在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
+- [ ] 推送与应用版本一致的 `v*` 标签后，GitHub Release 仅在四个 Job 全部成功时公开，并包含 2 个 DMG 与 2 个 NSIS 安装包。
 - [ ] 从 GitHub Actions 下载的 Release 构建在新旧 workspace 中均不显示或执行 Mock Local，旧 workspace 清理后历史 invocation 审计仍可追溯。
 - [ ] 正式发布前完成 macOS 签名/公证与 Windows Authenticode 策略确认和验证。
 
