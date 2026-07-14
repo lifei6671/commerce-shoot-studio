@@ -141,6 +141,7 @@ impl ModelGatewayService {
         workspace_directory: &Path,
         request: ModelGatewayRequest,
     ) -> Result<ModelGatewayResult, ModelConfigError> {
+        ensure_deterministic_gateway_enabled(cfg!(debug_assertions))?;
         self.invoke_with_adapter(
             workspace_directory,
             request,
@@ -629,8 +630,31 @@ fn no_available_model_message() -> String {
     "没有可用模型".to_string()
 }
 
+fn ensure_deterministic_gateway_enabled(enabled: bool) -> Result<(), ModelConfigError> {
+    if enabled {
+        return Ok(());
+    }
+    Err(ModelConfigError::Validation(no_available_model_message()))
+}
+
 impl From<SecretError> for ModelConfigError {
     fn from(source: SecretError) -> Self {
         Self::Validation(source.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_deterministic_gateway_enabled;
+
+    #[test]
+    fn release_policy_rejects_deterministic_gateway() {
+        assert!(ensure_deterministic_gateway_enabled(true).is_ok());
+        assert_eq!(
+            ensure_deterministic_gateway_enabled(false)
+                .expect_err("release policy should reject deterministic gateway")
+                .to_string(),
+            "没有可用模型"
+        );
     }
 }

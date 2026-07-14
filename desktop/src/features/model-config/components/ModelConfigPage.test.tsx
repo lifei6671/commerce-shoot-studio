@@ -101,6 +101,27 @@ function deepseekConfig(
   };
 }
 
+function mockConfig(capabilityId: LocalModelConfigView["capabilityId"]): LocalModelConfigView {
+  return {
+    id: `cfg_mock_${capabilityId}`,
+    baseUrl: "mock://local",
+    capabilityId,
+    connectionStatus: "available",
+    displayName: "Mock 默认配置",
+    enabled: true,
+    executionMode: "auto",
+    isDefault: true,
+    model: "mock-listing-copy-v1",
+    protocol: "openai-compatible",
+    providerLabel: "Mock Local",
+    providerProfileId: "mock-local",
+    secretStatus: {
+      configured: true,
+      storage: "sqlite-local",
+    },
+  };
+}
+
 function providerSwitchModelConfigPort(): ModelConfigPort {
   return {
     deleteConfig: vi.fn(),
@@ -1196,6 +1217,107 @@ describe("ModelConfigPage", () => {
     await waitFor(() => expect(screen.getByDisplayValue("deepseek-v4-pro")).toBeInTheDocument());
     expect(screen.queryByDisplayValue("local-edit")).not.toBeInTheDocument();
     expect(modelConfigPort.saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("ignores stale mock configs when runtime profiles only expose real providers", async () => {
+    const modelConfigPort: ModelConfigPort = {
+      deleteConfig: vi.fn(),
+      getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
+      listConfigs: vi.fn(() => Promise.resolve([mockConfig("listing-copy")])),
+      listProviderProfiles: vi.fn(() => Promise.resolve([openaiProfile])),
+      saveConfig: vi.fn(),
+      setDefaultConfig: vi.fn(),
+      testConfig: vi.fn(),
+    };
+    const secretPort: SecretPort = {
+      deleteSecret: vi.fn(),
+      getSecretStatus: vi.fn(),
+      revealSecret: vi.fn(),
+      saveSecret: vi.fn(),
+      testProviderConnection: vi.fn(),
+    };
+
+    render(
+      <ToastProvider>
+        <ModelConfigPage modelConfigPort={modelConfigPort} secretPort={secretPort} />
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByRole("button", { name: "文生文 Provider OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "文生图 Provider OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "图生图 Provider OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "图生文 Provider OpenAI" })).toBeInTheDocument();
+    expect(screen.queryByText("Mock Local")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("mock-listing-copy-v1")).not.toBeInTheDocument();
+  });
+
+  it("shows the unavailable state when runtime profiles are empty", async () => {
+    const modelConfigPort: ModelConfigPort = {
+      deleteConfig: vi.fn(),
+      getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
+      listConfigs: vi.fn(() => Promise.resolve([])),
+      listProviderProfiles: vi.fn(() => Promise.resolve([])),
+      saveConfig: vi.fn(),
+      setDefaultConfig: vi.fn(),
+      testConfig: vi.fn(),
+    };
+    const secretPort: SecretPort = {
+      deleteSecret: vi.fn(),
+      getSecretStatus: vi.fn(),
+      revealSecret: vi.fn(),
+      saveSecret: vi.fn(),
+      testProviderConnection: vi.fn(),
+    };
+
+    render(
+      <ToastProvider>
+        <ModelConfigPage modelConfigPort={modelConfigPort} secretPort={secretPort} />
+      </ToastProvider>,
+    );
+
+    expect(
+      await screen.findByText("模型配置加载失败，请检查 Runtime 状态后重试。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Mock Local")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "恢复默认" })).toBeDisabled();
+  });
+
+  it("restores real-provider drafts when runtime profiles do not expose mock local", async () => {
+    const user = userEvent.setup();
+    const modelConfigPort: ModelConfigPort = {
+      deleteConfig: vi.fn(),
+      getConfig: vi.fn(),
+      listImageSizeOptions: vi.fn(),
+      listConfigs: vi.fn(() => Promise.resolve([])),
+      listProviderProfiles: vi.fn(() => Promise.resolve([openaiProfile, deepseekProfile])),
+      saveConfig: vi.fn(),
+      setDefaultConfig: vi.fn(),
+      testConfig: vi.fn(),
+    };
+    const secretPort: SecretPort = {
+      deleteSecret: vi.fn(),
+      getSecretStatus: vi.fn(),
+      revealSecret: vi.fn(),
+      saveSecret: vi.fn(),
+      testProviderConnection: vi.fn(),
+    };
+
+    render(
+      <ToastProvider>
+        <ModelConfigPage modelConfigPort={modelConfigPort} secretPort={secretPort} />
+      </ToastProvider>,
+    );
+
+    await screen.findByRole("button", { name: "文生文 Provider OpenAI" });
+    await user.click(screen.getByRole("button", { name: "恢复默认" }));
+
+    expect(screen.getByRole("button", { name: "文生文 Provider OpenAI" })).toBeInTheDocument();
+    expect(screen.queryByText("Mock Local")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("mock-listing-copy-v1")).not.toBeInTheDocument();
+    expect(modelConfigPort.saveConfig).not.toHaveBeenCalled();
+    expect(screen.getByText("已恢复为默认配置，保存后生效")).toBeInTheDocument();
   });
 
   it("restores editable cards to mock local defaults without saving immediately", async () => {

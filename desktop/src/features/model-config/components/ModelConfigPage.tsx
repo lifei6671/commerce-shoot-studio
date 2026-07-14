@@ -424,11 +424,16 @@ export function ModelConfigPage({
     }
   }
 
-  function restoreMockDefaults() {
+  function restoreRuntimeDefaults() {
     invalidateAllSecretRequests();
-    setConfigs(createMockDefaultConfigs(providerProfiles));
+    setConfigs(createRuntimeDefaultConfigs(providerProfiles));
     setVisibleApiKeyIds(new Set());
-    showToast({ message: "已恢复为 Mock 默认配置，保存后生效", variant: "warning" });
+    showToast({
+      message: providerProfiles["mock-local"]
+        ? "已恢复为 Mock 默认配置，保存后生效"
+        : "已恢复为默认配置，保存后生效",
+      variant: "warning",
+    });
   }
 
   async function testConfigConnection(id: ModelCategoryId) {
@@ -539,7 +544,7 @@ export function ModelConfigPage({
           <Button
             className="justify-center"
             disabled={savingConfigs || testingConfigIds.size > 0 || configs.length === 0}
-            onClick={restoreMockDefaults}
+            onClick={restoreRuntimeDefaults}
             size="md"
             variant="soft"
           >
@@ -889,11 +894,7 @@ function getProviderOptionsForCategory(categoryId: ModelCategoryId, profiles: Re
     });
   }
 
-  if (runtimeOptions.length > 0) {
-    return runtimeOptions;
-  }
-
-  return providerOptions.filter((option) => modelCatalog[option.value][catalogKey].length > 0);
+  return runtimeOptions;
 }
 
 function getProviderBaseUrl(
@@ -962,11 +963,19 @@ function mergeRuntimeConfigs(
   const profilesById = indexProfiles(profiles);
   const runtimeConfigsByCapability = new Map(
     runtimeConfigs
-      .filter((config) => config.isDefault)
+      .filter(
+        (config) =>
+          config.isDefault &&
+          isKnownProvider(config.providerProfileId) &&
+          Boolean(profilesById[config.providerProfileId]),
+      )
       .map((config) => [config.capabilityId, config]),
   );
+  const defaultConfigsByCategory = new Map(
+    createRuntimeDefaultConfigs(profilesById).map((config) => [config.id, config]),
+  );
 
-  return descriptors.map((descriptor) => {
+  return descriptors.flatMap((descriptor) => {
     const capabilityIds = categoryCapabilityIds[descriptor.id];
     const supportedDefaultRuntimeConfigs = capabilityIds
       .map((capabilityId) => runtimeConfigsByCapability.get(capabilityId))
@@ -991,16 +1000,8 @@ function mergeRuntimeConfigs(
     );
 
     if (!defaultRuntimeConfig || !isKnownProvider(defaultRuntimeConfig.providerProfileId)) {
-      return {
-        ...descriptor,
-        apiKey: "",
-        apiKeyConfigured: false,
-        baseUrl: "",
-        configIds,
-        connectionStatus: "unavailable",
-        model: "",
-        provider: "mock-local",
-      };
+      const defaultConfig = defaultConfigsByCategory.get(descriptor.id);
+      return defaultConfig ? [{ ...defaultConfig, configIds }] : [];
     }
 
     const selectedCapabilityIds = supportedCategoryCapabilityIds(
@@ -1014,7 +1015,7 @@ function mergeRuntimeConfigs(
       runtimeConfigsByCapability,
     );
 
-    return {
+    return [{
       ...descriptor,
       apiKey: "",
       apiKeyConfigured: defaultRuntimeConfig.secretStatus.configured,
@@ -1026,26 +1027,41 @@ function mergeRuntimeConfigs(
       endpointPath: defaultRuntimeConfig.endpointPath ?? profilesById[defaultRuntimeConfig.providerProfileId]?.defaultEndpointPath,
       model: defaultRuntimeConfig.model,
       provider: defaultRuntimeConfig.providerProfileId,
-    };
+    }];
   });
 }
 
-function createMockDefaultConfigs(profiles: Record<string, ProviderProfileView>): ModelConfig[] {
-  return modelCategoryDescriptors.map((descriptor) => {
-    const catalogKey = categoryCatalogKeys[descriptor.id];
+function createRuntimeDefaultConfigs(profiles: Record<string, ProviderProfileView>): ModelConfig[] {
+  const runtimeProfiles = Object.values(profiles);
+  const preferredProfiles = profiles["mock-local"]
+    ? [profiles["mock-local"], ...runtimeProfiles.filter((profile) => profile.id !== "mock-local")]
+    : runtimeProfiles;
 
-    return {
+  return modelCategoryDescriptors.flatMap((descriptor) => {
+    const catalogKey = categoryCatalogKeys[descriptor.id];
+    const profile = preferredProfiles.find(
+      (candidate) =>
+        isKnownProvider(candidate.id) &&
+        candidate.supportedCategories.includes(descriptor.id) &&
+        modelCatalog[candidate.id][catalogKey].length > 0,
+    );
+
+    if (!profile || !isKnownProvider(profile.id)) {
+      return [];
+    }
+
+    return [{
       ...descriptor,
       apiKey: "",
-      apiKeyConfigured: true,
+      apiKeyConfigured: profile.id === "mock-local",
       apiKeyDirty: false,
       apiKeyRevealed: false,
-      baseUrl: getProviderBaseUrl("mock-local", profiles, descriptor.id),
+      baseUrl: getProviderBaseUrl(profile.id, profiles, descriptor.id),
       connectionStatus: "untested",
-      endpointPath: profiles["mock-local"]?.defaultEndpointPath,
-      model: modelCatalog["mock-local"][catalogKey][0] ?? "",
-      provider: "mock-local",
-    };
+      endpointPath: profile.defaultEndpointPath,
+      model: modelCatalog[profile.id][catalogKey][0] ?? "",
+      provider: profile.id,
+    }];
   });
 }
 

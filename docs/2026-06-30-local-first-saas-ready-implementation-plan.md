@@ -551,7 +551,7 @@ export interface PromptPlanPort {
 MVP 适用范围：
 
 - 商品详情图采用两阶段流程：先通过 `PromptPlanPort` 创建、编辑并确认方案，再通过 `GenerationPort.createTask` 创建资产型任务。
-- 服饰菜单采用 `GenerationPort` 三阶段链路：用户选择 AI 生成模特时，先创建 `clothing-base-model-generation` 文生图任务，基于性别、年龄、国家/族群、身材与外貌补充生成单人全身的基准模特图；年龄支持婴儿、儿童、青少年、青年、中年、老年，且 Prompt 必须按照所选年龄阶段生成，不得将未成年人错误改写为成年人。随后创建 `clothing-scene-planning` 图生文规划任务，输入服装原图、基准模特全身图、用户选择/自定义场景，输出可展示的模特特征、场景与动作结构；场景规划 Prompt 不携带出图比例，也不要求模型回传运行时已经确认的参考图索引。该规划 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_scene_planning.toml` 配置。用户已选择场景时，Prompt 按编号要求模型逐字复制并保持顺序；运行时以用户场景标题为事实源，可接受唯一的标题扩写匹配并整体重排场景对象，无法唯一匹配时拒绝结果，避免标题与场景描述、动作错配。规划结果展示到第二步场景选择后默认全部未选中，用户手动选择的场景动作、画幅和角度修改保存在 App 层，生成完成或切换菜单后仍保留。用户确认动作后再创建 `clothing-tryon-generation` 资产型任务，第三步正式出图 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_tryon_generation.toml` 配置，并拼接第一步用户上传的服装图、用户选择的模特图、第二步用户选择的场景、图片比例、拍摄画幅、拍摄角度、拍摄位置和动作要求，明确约束模型严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。基准模特、服饰规划和服饰试穿执行路径要求真实 provider，默认 `mock-local` 只作为测试替身，不能向 UI 展示为真实生成结果。模型配置页的 `图生文` 类别同时覆盖商品卖点提取和服饰场景规划；旧 workspace 只有商品卖点图生文真实配置时，runtime 可按同类别复用该可用配置执行服饰规划。`clothing-base-model-generation` 则必须解析其独立的 `text-to-image` capability，不能复用 `clothing-tryon-generation` 的图生图配置。
+- 服饰菜单采用 `GenerationPort` 三阶段链路：用户选择 AI 生成模特时，先创建 `clothing-base-model-generation` 文生图任务，基于性别、年龄、国家/族群、身材与外貌补充生成单人全身的基准模特图；年龄支持婴儿、儿童、青少年、青年、中年、老年，且 Prompt 必须按照所选年龄阶段生成，不得将未成年人错误改写为成年人。随后创建 `clothing-scene-planning` 图生文规划任务，输入服装原图、基准模特全身图、用户选择/自定义场景，输出可展示的模特特征、场景与动作结构；场景规划 Prompt 不携带出图比例，也不要求模型回传运行时已经确认的参考图索引。该规划 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_scene_planning.toml` 配置。用户已选择场景时，Prompt 按编号要求模型逐字复制并保持顺序；运行时以用户场景标题为事实源，可接受唯一的标题扩写匹配并整体重排场景对象，无法唯一匹配时拒绝结果，避免标题与场景描述、动作错配。规划结果展示到第二步场景选择后默认全部未选中，用户手动选择的场景动作、画幅和角度修改保存在 App 层，生成完成或切换菜单后仍保留。用户确认动作后再创建 `clothing-tryon-generation` 资产型任务，第三步正式出图 prompt 由 `desktop/src-tauri/src/services/prompts/clothing_tryon_generation.toml` 配置，并拼接第一步用户上传的服装图、用户选择的模特图、第二步用户选择的场景、图片比例、拍摄画幅、拍摄角度、拍摄位置和动作要求，明确约束模型严格参考模特与服装原图，不得伪造其他人物，不得修改服装花纹、文字、Logo 等关键细节。基准模特、服饰规划和服饰试穿执行路径要求真实 provider，`mock-local` 只作为 Debug / 自动化测试替身，不能向 UI 展示为真实生成结果，Release 执行链也不得选择。模型配置页的 `图生文` 类别同时覆盖商品卖点提取和服饰场景规划；旧 workspace 只有商品卖点图生文真实配置时，runtime 可按同类别复用该可用配置执行服饰规划。`clothing-base-model-generation` 则必须解析其独立的 `text-to-image` capability，不能复用 `clothing-tryon-generation` 的图生图配置。
 - 基准模特体型 UI 固定为纤细、苗条、精瘦、匀称、健美、运动型、肌肉型、壮硕、结实、丰满、微胖、大码，默认匀称且不提供肥胖；`generation_tasks.input_json` 只冻结短标签，runtime 在渲染 Prompt 时查表注入完整描述。大码复用丰满描述；历史 `标准`、`肌肉` 分别兼容为匀称、肌肉型，未知值原样保留。
 - 基准模特性别 UI 使用男、女短标签；runtime 在渲染 Prompt 时注入对应的自然发型默认描述。用户填写的外貌细节与内置发型描述冲突时，以用户输入为主，不能强行保留冲突的默认发型。
 - 基准模特输出必须严格为 2:3 纵向比例（宽:高=2:3），Prompt 的 system、user 和 `rolelessPrompt` 均明确禁止其它比例。
@@ -777,7 +777,8 @@ local mode 下限制来自本地 ProviderProfile；remote mode 下限制来自 S
 `image-edit`、`image-text-recognition`、`clothing-scene-planning`、`clothing-base-model-generation`、
 `clothing-tryon-generation`、`scene-prompt-planning` 和
 `scene-image-generation` 是 real-provider-only 能力：`mock-local` 默认配置只用于
-模型配置和自动化测试，不得让 `CapabilityPort.available` 返回 `true`。场景规划和
+Debug 构建和自动化测试，不得让 `CapabilityPort.available` 返回 `true`；Release 不得
+返回 mock provider/config，也不得把 mock 解析进执行链。场景规划和
 场景生图都最多接收 3 张参考图，并声明当前 UI 支持的 `3:4`、`1:1`、`9:16`
 比例；前者类别为 `image-to-text`，后者为 `image-to-image`。基准模特能力固定
 `maxInputAssets = 0`、`supportedAspectRatios = ["2:3"]`、`maxImageCount = 1`；
@@ -813,7 +814,7 @@ export type LocalModelConfigView = {
 - `protocol` 表示入参协议。第三方网关第一版只要求支持 OpenAI-compatible。
 - `executionMode` 表示出参模式。`auto` 由 adapter 根据响应自动识别。
 - `endpointPath` 用于兼容网关把 chat、image、task 查询拆成不同路径的情况。
-- `baseUrl` 是单机模式下内置 provider profile 的可持久化配置；Mock Local 固定为 `mock://local`，其他 provider 的 React 页面允许编辑，但 Rust runtime 只接受无凭据、无查询参数的 HTTPS 地址。保存后用于连接探测和真实调用，且 Base URL 变化必须使连接状态回到 `untested`。
+- `baseUrl` 是单机模式下内置 provider profile 的可持久化配置；Debug / 自动化测试中的 Mock Local 固定为 `mock://local`，其他 provider 的 React 页面允许编辑，但 Rust runtime 只接受无凭据、无查询参数的 HTTPS 地址。保存后用于连接探测和真实调用，且 Base URL 变化必须使连接状态回到 `untested`。
 - OpenAI 当前暴露已实现的文生文、图生文、纯文生图和图生图能力；
   `scene-prompt-planning` 走 Responses 并按 `input_image` + `input_text` 发送参考图，
   `scene-image-generation`、`clothing-tryon-generation` 与 `image-edit` 统一使用
@@ -823,6 +824,7 @@ export type LocalModelConfigView = {
   验证，尚未验证真实 OpenAI 外网调用。
 - `ModelConfigPort.listImageSizeOptions("image-edit")` 根据当前默认配置的 provider + model 返回受支持尺寸。OpenAI `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini` 返回方形、竖向、横向三组精确像素值；`doubao-seedream-5-0-pro-260628` 返回官方 1K/2K 八种宽高比（包含 21:9）的精确像素值；Seedream 5.0 / 5.0 Lite 的 2K `3:4`、`9:16`、`16:9` 分别映射为 `1728x2304`、`1440x2560`、`2560x1440`，4.5 / 4.0 保留各自登记的旧 2K/4K 表。未知模型返回空列表，不在前端猜测。
 - 单机版 UI 可以展示和编辑本地模型配置；远端 SaaS 模式下 UI 不展示这些字段。
+- 构建模式是 Mock 可见性和执行权限的事实源：Debug 构建与自动化测试可以列出、配置并执行 deterministic `mock-local`；Release 的 provider profile、配置列表、模型配置 UI 与任务执行链均不得暴露、接受或执行 mock。Release 首次读取或解析旧 workspace 的模型配置时清理当前 `mock-local` 配置，但不删除或改写既有 `model_invocations`，历史 invocation 继续保留为审计证据。
 - 业务 UI 不应根据 `provider` 写分支逻辑。
 - API Key 永远不进入 `LocalModelConfigView`，只允许通过 `SecretPort` 写入或删除。
 
@@ -1587,7 +1589,8 @@ ai_assist_invocations
 - `model_secrets.secret_value` MVP 按本地明文密钥处理，依赖 workspace 文件权限和用户设备安全；后续可以在不改变 Public Port 的前提下升级为加密存储或系统凭据库。
 - 不存系统 Prompt 或最终 raw prompt。
 - `model_configs` 只服务本地单机 runtime，SaaS 模式不下发到客户端。
-- `model_configs.provider_profile_id` 只能引用 Rust runtime 内置 profile；除 Mock Local 固定使用 `mock://local` 外，持久化 `base_url` 必须是无凭据、无查询参数的 HTTPS 地址，且不能改变协议或 capability 映射。React 页面不开放 `endpoint_path` 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 `endpoint_path` 或 profile 默认值。
+- `model_configs.provider_profile_id` 只能引用当前构建允许的 Rust runtime 内置 profile；Debug / 自动化测试中的 Mock Local 固定使用 `mock://local`，Release 只允许真实 provider。其他持久化 `base_url` 必须是无凭据、无查询参数的 HTTPS 地址，且不能改变协议或 capability 映射。React 页面不开放 `endpoint_path` 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 `endpoint_path` 或 profile 默认值。
+- Release 清理旧 workspace 当前 `mock-local` 配置时，不级联删除 `model_invocations`，也不重写其中的 provider、model、状态或脱敏摘要；配置可用性与历史调用审计是两类不同生命周期的数据。
 - `model_configs.secret_ref` 只能引用同 workspace、同 provider profile 的 `model_secrets` 记录。
 - `prompt_plans` / `prompt_plan_items` 保存当前可编辑方案。
 - `generation_tasks.prompt_plan_snapshot_json` 保存任务执行时的冻结快照。
@@ -2290,7 +2293,7 @@ integration tests 成功。付费真实 Provider 外网 smoke test 与真实桌�
 1. SQLite 依赖选择：MVP 建议 `rusqlite + migration 工具`；如选择 `sqlx` 需确认编译和迁移成本。
 2. Secret 存储方式：MVP 已确认使用 SQLite 本地密钥表，不使用 macOS Keychain / Windows Credential Manager；正式发布前可再评估是否升级。
 3. 第一条真实模型通道：建议先接稳定官方 Provider，再接 OpenAI-compatible 网关。
-4. 单机版已确认允许用户为内置 provider profile 的模型配置自定义并持久化 `baseUrl`；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 `endpointPath` 编辑。OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别沿用已保存的 `endpointPath` 或 profile 默认值；不开放任意 custom provider/profile。
+4. 单机版已确认允许用户为 Release 内置真实 provider profile 的模型配置自定义并持久化 `baseUrl`；Debug / 自动化测试中的 Mock Local 固定为 `mock://local`，Release 不暴露或执行该 profile。其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 `endpointPath` 编辑。OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别沿用已保存的 `endpointPath` 或 profile 默认值；不开放任意 custom provider/profile。
 5. 异步网关第一版是否只支持轮询，还是同时预留 webhook/callback。MVP 建议单机只做 polling。
 6. SaaS 版服务端模型能力列表是否按租户、套餐、工作区或用户粒度返回。
 7. SaaS 版是否允许客户端知道模型能力名称之外的任何模型元数据。

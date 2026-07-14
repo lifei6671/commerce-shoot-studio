@@ -118,11 +118,12 @@ WiX ICE 所需的 VBScript 引擎可用；在补齐真实脚本引擎探针并�
 | Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | `nsis` |
 | Windows ARM64 | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nsis` |
 
-workflow 固定使用 Node.js `22.22.0` 和 Rust `1.96.0`，并将第三方 Action 锁定到明确
-的提交 SHA：
+workflow 的 checkout v7 与 setup-node v6 使用 Node 24 Action runtime；这不改变项目
+工具链，setup-node 仍为项目安装 Node.js `22.22.0`，Rust 固定为 `1.96.0`。第三方
+Action 均锁定到明确的提交 SHA：
 
-- `actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5`（v4）
-- `actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020`（v4）
+- `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`（v7.0.0）
+- `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`（v6.4.0）
 - `tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f`（v1）
 
 每个 Job 使用 `desktop/package-lock.json` 执行 `npm ci`，checkout 不持久化凭据，
@@ -160,3 +161,8 @@ desktop/src-tauri/target/<target-triple>/release/bundle/
 产物已上传，以及两个 Windows 架构都能走完 NSIS 生成阶段；调整后的 Windows artifact、
 产物架构、内置模特资源、安装/启动/卸载，以及包含空格或中文的本地仓库路径仍需补验。
 MSI、签名、公证和正式发布渠道还需单独设计与验证。
+
+本轮新增 Release 模型边界也仍待产物验收：打包应用的 provider profiles、模型配置、
+模型配置 UI 和任务执行链都不能暴露或执行 Mock Local；首次读取或解析含当前 mock
+配置的旧 workspace 时应清理这些配置，但必须保留既有 `model_invocations` 历史审计记录。
+Debug 构建和自动化测试继续保留 deterministic mock，不属于 Release 产物验收失败。

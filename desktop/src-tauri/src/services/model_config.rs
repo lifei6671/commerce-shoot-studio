@@ -276,6 +276,8 @@ pub const PROVIDER_PROFILES: &[ProviderProfile] = &[
     },
 ];
 
+const MOCK_PROVIDER_PROFILE_ID: &str = "mock-local";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProfileView {
@@ -413,7 +415,9 @@ impl ModelConfigService {
     }
 
     pub fn list_provider_profiles(&self) -> Result<Vec<ProviderProfileView>, ModelConfigError> {
-        Ok(PROVIDER_PROFILES.iter().map(profile_to_view).collect())
+        Ok(provider_profiles_for_build(mock_provider_enabled())
+            .map(profile_to_view)
+            .collect())
     }
 
     pub fn list_configs(
@@ -421,7 +425,7 @@ impl ModelConfigService {
         workspace_directory: &Path,
     ) -> Result<Vec<LocalModelConfigView>, ModelConfigError> {
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         list_configs(&database)
     }
 
@@ -431,7 +435,7 @@ impl ModelConfigService {
         config_id: &str,
     ) -> Result<LocalModelConfigView, ModelConfigError> {
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         find_config_by_id(&database, config_id)?
             .ok_or_else(|| ModelConfigError::NotFound(config_id.to_string()))
     }
@@ -460,7 +464,7 @@ impl ModelConfigService {
     ) -> Result<LocalModelConfigView, ModelConfigError> {
         validate_config_input(&input)?;
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         let profile = provider_profile(&input.provider_profile_id).ok_or_else(|| {
             ModelConfigError::Validation("provider_profile_id 不在内置 allowlist 中。".to_string())
         })?;
@@ -528,7 +532,7 @@ impl ModelConfigService {
         input: SetDefaultModelConfigInput,
     ) -> Result<LocalModelConfigView, ModelConfigError> {
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         let config = find_config_by_id(&database, &input.config_id)?
             .ok_or_else(|| ModelConfigError::NotFound(input.config_id.clone()))?;
         if config.capability_id != input.capability_id {
@@ -552,7 +556,7 @@ impl ModelConfigService {
         config_id: &str,
     ) -> Result<(), ModelConfigError> {
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         let deleted = database.connection().execute(
             "DELETE FROM model_configs WHERE id = ?1",
             params![config_id],
@@ -580,7 +584,7 @@ impl ModelConfigService {
         tester: &T,
     ) -> Result<ProviderTestResult, ModelConfigError> {
         let database = open_database(workspace_directory)?;
-        ensure_mock_default_configs(&database)?;
+        reconcile_default_configs(&database)?;
         let config = find_config_by_id(&database, config_id)?
             .ok_or_else(|| ModelConfigError::NotFound(config_id.to_string()))?;
         let profile = provider_profile(&config.provider_profile_id).ok_or_else(|| {
@@ -767,7 +771,7 @@ pub fn default_resolved_config_for_capability(
     capability_id: &str,
 ) -> Result<ResolvedModelConfig, ModelConfigError> {
     let database = open_database(workspace_directory)?;
-    ensure_mock_default_configs(&database)?;
+    reconcile_default_configs(&database)?;
     let default_config = database
         .connection()
         .query_row(
@@ -858,7 +862,51 @@ fn open_database(workspace_directory: &Path) -> Result<WorkspaceDatabase, ModelC
     WorkspaceDatabase::open(workspace_directory).map_err(ModelConfigError::from)
 }
 
-fn ensure_mock_default_configs(database: &WorkspaceDatabase) -> Result<(), ModelConfigError> {
+const fn mock_provider_enabled() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn provider_profiles_for_build(
+    include_mock: bool,
+) -> impl Iterator<Item = &'static ProviderProfile> {
+    PROVIDER_PROFILES
+        .iter()
+        .filter(move |profile| include_mock || profile.id != MOCK_PROVIDER_PROFILE_ID)
+}
+
+fn provider_profile_for_build(
+    provider_profile_id: &str,
+    include_mock: bool,
+) -> Option<&'static ProviderProfile> {
+    PROVIDER_PROFILES
+        .iter()
+        .filter(|profile| include_mock || profile.id != MOCK_PROVIDER_PROFILE_ID)
+        .find(|profile| profile.id == provider_profile_id)
+}
+
+fn reconcile_default_configs(database: &WorkspaceDatabase) -> Result<(), ModelConfigError> {
+    reconcile_default_configs_for_build(database, mock_provider_enabled())
+}
+
+fn reconcile_default_configs_for_build(
+    database: &WorkspaceDatabase,
+    include_mock: bool,
+) -> Result<(), ModelConfigError> {
+    if !include_mock {
+        let has_mock_config = database.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_configs WHERE provider_profile_id = ?1)",
+            params![MOCK_PROVIDER_PROFILE_ID],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if has_mock_config {
+            database.connection().execute(
+                "DELETE FROM model_configs WHERE provider_profile_id = ?1",
+                params![MOCK_PROVIDER_PROFILE_ID],
+            )?;
+        }
+        return Ok(());
+    }
+
     for capability in CAPABILITIES {
         database.connection().execute(
             "
@@ -866,11 +914,12 @@ fn ensure_mock_default_configs(database: &WorkspaceDatabase) -> Result<(), Model
                 id, capability_id, provider_profile_id, display_name, protocol,
                 execution_mode, model, enabled, is_default
             )
-            VALUES (?1, ?2, 'mock-local', ?3, 'openai-compatible', 'sync', ?4, 1, 1)
+            VALUES (?1, ?2, ?3, ?4, 'openai-compatible', 'sync', ?5, 1, 1)
             ",
             params![
                 format!("cfg_mock_{}", capability.id.replace('-', "_")),
                 capability.id,
+                MOCK_PROVIDER_PROFILE_ID,
                 format!("{} Mock", capability.display_name),
                 capability.mock_model,
             ],
@@ -1231,9 +1280,7 @@ fn ensure_profile_supports_capability(
 }
 
 pub fn provider_profile(provider_profile_id: &str) -> Option<&'static ProviderProfile> {
-    PROVIDER_PROFILES
-        .iter()
-        .find(|profile| profile.id == provider_profile_id)
+    provider_profile_for_build(provider_profile_id, mock_provider_enabled())
 }
 
 fn capability_definition(capability_id: &str) -> Option<&'static ModelCapabilityDefinition> {
@@ -1681,11 +1728,13 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::infrastructure::database::WorkspaceDatabase;
     use crate::infrastructure::filesystem::WorkspaceFileSystem;
     use crate::services::workspace::{InitializeWorkspaceInput, WorkspaceService};
 
     use super::{
-        capability_requires_real_provider, image_size_options, validate_image_size,
+        capability_requires_real_provider, image_size_options, provider_profile_for_build,
+        provider_profiles_for_build, reconcile_default_configs_for_build, validate_image_size,
         ModelConfigService, SaveLocalModelConfigInput, SetDefaultModelConfigInput,
     };
 
@@ -1700,6 +1749,102 @@ mod tests {
     #[test]
     fn image_edit_requires_a_real_provider() {
         assert!(capability_requires_real_provider("image-edit"));
+    }
+
+    #[test]
+    fn release_policy_excludes_mock_provider_profile() {
+        assert!(provider_profiles_for_build(true).any(|profile| profile.id == "mock-local"));
+        assert!(!provider_profiles_for_build(false).any(|profile| profile.id == "mock-local"));
+        assert!(provider_profile_for_build("mock-local", false).is_none());
+        assert!(provider_profile_for_build("openai", false).is_some());
+    }
+
+    #[test]
+    fn release_policy_removes_current_mock_configs_but_keeps_audit_history() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let workspace_directory =
+            std::env::temp_dir().join(format!("commerce-shoot-studio-release-models-{nanos}"));
+        WorkspaceService::new(WorkspaceFileSystem::new())
+            .initialize_workspace(InitializeWorkspaceInput {
+                workspace_directory: workspace_directory.clone(),
+            })
+            .expect("workspace should initialize");
+
+        {
+            let database = WorkspaceDatabase::open(&workspace_directory)
+                .expect("workspace database should open");
+            reconcile_default_configs_for_build(&database, true)
+                .expect("debug policy should seed mock configs");
+            database
+                .connection()
+                .execute(
+                    "
+                    INSERT INTO model_configs (
+                        id, capability_id, provider_profile_id, display_name, protocol,
+                        execution_mode, model, base_url, enabled, is_default
+                    )
+                    VALUES (
+                        'cfg_openai_listing', 'listing-copy', 'openai', 'OpenAI Listing',
+                        'openai', 'sync', 'gpt-5-mini', 'https://api.openai.com', 1, 0
+                    )
+                    ",
+                    [],
+                )
+                .expect("real config should insert");
+            database
+                .connection()
+                .execute(
+                    "
+                    INSERT INTO model_invocations (
+                        id, capability_id, provider_profile_id, model, status,
+                        request_summary_json, output_summary_json, completed_at
+                    )
+                    VALUES (
+                        'inv_mock_history', 'listing-copy', 'mock-local', 'mock-listing-copy-v1',
+                        'succeeded', '{}', '{}', datetime('now')
+                    )
+                    ",
+                    [],
+                )
+                .expect("mock audit history should insert");
+
+            reconcile_default_configs_for_build(&database, false)
+                .expect("release policy should reconcile configs");
+
+            let mock_config_count: i64 = database
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM model_configs WHERE provider_profile_id = 'mock-local'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("mock config count should query");
+            let real_config_count: i64 = database
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM model_configs WHERE id = 'cfg_openai_listing'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("real config count should query");
+            let mock_invocation_count: i64 = database
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM model_invocations WHERE id = 'inv_mock_history'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("mock invocation count should query");
+
+            assert_eq!(mock_config_count, 0);
+            assert_eq!(real_config_count, 1);
+            assert_eq!(mock_invocation_count, 1);
+        }
+
+        fs::remove_dir_all(workspace_directory).expect("temporary workspace should clean up");
     }
 
     #[test]

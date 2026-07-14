@@ -555,19 +555,20 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
 ### M5-T01 provider profiles allowlist
 
 - 依赖：D0-03。
-- 当前状态：已完成后端基础能力。已内置 `mock-local`、`openai`、`deepseek`、`volcengine` provider profile allowlist，`provider_profile_id` 由 Rust allowlist 校验；用户可为内置 profile 的模型配置修改并持久化 Base URL，Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。协议和 capability 矩阵仍由 Rust 内置映射控制。OpenAI 已开放 `scene-prompt-planning` 图生文与 `scene-image-generation` 图生图；前者走 Responses，后者与 `clothing-tryon-generation` / `image-edit` 一样走 `/v1/images/edits` multipart。火山规划走 Responses，场景生图走 `/images/generations`。
+- 当前状态：已完成后端基础能力。Rust 内部已定义 `mock-local`、`openai`、`deepseek`、`volcengine` provider profiles，`provider_profile_id` 由 allowlist 校验；`mock-local` 只允许 Debug / 自动化测试返回，Release 只开放三个真实 provider，该构建模式边界已有 Debug 策略单测与 Release 集成测试证据。用户可为当前构建允许的 profile 修改并持久化 Base URL；Debug / 自动化测试中的 Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址。React 页面不开放 endpoint path 编辑；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。协议和 capability 矩阵仍由 Rust 内置映射控制。OpenAI 已开放 `scene-prompt-planning` 图生文与 `scene-image-generation` 图生图；前者走 Responses，后者与 `clothing-tryon-generation` / `image-edit` 一样走 `/v1/images/edits` multipart。火山规划走 Responses，场景生图走 `/images/generations`。
 - 主要文件：
   - `desktop/src-tauri/src/domain/model_config*`
   - `desktop/src-tauri/src/services/model_config*`
 - 执行动作：
   - 定义内置 provider profile allowlist。
+  - 按构建模式收口 provider profile：Debug / 自动化测试保留 `mock-local`，Release 只返回真实 provider。
   - 允许内置 profile 持久化其模型配置的 Base URL；Mock Local 固定为 `mock://local`，其他 provider 只接受无凭据、无查询参数的 HTTPS 地址；不开放任意 custom provider/profile。
   - `provider_profile_id` 只能引用内置 profile。
 - 验收标准：
   - 手动修改 SQLite 不能绕过 allowlist。
   - `custom-disabled` 不可被调用。
   - `make cargo-check` 通过。
-- 退出条件：模型配置只能引用内置 provider profile；Mock Local 固定使用 `mock://local`，其他 Base URL 只能是无凭据、无查询参数的 HTTPS 地址；React 页面不开放 endpoint path 编辑，Base URL 也不能改变协议或 capability 映射。
+- 退出条件：模型配置只能引用当前构建允许的内置 provider profile；Debug / 自动化测试中的 Mock Local 固定使用 `mock://local`，Release provider profile 列表不暴露 mock；其他 Base URL 只能是无凭据、无查询参数的 HTTPS 地址；React 页面不开放 endpoint path 编辑，Base URL 也不能改变协议或 capability 映射。
 
 ### M5-T01A Provider 连接探测抽象
 
@@ -578,7 +579,7 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
   - `desktop/src-tauri/src/services/model_config.rs`
   - `desktop/src-tauri/tests/model_config_service.rs`
 - 执行动作：
-  - mock-local 不触发网络请求，直接视为可用。
+  - Debug / 自动化测试中的 mock-local 不触发网络请求，直接视为可用；Release 不得进入该探测分支。
   - OpenAI / DeepSeek / 火山引擎使用已持久化的 Base URL；OpenAI / 火山引擎的特殊图像 endpoint 由 Rust 强制映射，其他类别使用已保存的 endpoint path 或 profile 默认值。
   - 火山引擎图片探测按精确 Seedream 模型能力构造请求：`doubao-seedream-5-0-pro-260628` 不发送组图与流式字段并使用 `1K`，Seedream 5.0 Lite、4.5、4.0 使用 `sequential_image_generation: "disabled"`、`stream: false` 的单图非流式探测且不发送组图 options；未登记模型使用不含这些可选字段的最小请求；单张参考图发送字符串。火山文生图/图生图探测总超时为 300 秒，图生文探测保持 60 秒。
   - 连接测试只读取 HTTP status，不保存 provider raw response。
@@ -596,7 +597,7 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
 ### M5-T02 model_configs migration 和 ModelConfigPort
 
 - 依赖：M5-T01。
-- 当前状态：已完成后端和 runtime 基础能力。已建立 `model_configs` baseline schema、Rust `ModelConfigService` / Tauri command / 前端 `localModelConfigPort`，并为每个能力自动准备一个默认 mock 配置；provider 可用性由真实连接测试或 mock-local 规则持久化。
+- 当前状态：已完成后端和 runtime 基础能力。已建立 `model_configs` baseline schema、Rust `ModelConfigService` / Tauri command / 前端 `localModelConfigPort`；Debug / 自动化测试为每个能力准备默认 mock 配置，Release 不返回或执行这些配置。provider 可用性由真实连接测试或 Debug / 测试专用 mock-local 规则持久化；Release 集成测试已覆盖旧 workspace 当前 Mock 配置清理、真实配置保留与历史 invocation 审计保留。
 - 主要文件：
   - `desktop/src-tauri/migrations/*model_config*`
   - `desktop/src-tauri/src/services/model_config*`
@@ -604,6 +605,8 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
 - 执行动作：
   - 建立 `model_configs` 表。
   - `model_configs` 只保存模型配置和 `secret_ref`，不直接保存 API Key。
+  - Debug / 自动化测试继续自动生成默认 mock 配置；Release 不返回 mock configs，也不允许 mock 成为默认配置或进入执行链。
+  - Release 首次读取或解析旧 workspace 的模型配置时清理当前 `mock-local` 配置；不得级联删除或改写既有 `model_invocations`，历史 invocation 审计必须保留。
   - 持久化 provider 连接状态和连接指纹。
   - 修改 API Key、模型、Base URL、执行模式或 endpointPath 后，连接状态自动回到 `untested`。
   - 实现 `listConfigs`、`getConfig`、`saveConfig`、`setDefaultConfig`、`deleteConfig`、`listProviderProfiles`、`testConfig`。
@@ -615,7 +618,7 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
   - 默认配置唯一性生效。
   - provider 连接测试结果可持久读取，配置、Base URL 或密钥变化后自动失效。
   - `make test`、`make cargo-check` 通过。
-- 退出条件：模型配置页可接真实本地配置。
+- 退出条件：模型配置页可接真实本地配置；Debug / 自动化测试仍可使用 deterministic mock，Release 对 provider/config/UI/执行链均不暴露 mock，且旧 workspace 清理不会破坏 invocation 审计。
 
 ### M5-T03 SecretPort
 
@@ -645,7 +648,7 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
 ### M5-T04 CapabilityPort
 
 - 依赖：M5-T02、M5-T03。
-- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在无外网时用于模型配置和自动化测试，但 `image-edit`、`image-text-recognition`、`clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation`、`scene-prompt-planning`、`scene-image-generation` 共七项能力均为 real-provider-only。场景规划和场景生图最多接收 3 张参考图，类别分别为 `image-to-text`、`image-to-image`，并声明 3:4、1:1、9:16 比例。
+- 当前状态：已完成后端和 runtime 基础能力。`CapabilityPort` 会从本地默认配置、secret 状态、provider 连接状态和内置 provider profile 实时计算能力；默认 mock 配置可在 Debug / 自动化测试中无外网使用，但 `image-edit`、`image-text-recognition`、`clothing-scene-planning`、`clothing-base-model-generation`、`clothing-tryon-generation`、`scene-prompt-planning`、`scene-image-generation` 共七项能力均为 real-provider-only。场景规划和场景生图最多接收 3 张参考图，类别分别为 `image-to-text`、`image-to-image`，并声明 3:4、1:1、9:16 比例。Release 隐藏与拒绝 mock、旧 workspace 配置清理和 invocation 审计保留已有前后端定向测试证据，打包应用手工验收仍待完成。
 - 主要文件：
   - `desktop/src-tauri/src/services/capability*`
   - `desktop/src/runtime/local/capability*`
@@ -676,9 +679,10 @@ DOM 与图片解码，不改变 App 启动期完整历史恢复、重试归并�
   - 页面不出现 demo key。
   - 保存后重启仍有配置状态。
   - secret 明文不回显。
-  - mock-local 不要求 API Key，OpenAI / DeepSeek / 火山引擎需要密钥并重新测试后才算可用。
+  - Debug / 自动化测试中的 mock-local 不要求 API Key，OpenAI / DeepSeek / 火山引擎需要密钥并重新测试后才算可用。
+  - 仅当 runtime 返回 Debug / 自动化测试专用 `mock-local` profile 时，页面才显示 Mock provider、mock 模型和“恢复 Mock 默认配置”入口；Release UI 不得从静态 fallback 重新构造 mock。
   - `make test`、`make frontend-build` 通过。
-- 退出条件：模型配置页不再是 mock 数据。
+- 退出条件：模型配置页不再是 mock 数据；Release 页面不存在 `Mock Local`、`mock-*`、`mock://local` 或恢复 Mock 的入口，Debug / 自动化测试交互保持可用。
 
 ## 11. M6：ModelGateway Contract
 
@@ -1135,6 +1139,9 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
 - [x] 保存配置或 secret 后 `CapabilityPort` 立即反映。
 - [x] provider 可用性持久化，修改 API Key、模型、Base URL 或 endpointPath 后自动失效。
 - [x] 切换离开并返回已配置 Provider 后恢复 API Key 遮罩状态，不自动 reveal 明文，且过期状态/明文响应不会覆盖当前 Provider。
+- [x] Release provider profiles、configs、模型配置 UI 和任务执行链均不暴露、接受或执行 `mock-local`（Rust Release 集成测试 + 前端 runtime profiles 回归测试）。
+- [x] Debug 构建和自动化测试仍可列出、配置并执行 deterministic mock，且不触发真实网络请求。
+- [x] Release 首次读取或解析含当前 mock 配置的旧 workspace 后完成清理，同时保留全部历史 `model_invocations` 审计记录。
 
 ### Windows 兼容
 
@@ -1168,8 +1175,9 @@ ARM64 target 分别调用 `Launch-VsDevShell.ps1`，并校验 `VSCMD_ARG_TGT_ARC
 
 同日已配置 `.github/workflows/package-desktop.yml`：支持手动和 `v*` tag 触发，固定
 macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵项；使用
-锁定提交 SHA 的 checkout、setup-node、Tauri Action，固定 Node.js `22.22.0`、Rust
-`1.96.0`，并以 `contents: read`、`--no-sign` 只上传名称隔离的 Actions Artifacts。
+锁定提交 SHA 的 checkout、setup-node、Tauri Action。checkout v7 与 setup-node v6
+使用 Node 24 Action runtime，项目构建 Node.js 仍固定为 `22.22.0`，Rust 固定为
+`1.96.0`；workflow 以 `contents: read`、`--no-sign` 只上传名称隔离的 Actions Artifacts。
 
 2026-07-14 [首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
 中，两个 macOS Job 成功；Windows x64 与 ARM64 均成功编译应用并生成 NSIS，随后统一
@@ -1186,6 +1194,7 @@ NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后
 - [ ] Windows ARM64 的 NSIS 在对应宿主完成 artifact、安装、资源和启动验收。
 - [ ] Windows MSI 的 VBScript/WiX ICE 运行环境修复后，分别完成 x64、ARM64 构建与安装/卸载验收。
 - [ ] GitHub Actions 四个 Job（Windows 为 NSIS-only）在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
+- [ ] 从 GitHub Actions 下载的 Release 构建在新旧 workspace 中均不显示或执行 Mock Local，旧 workspace 清理后历史 invocation 审计仍可追溯。
 - [ ] 正式发布前完成 macOS 签名/公证与 Windows Authenticode 策略确认和验证。
 
 ## 14. 推进建议
