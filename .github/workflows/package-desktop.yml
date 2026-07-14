@@ -33,11 +33,11 @@ jobs:
           - name: Windows x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            bundles: nsis,msi
+            bundles: nsis
           - name: Windows ARM64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            bundles: nsis,msi
+            bundles: nsis
 
     steps:
       - name: 检出代码
@@ -61,20 +61,6 @@ jobs:
 
       - name: 固定当前 Rust 工具链
         run: rustup default 1.96.0
-
-      - name: 检查 Windows MSI 的 VBScript 前置能力
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $capability = Get-WindowsCapability -Online |
-            Where-Object Name -Like "VBSCRIPT*" |
-            Select-Object -First 1
-          if ($capability -and $capability.State -ne "Installed") {
-            throw "当前 GitHub runner 未启用 VBScript capability，无法构建 MSI：$($capability.Name)"
-          }
-          if (-not (Get-Command "cscript.exe" -ErrorAction SilentlyContinue)) {
-            throw "当前 GitHub runner 缺少 cscript.exe，无法构建 MSI。"
-          }
 
       - name: 安装前端依赖
         run: npm ci --prefix desktop

@@ -36,8 +36,8 @@
    - 支持手动触发和 `v*` tag 触发。
    - 使用四个独立矩阵项构建 macOS ARM64、macOS x64、Windows x64、Windows ARM64，避免单个 Job 混合宿主或架构。
    - 使用 GitHub 当前对应架构 runner；Windows ARM64 runner 处于预览状态，必须在文档中显式标记。
-   - 使用 `tauri-apps/tauri-action` 调用 `desktop` 内的项目 CLI，生成 `app,dmg` 或 `nsis,msi`。
-   - 固定 Node、Rust 和所有 Action 的版本；Windows Job 在构建 MSI 前检查 VBScript 能力。
+   - 使用 `tauri-apps/tauri-action` 调用 `desktop` 内的项目 CLI；macOS 生成 `app,dmg`，Windows x64 与 ARM64 的稳定 CI 产物生成 `nsis`。
+   - 固定 Node、Rust 和所有 Action 的版本；MSI 保留为本地脚本实验能力，不阻断稳定 CI 的 NSIS 产物。
    - 第一版只上传未签名的 Actions Artifacts，不创建或更新 GitHub Release，不读取签名 secret。
    - 权限收口为只读仓库内容，不允许 workflow 写 release、tag 或仓库内容。
 
@@ -54,7 +54,7 @@
 - [x] workflow 具备四个明确的 OS/架构/target/bundle 映射，并为每个矩阵项安装对应 Rust target。
 - [x] workflow 使用 `projectPath: desktop`、仓库锁文件执行 `npm ci`，并将安装产物上传为带 `unsigned` 且名称不冲突的 Actions Artifacts。
 - [x] workflow 只使用 `contents: read`，保持 `--no-sign`，不包含 release、tag 写入或签名 secret。
-- [x] workflow YAML 可解析，相关文档准确记录手动/tag 触发、runner 预览状态和在线运行尚未验证。
+- [x] workflow YAML 可解析，相关文档准确记录手动/tag 触发、runner 预览状态、首次在线运行证据和 Windows MSI 剩余风险。
 
 ## Out of Scope
 
@@ -63,3 +63,4 @@
 - Apple codesign/notarization/stapling、Windows Authenticode、证书管理和自动更新。
 - 自动创建 GitHub Release、上传发布渠道、版本自动递增。
 - 修改 Tauri bundle 配置、依赖、锁文件、权限或业务代码。
+- 修复 GitHub hosted runner 的 WiX 3.14.1/VBScript ICE 环境，或将 Windows MSI 恢复为稳定 CI 产物。

@@ -1170,15 +1170,22 @@ ARM64 target 分别调用 `Launch-VsDevShell.ps1`，并校验 `VSCMD_ARG_TGT_ARC
 macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵项；使用
 锁定提交 SHA 的 checkout、setup-node、Tauri Action，固定 Node.js `22.22.0`、Rust
 `1.96.0`，并以 `contents: read`、`--no-sign` 只上传名称隔离的 Actions Artifacts。
-Windows Job 在 MSI 构建前检查 VBScript capability 与 `cscript.exe`。本地 YAML 解析和
-结构复审已通过，但 workflow 尚未推送运行；`windows-11-arm` runner 仍处于 Public
-Preview。`v*` tag 触发不会创建或更新 GitHub Release，因此 workflow 配置不等于发布完成。
+
+2026-07-14 [首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
+中，两个 macOS Job 成功；Windows x64 与 ARM64 均成功编译应用并生成 NSIS，随后统一
+在 WiX 3.14.1 `light.exe` 生成 MSI 时失败。原有检查只验证
+capability 查询结果和 `cscript.exe` 命令存在，不能证明 WiX ICE 所需的 VBScript 引擎
+可用。为避免已成功的 NSIS 被 MSI 连带阻断，稳定 CI 已将两个 Windows Job 收口为
+NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后的 Windows artifact
+仍待下一次在线运行核验；`windows-11-arm` runner 仍处于 Public Preview。`v*` tag
+触发不会创建或更新 GitHub Release，因此 workflow 配置不等于发布完成。
 
 - [ ] macOS ARM64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
 - [ ] macOS x64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
-- [ ] Windows x64 的 NSIS、MSI 在对应宿主完成构建、安装、资源和启动验收。
-- [ ] Windows ARM64 的 NSIS、MSI 在对应宿主完成构建、安装、资源和启动验收。
-- [ ] GitHub Actions 四个 Job 在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
+- [ ] Windows x64 的 NSIS 在对应宿主完成 artifact、安装、资源和启动验收。
+- [ ] Windows ARM64 的 NSIS 在对应宿主完成 artifact、安装、资源和启动验收。
+- [ ] Windows MSI 的 VBScript/WiX ICE 运行环境修复后，分别完成 x64、ARM64 构建与安装/卸载验收。
+- [ ] GitHub Actions 四个 Job（Windows 为 NSIS-only）在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
 - [ ] 正式发布前完成 macOS 签名/公证与 Windows Authenticode 策略确认和验证。
 
 ## 14. 推进建议

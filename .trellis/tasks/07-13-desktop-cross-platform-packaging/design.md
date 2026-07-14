@@ -48,11 +48,11 @@
 - 新增单一 workflow，通过 `strategy.matrix.include` 固定四个组合：
   - `macos-15` + `aarch64-apple-darwin` + `app,dmg`
   - `macos-15-intel` + `x86_64-apple-darwin` + `app,dmg`
-  - `windows-latest` + `x86_64-pc-windows-msvc` + `nsis,msi`
-  - `windows-11-arm` + `aarch64-pc-windows-msvc` + `nsis,msi`
+  - `windows-latest` + `x86_64-pc-windows-msvc` + `nsis`
+  - `windows-11-arm` + `aarch64-pc-windows-msvc` + `nsis`
 - 每个 Job 使用原生 runner，固定 Node `22.22.0`、Rust `1.96.0`，安装对应 Rust target 和 `desktop/package-lock.json` 锁定的 npm 依赖，再由固定完整 commit SHA 的 `tauri-apps/tauri-action` 调用项目内 Tauri CLI。
-- Windows Job 在打包前验证 VBScript capability 与 `cscript.exe`，缺失时明确失败，避免 NSIS 成功而 MSI 静默缺失。
-- CI 不调用本地 root wrapper：GitHub runner 已按矩阵提供对应宿主工具链，Tauri Action 可直接执行锁定后的项目 CLI；本地 wrapper 仍负责交互式环境中的逐 target 工具链初始化，二者的 target、bundle 与未签名语义保持一致。
+- Windows hosted runner 只进入 NSIS 链路，不再执行依赖 WiX/VBScript 的 MSI 构建；本地 wrapper 仍保留 `-Bundle msi|all` 作为实验入口。
+- CI 不调用本地 root wrapper：GitHub runner 已按矩阵提供对应宿主工具链，Tauri Action 可直接执行锁定后的项目 CLI；本地 wrapper 仍负责交互式环境中的逐 target 工具链初始化，二者保持相同 target 与未签名语义，但 bundle 范围有意区分稳定 CI 与本地实验能力。
 - `uploadWorkflowArtifacts` 以 `unsigned`、平台、架构和 bundle 命名产物，避免四个 Job 互相覆盖或让未签名产物看似正式发布包。
 - workflow 只设置 `permissions.contents: read`，checkout 禁止持久化凭据，Cargo 强制 `--locked`；不配置 `GITHUB_TOKEN` 写权限、release metadata 或签名 secret。
 - 第一版以 `workflow_dispatch` 和 `v*` tag 触发构建；tag 触发只产生 Actions Artifacts，不等同于发布 Release。
@@ -66,4 +66,4 @@
 
 - 当前 macOS ARM64 环境缺少 `x86_64-apple-darwin` target 与 PowerShell/Windows，因此只执行脚本语法、帮助/失败路径、前端构建、Rust check 以及 Windows 脚本的结构断言。
 - 四个目标的正式 bundle、安装、启动及架构检查必须分别在具备对应工具链的 macOS/Windows 环境补验，不能以静态检查替代。
-- GitHub Actions workflow 只能在推送到 GitHub 后获得真实 runner 证据；本地仅验证 YAML、映射、权限和命令结构。Windows ARM64 runner 当前为 Public Preview，若仓库不可用需改用自托管 ARM64 runner，不能静默回退到 x64 产物。
+- 2026-07-14 的真实 runner 证据确认两个 macOS Job 成功，Windows x64/ARM64 均完成应用和 NSIS 生成，但后续 MSI `light.exe` 失败并使 Job 整体失败。调整后的 NSIS-only Windows Job 仍需再次在线运行并下载 artifact 核验。Windows ARM64 runner 当前为 Public Preview，若仓库不可用需改用自托管 ARM64 runner，不能静默回退到 x64 产物。

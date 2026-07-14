@@ -97,6 +97,12 @@ rustup target add aarch64-pc-windows-msvc
 并给出启用命令或设置入口；只构建 `nsis` 不会执行这项检查。此要求来自
 [Tauri Windows Installer 文档](https://v2.tauri.app/distribute/windows-installer/#building)。
 
+本地脚本继续保留 MSI 参数，但当前将 MSI 视为实验能力。2026-07-14 的 GitHub hosted
+runner 实测中，x64 与 ARM64 都成功完成应用和 NSIS 构建，随后统一在 WiX 3.14.1
+`light.exe` 阶段失败。该结果说明 `cscript.exe` 存在和 capability 查询通过不足以证明
+WiX ICE 所需的 VBScript 引擎可用；在补齐真实脚本引擎探针并完成安装/卸载验证前，
+不要把本地 MSI 参数视为稳定发布入口。
+
 `make package-windows-info` 只打印 PowerShell 入口，不会尝试从 Makefile 启动 Windows
 打包。
 
@@ -109,8 +115,8 @@ rustup target add aarch64-pc-windows-msvc
 | --- | --- | --- | --- |
 | macOS ARM64 | `macos-15` | `aarch64-apple-darwin` | `app,dmg` |
 | macOS Intel x64 | `macos-15-intel` | `x86_64-apple-darwin` | `app,dmg` |
-| Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | `nsis,msi` |
-| Windows ARM64 | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nsis,msi` |
+| Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | `nsis` |
+| Windows ARM64 | `windows-11-arm` | `aarch64-pc-windows-msvc` | `nsis` |
 
 workflow 固定使用 Node.js `22.22.0` 和 Rust `1.96.0`，并将第三方 Action 锁定到明确
 的提交 SHA：
@@ -121,17 +127,20 @@ workflow 固定使用 Node.js `22.22.0` 和 Rust `1.96.0`，并将第三方 Acti
 
 每个 Job 使用 `desktop/package-lock.json` 执行 `npm ci`，checkout 不持久化凭据，
 Cargo 强制使用 `--locked`，再由 Tauri Action 以 `projectPath: desktop` 调用项目内
-CLI。Windows Job 在构建 MSI 前会检查 VBScript
-capability 和 `cscript.exe`，缺失时快速失败。所有构建均传递 `--no-sign`，workflow
-权限仅为 `contents: read`，不读取签名 secret，也不创建或更新 GitHub Release。
+CLI。Windows hosted runner 当前只生成 NSIS，不进入 WiX/VBScript 依赖的 MSI 链路。
+所有构建均传递 `--no-sign`，workflow 权限仅为 `contents: read`，不读取签名 secret，
+也不创建或更新 GitHub Release。
 
 成功运行后，在对应 workflow run 的 **Artifacts** 区域下载产物。artifact 名称使用
 `commerce-shoot-studio-unsigned-[platform]-[arch]-[bundle]` 模式，四个矩阵项及不同
 bundle 不会互相覆盖。Actions Artifact 是有保留期限的 CI 产物，不等同于正式 Release。
 
-该 workflow 当前只完成本地 YAML 与结构验证，尚未在 GitHub runner 上在线运行。
-`windows-11-arm` 仍处于 Public Preview，实际可用性受仓库和 GitHub runner 状态影响；
-不可用时应记录阻塞或改用 ARM64 自托管 runner，不能用 x64 产物替代 ARM64 验收。
+2026-07-14 的[首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
+已经验证两个 macOS Job 成功；两个 Windows Job 的应用与 NSIS 构建也成功，但同一 Job
+后续的 MSI `light.exe` 失败，导致 Windows artifact 未上传。
+因此 workflow 已将 x64 与 ARM64 的稳定 CI bundle 收口为 NSIS。调整后的 Windows Job
+仍需再次在线运行并核验 artifact，且 `windows-11-arm` 仍处于 Public Preview；不可用时
+应记录阻塞或改用 ARM64 自托管 runner，不能用 x64 产物替代 ARM64 验收。
 
 ## 产物目录
 
@@ -147,8 +156,7 @@ desktop/src-tauri/target/<target-triple>/release/bundle/
 
 ## 验证状态
 
-脚本入口与参数不等于四种架构已经完成发布验收。Windows 的逐 target Developer Shell
-切换及 MSI 前置检查目前只有结构级验证，尚未在 Windows 真机执行。正式使用前仍需在
-对应 macOS/Windows 宿主上分别确认：构建成功、产物架构正确、内置模特资源完整、
-安装/启动/卸载正常，以及包含空格或中文的仓库路径可用。签名、公证和发布渠道还需
-单独设计与验证。
+脚本入口和 CI 编译成功都不等于四种架构已经完成发布验收。首次在线运行只证明 macOS
+产物已上传，以及两个 Windows 架构都能走完 NSIS 生成阶段；调整后的 Windows artifact、
+产物架构、内置模特资源、安装/启动/卸载，以及包含空格或中文的本地仓库路径仍需补验。
+MSI、签名、公证和正式发布渠道还需单独设计与验证。

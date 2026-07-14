@@ -13,6 +13,8 @@
 - [x] 完成 workflow YAML、权限、target/bundle 映射和第三方 Action 使用复审。
 - [x] 修复 Windows 本地脚本跨 target 复用 MSVC 环境的问题，为每个 target 初始化同一 Visual Studio 安装的 Developer PowerShell。
 - [x] 为 Windows 本地 MSI/all 打包补充 VBSCRIPT capability 与 `cscript.exe` 快速失败检查，保持纯 NSIS 不检查。
+- [x] 根据首次真实 runner 证据，将 Windows x64/ARM64 稳定 CI bundle 收口为 NSIS，移除不再适用的 MSI 前置检查。
+- [x] 同步 build 文档、实现清单与任务设计，区分稳定 CI 的 NSIS 和本地实验 MSI 能力。
 
 ## 验证证据
 
@@ -28,6 +30,8 @@
 - Windows 本地脚本修复前的结构断言确认未调用 `Launch-VsDevShell.ps1`，也没有 VBSCRIPT/`cscript.exe` 预检；修复后静态契约确认每个 target 映射到 `Arch=amd64|arm64`、固定 `HostArch=amd64`、校验归一化后的 `VSCMD_ARG_TGT_ARCH`，并仅在 bundle 含 `msi` 时要求管理员权限和执行 MSI 前置检查。
 - 最终独立复审确认 Windows 两项修复与 PreviewCanvas 跨类型下载互斥均已实质关闭，定向测试 8/8、`git diff --check` 通过，`no findings`。
 - 当前环境未安装 `actionlint`，因此未执行该工具；以 Ruby YAML 解析、定向结构断言、`git diff --check` 和双人复审作为本地替代证据。
+- 2026-07-14 [首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)：macOS ARM64/x64 Job 成功；Windows x64/ARM64 均完成 release EXE 与 NSIS 生成，随后在 WiX 3.14.1 `light.exe` 阶段失败。两个架构同形失败说明问题位于共享 MSI 环境，而不是 Rust target、MSVC 编译或 NSIS。
+- 原 workflow 的 VBSCRIPT 预检允许 capability 查询为空时通过，且只检查 `cscript.exe` 命令存在，不能证明 WiX ICE 脚本引擎可用；本轮不扩展 runner 环境修复，直接从稳定 CI 移除 MSI。
 
 ## 未验证项
 
@@ -35,7 +39,8 @@
 - 当前没有 PowerShell/Windows，Windows 脚本尚未进行 AST 解析、x64/ARM64 NSIS/MSI 打包与安装运行验证。
 - Windows 跨 target Developer PowerShell 环境切换和 VBSCRIPT capability 查询尚未在 Windows 真机执行；当前证据仅为官方契约核对与脚本结构验证。
 - 代码签名、公证、Authenticode 和发布上传不在第一版范围内。
-- GitHub Actions workflow 尚未推送运行；Windows ARM64 runner 可用性和四目标在线产物仍待真实 workflow 验证。
+- 调整后的 Windows NSIS-only Job 尚未在线重跑，x64/ARM64 artifact 上传与安装/启动仍待核验。
+- Windows MSI 的 VBScript/WiX ICE 环境、x64/ARM64 构建与安装/卸载仍未验证；本地脚本 MSI 参数不代表稳定发布支持。
 
 ## 验证命令
 
@@ -54,10 +59,10 @@ GitHub Actions 追加验证：
 
 ```bash
 ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/package-desktop.yml")'
-rg -n "contents: read|--no-sign|uploadWorkflowArtifacts|windows-11-arm|macos-15-intel" .github/workflows/package-desktop.yml
+rg -n "contents: read|--no-sign|uploadWorkflowArtifacts|windows-11-arm|macos-15-intel|bundles: nsis" .github/workflows/package-desktop.yml
 ```
 
-`--arch x64 --skip-install` 在当前机器预期因缺少 Rust target 快速失败，不进入真实打包。Windows PowerShell 解析、四目标构建与安装 smoke 需在对应宿主补验。
+`--arch x64 --skip-install` 在当前机器预期因缺少 Rust target 快速失败，不进入真实打包。Windows PowerShell 本地脚本与 MSI 仍需在对应宿主补验；调整后的 Windows NSIS-only CI 需通过 workflow_dispatch 重跑并下载 artifact 验证。
 
 ## 风险与回滚点
 
