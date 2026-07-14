@@ -1,0 +1,11 @@
+pub mod ai_assist;
+pub mod assets;
+pub mod capability;
+pub mod generation;
+pub mod model_config;
+pub mod prompt_plan;
+pub mod runtime_info;
+pub mod secrets;
+pub mod settings;
+pub mod shell;
+pub mod workspace;

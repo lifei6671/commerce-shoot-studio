@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "结果卡、历史 record 与异步 UI 状态合同"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Prompt 安全、真实 Provider 与结果替换合同"}

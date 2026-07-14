@@ -1,0 +1,16 @@
+id = "scene-image-generation"
+version = "v7"
+capability_id = "scene-image-generation"
+system_rules = """
+{{sceneIdentity}}。
+"""
+user_task = """
+{{confirmedUserPrompt}}
+
+输出比例：{{ratio}}
+输出尺寸：{{providerSize}}
+"""
+negative_prompt = ""
+output_format = """
+直接生成一张图片，不返回文字。
+"""

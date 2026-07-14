@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端组件测试、平台行为和视觉回归约束"}
+{"file":"desktop/src/app/components/StudioToolbar.tsx","reason":"Windows 顶栏布局、拖动和窗口控制入口"}
+{"file":"desktop/src/app/components/AppShell.tsx","reason":"平台顶栏高度与侧边分隔线对齐"}
+{"file":"desktop/src-tauri/tauri.conf.json","reason":"macOS Overlay 与原生交通灯现状"}

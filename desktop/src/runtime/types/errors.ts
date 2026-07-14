@@ -1,0 +1,40 @@
+import type { GenerationTaskStage } from "./generation";
+
+export type AppErrorCode =
+  | "VALIDATION_ERROR"
+  | "WORKSPACE_NOT_INITIALIZED"
+  | "WORKSPACE_UNAVAILABLE"
+  | "SQLITE_MIGRATION_FAILED"
+  | "ASSET_NOT_FOUND"
+  | "ASSET_FILE_MISSING"
+  | "ASSET_REFERENCED_BY_HISTORY"
+  | "UNSUPPORTED_IMAGE_FORMAT"
+  | "IMAGE_TOO_LARGE"
+  | "PROMPT_PLAN_NOT_CONFIRMED"
+  | "PROMPT_TEMPLATE_INVALID"
+  | "PROMPT_TOO_LONG"
+  | "MODEL_CAPABILITY_UNAVAILABLE"
+  | "MODEL_NOT_CONFIGURED"
+  | "MODEL_CONFIG_UNAVAILABLE"
+  | "API_KEY_NOT_CONFIGURED"
+  | "API_KEY_INVALID"
+  | "PROVIDER_RATE_LIMITED"
+  | "PROVIDER_TIMEOUT"
+  | "PROVIDER_CONTENT_REJECTED"
+  | "PROVIDER_UNKNOWN_ERROR"
+  | "NETWORK_ERROR"
+  | "DOWNLOAD_RESULT_FAILED"
+  | "SAVE_RESULT_FAILED"
+  | "TASK_RETRY_REQUIRED"
+  | "TASK_CANCELLED"
+  | "TASK_INTERRUPTED"
+  | "UNKNOWN_ERROR";
+
+export type NormalizedTaskError = {
+  code: AppErrorCode;
+  message: string;
+  retryable: boolean;
+  stage?: GenerationTaskStage;
+  providerStatusCode?: number;
+  providerErrorCode?: string;
+};

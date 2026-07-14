@@ -1,0 +1,2720 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import type { LucideIcon } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  Eye,
+  Languages,
+  Maximize2,
+  MoreHorizontal,
+  Pencil,
+  Minus,
+  Plus,
+  Trash2,
+  Type,
+  WandSparkles,
+  X,
+} from "lucide-react";
+import { cn } from "../../../shared/lib/cn";
+import {
+  ImageTextRecognitionError,
+  type ImageSizeOption,
+  type ImageTextRecognitionResult,
+  type ModelImageSizeOptions,
+  type RecognizedImageTextItem,
+  type ResultImageTextChange,
+} from "../../../runtime";
+import type { ProductImageAsset } from "../lib/productImagePicker";
+
+const productPreviewImageSrc = new URL(
+  "../../../../src-tauri/resources/assets/product.png",
+  import.meta.url,
+).href;
+
+export type PreviewBoard = {
+  id: string;
+  title: string;
+  icon: LucideIcon;
+  tone: "light" | "blue" | "dark";
+};
+
+type PreviewCanvasProps = {
+  boards: PreviewBoard[];
+  detailImages?: GeneratedDetailImage[];
+  textEditScopeId?: string;
+  onImageTextRecognitionEmpty?: () => void;
+  onImageTextRewriteError?: (message: string) => void;
+  onRecognizeImageText?: (image: GeneratedDetailImage) => Promise<ImageTextRecognitionResult>;
+  onImageTextRewrite?: (image: GeneratedDetailImage, changes: ResultImageTextChange[]) => Promise<void> | void;
+  onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
+  onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageResize?: (image: GeneratedDetailImage, option: ImageSizeOption) => Promise<void> | void;
+  onLoadImageSizeOptions?: (image: GeneratedDetailImage) => Promise<ModelImageSizeOptions>;
+  onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+};
+
+export type GeneratedReferenceImage = {
+  assetId?: string;
+  dataUrl?: string;
+  mimeType?: string;
+  originalName?: string;
+  src?: string;
+};
+
+export type GeneratedDetailImage = {
+  designSpec?: string;
+  errorMessage?: string;
+  groupId?: string;
+  groupTitle?: string;
+  id: string;
+  imageNo?: number;
+  imageType?: string;
+  assetId?: string;
+  assetLocalPath?: string;
+  assetRelativePath?: string;
+  height?: number;
+  kind?: "image" | "listing-copy" | "source-image";
+  listingCopy?: ProductListingCopy;
+  copyRequirements?: string;
+  coreImagePrompt?: string;
+  prompt?: string;
+  ratio?: string;
+  referenceImages?: GeneratedReferenceImage[];
+  sceneDescription?: string;
+  sourceImages?: ProductImageAsset[];
+  src?: string;
+  status: "generating" | "complete" | "failed";
+  title: string;
+  visualConsistency?: Record<string, unknown>;
+  width?: number;
+};
+
+export type ProductListingCopy = {
+  detailCopy: string;
+  keywords: string;
+  sellingPoints: string[];
+  shootingPlan: string[];
+  sourcePrompt: string;
+  title: string;
+};
+
+type LongPreviewImageItem = {
+  badge?: string;
+  height?: number;
+  id: string;
+  src?: string;
+  title: string;
+  width?: number;
+};
+
+type LongImageAsset = {
+  blob: Blob;
+  height: number;
+  item: LongPreviewImageItem;
+  width: number;
+};
+
+type DecodedCanvasImage = {
+  height: number;
+  release: () => void;
+  source: CanvasImageSource;
+  width: number;
+};
+
+type TextEditPhase = "recognizing" | "ready" | "error" | "submitting";
+
+type TextEditDialogIdentity = {
+  scopeId: string;
+  sessionId: number;
+  sourceAssetId: string;
+  targetImageId: string;
+};
+
+type TextEditRecognitionError = {
+  code: string;
+  message: string;
+  retryable: boolean;
+};
+
+type ImageOperationMarker = {
+  imageId: string;
+  scopeId: string;
+  token: string;
+};
+
+let textEditOperationSequence = 0;
+let textEditOperationMarkers: ImageOperationMarker[] = [];
+const textEditOperationListeners = new Set<() => void>();
+
+function subscribeTextEditOperations(listener: () => void) {
+  textEditOperationListeners.add(listener);
+  return () => textEditOperationListeners.delete(listener);
+}
+
+function getTextEditOperationsSnapshot() {
+  return textEditOperationMarkers;
+}
+
+function publishTextEditOperations(nextMarkers: ImageOperationMarker[]) {
+  textEditOperationMarkers = nextMarkers;
+  textEditOperationListeners.forEach((listener) => listener());
+}
+
+function markTextEditOperation(imageId: string, scopeId: string, sessionId: number) {
+  textEditOperationSequence += 1;
+  const token = `text-edit-${sessionId}-${textEditOperationSequence}`;
+  publishTextEditOperations([...textEditOperationMarkers, { imageId, scopeId, token }]);
+  return token;
+}
+
+function clearTextEditOperation(operationToken: string) {
+  publishTextEditOperations(textEditOperationMarkers.filter((operation) => operation.token !== operationToken));
+}
+
+export function PreviewCanvas({
+  boards,
+  detailImages = [],
+  textEditScopeId = "",
+  onImageTextRecognitionEmpty,
+  onImageTextRewriteError,
+  onRecognizeImageText,
+  onImageTextRewrite,
+  onImageRewrite,
+  onImageRetry,
+  onImageDelete,
+  onImageResize,
+  onLoadImageSizeOptions,
+  onListingCopyRetry,
+}: PreviewCanvasProps) {
+  if (detailImages.length > 0) {
+    return (
+      <GeneratedDetailCanvas
+        detailImages={detailImages}
+        textEditScopeId={textEditScopeId}
+        onImageTextRecognitionEmpty={onImageTextRecognitionEmpty}
+        onImageTextRewriteError={onImageTextRewriteError}
+        onRecognizeImageText={onRecognizeImageText}
+        onImageTextRewrite={onImageTextRewrite}
+        onImageRewrite={onImageRewrite}
+        onImageRetry={onImageRetry}
+        onImageDelete={onImageDelete}
+        onImageResize={onImageResize}
+        onLoadImageSizeOptions={onLoadImageSizeOptions}
+        onListingCopyRetry={onListingCopyRetry}
+      />
+    );
+  }
+
+  return (
+    <main
+      aria-label="生成预览画布"
+      className="desktop-grain relative min-h-0 overflow-hidden bg-[radial-gradient(circle_at_50%_26%,rgba(255,255,255,0.98),rgba(244,247,251,0.93)_42%,rgba(232,237,244,0.86))]"
+    >
+      <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(255,255,255,0.78),transparent_24%,transparent_76%,rgba(255,255,255,0.78))]" />
+      <div className="absolute left-1/2 top-[39%] h-[420px] w-[620px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-100/30 blur-3xl" />
+      <section className="relative flex h-full flex-col items-center justify-center px-10">
+        <div className="mb-10 text-center">
+          <div className="text-[34px] font-bold tracking-normal text-slate-950 drop-shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+            AI 商品
+          </div>
+          <p className="mt-3 text-[14px] text-app-muted drop-shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+            上传商品图，AI 即刻生成
+            <span className="mx-1 text-app-blue">符合多平台规范</span>
+            的专业详情页。
+          </p>
+        </div>
+
+        <div className="desktop-raised relative aspect-[2/1] w-full max-w-[820px] overflow-hidden rounded-[24px] border border-white/90 bg-white/88 backdrop-blur-2xl">
+          <div className="pointer-events-none absolute inset-x-5 top-0 z-10 h-px bg-white" />
+          <img
+            alt="AI 商品详情视觉示例"
+            className="h-full w-full select-none object-contain"
+            decoding="async"
+            draggable={false}
+            loading="eager"
+            src={productPreviewImageSrc}
+          />
+        </div>
+        <p className="sr-only">商品生成流程：{boards.map((board) => board.title).join("、")}</p>
+      </section>
+      <button
+        className="absolute bottom-5 right-5 grid size-9 place-items-center rounded-full border border-white/80 bg-white/80 text-[13px] font-semibold text-app-text shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_6px_16px_rgba(15,23,42,0.1)] backdrop-blur-xl transition-all duration-200 hover:bg-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_10px_22px_rgba(15,23,42,0.12)] active:scale-95"
+        type="button"
+      >
+        ?
+      </button>
+    </main>
+  );
+}
+
+function GeneratedDetailCanvas({
+  detailImages,
+  textEditScopeId,
+  onImageTextRecognitionEmpty,
+  onImageTextRewriteError,
+  onRecognizeImageText,
+  onImageTextRewrite,
+  onImageRewrite,
+  onImageRetry,
+  onImageDelete,
+  onImageResize,
+  onLoadImageSizeOptions,
+  onListingCopyRetry,
+}: {
+  detailImages: GeneratedDetailImage[];
+  textEditScopeId: string;
+  onImageTextRecognitionEmpty?: () => void;
+  onImageTextRewriteError?: (message: string) => void;
+  onRecognizeImageText?: (image: GeneratedDetailImage) => Promise<ImageTextRecognitionResult>;
+  onImageTextRewrite?: (image: GeneratedDetailImage, changes: ResultImageTextChange[]) => Promise<void> | void;
+  onImageRewrite?: (image: GeneratedDetailImage, instruction: string) => Promise<void> | void;
+  onImageRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageDelete?: (image: GeneratedDetailImage) => Promise<void> | void;
+  onImageResize?: (image: GeneratedDetailImage, option: ImageSizeOption) => Promise<void> | void;
+  onLoadImageSizeOptions?: (image: GeneratedDetailImage) => Promise<ModelImageSizeOptions>;
+  onListingCopyRetry?: (image: GeneratedDetailImage) => Promise<void> | void;
+}) {
+  const [removedImageIds, setRemovedImageIds] = useState<Set<string>>(() => new Set());
+  const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(() => new Set());
+  const [regeneratingImageOperations, setRegeneratingImageOperations] = useState<ImageOperationMarker[]>([]);
+  const pendingTextEditOperations = useSyncExternalStore(
+    subscribeTextEditOperations,
+    getTextEditOperationsSnapshot,
+    getTextEditOperationsSnapshot,
+  );
+  const [imageRewriteTargetId, setImageRewriteTargetId] = useState<string | null>(null);
+  const [imageRewritePrompt, setImageRewritePrompt] = useState("");
+  const [resizeTargetId, setResizeTargetId] = useState<string | null>(null);
+  const [resizeOptions, setResizeOptions] = useState<ModelImageSizeOptions | null>(null);
+  const [selectedResizeOptionId, setSelectedResizeOptionId] = useState<string | null>(null);
+  const [resizeLoading, setResizeLoading] = useState(false);
+  const [resizeSubmitting, setResizeSubmitting] = useState(false);
+  const [resizeError, setResizeError] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [bulkDeleteSubmitting, setBulkDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [textEditTargetId, setTextEditTargetId] = useState<string | null>(null);
+  const [textEditSourceAssetId, setTextEditSourceAssetId] = useState<string | null>(null);
+  const [textEditPhase, setTextEditPhase] = useState<TextEditPhase>("recognizing");
+  const [textEditItems, setTextEditItems] = useState<RecognizedImageTextItem[]>([]);
+  const [textEditError, setTextEditError] = useState<TextEditRecognitionError | null>(null);
+  const [listingCopyTargetId, setListingCopyTargetId] = useState<string | null>(null);
+  const [textEditValues, setTextEditValues] = useState<string[]>([]);
+  const [longPreviewOpen, setLongPreviewOpen] = useState(false);
+  const [longImageDownloading, setLongImageDownloading] = useState(false);
+  const [archiveDownloading, setArchiveDownloading] = useState(false);
+  const [downloadingImageId, setDownloadingImageId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const downloadOperationLockedRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
+  const resizeRequestIdRef = useRef(0);
+  const imageOperationSequenceRef = useRef(0);
+  const textEditSessionIdRef = useRef(0);
+  const textEditRecognitionRequestIdRef = useRef(0);
+  const textEditDialogIdentityRef = useRef<TextEditDialogIdentity | null>(null);
+  const detailImagesRef = useRef(detailImages);
+  const textEditScopeIdRef = useRef(textEditScopeId);
+  detailImagesRef.current = detailImages;
+  textEditScopeIdRef.current = textEditScopeId;
+  const visibleImages = detailImages
+    .filter((image) => !removedImageIds.has(image.id))
+    .map((image) =>
+      regeneratingImageOperations.some(
+        (operation) => operation.scopeId === textEditScopeId && operation.imageId === image.id,
+      ) ||
+      pendingTextEditOperations.some(
+        (operation) => operation.scopeId === textEditScopeId && operation.imageId === image.id,
+      )
+        ? { ...image, status: "generating" as const }
+        : image,
+    );
+  const visibleImageItems = visibleImages.filter((image) => image.kind !== "listing-copy" && image.kind !== "source-image");
+  const longPreviewItems = createLongPreviewImageItems(visibleImages);
+  const groupedResultSections = createGeneratedResultGroups(visibleImages);
+  const hasGroupedResults = groupedResultSections.length > 0;
+  const completedImages = visibleImageItems.filter((image) => image.status === "complete");
+  const selectedImages = completedImages.filter((image) => selectedImageIds.has(image.id));
+  const allCompletedSelected = completedImages.length > 0 && completedImages.every((image) => selectedImageIds.has(image.id));
+  const downloadInProgress = longImageDownloading || archiveDownloading || downloadingImageId !== null;
+  const [previewImageId, setPreviewImageId] = useState<string | null>(null);
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const previewImage = completedImages.find((image) => image.id === previewImageId) ?? null;
+  const previewImageIndex = previewImage ? completedImages.findIndex((image) => image.id === previewImage.id) : -1;
+  const imageRewriteTarget = completedImages.find((image) => image.id === imageRewriteTargetId) ?? null;
+  const resizeTarget = completedImages.find((image) => image.id === resizeTargetId) ?? null;
+  const deleteTarget = visibleImageItems.find((image) => image.id === deleteTargetId) ?? null;
+  const textEditTarget =
+    detailImages.find(
+      (image) =>
+        image.id === textEditTargetId &&
+        image.kind !== "listing-copy" &&
+        image.kind !== "source-image" &&
+        (image.status === "complete" || textEditPhase === "submitting"),
+    ) ?? null;
+  const textEditChanges = createResultImageTextChanges(textEditItems, textEditValues);
+  const listingCopyTarget =
+    visibleImages.find((image) => image.id === listingCopyTargetId && image.kind === "listing-copy" && image.status === "complete") ??
+    null;
+
+  function openImagePreview(image: GeneratedDetailImage) {
+    if (image.status !== "complete") {
+      return;
+    }
+
+    setPreviewImageId(image.id);
+    setPreviewZoom(1);
+  }
+
+  function closeImagePreview() {
+    setPreviewImageId(null);
+    setPreviewZoom(1);
+  }
+
+  function showAdjacentPreviewImage(direction: -1 | 1) {
+    if (previewImageIndex < 0 || completedImages.length === 0) {
+      return;
+    }
+
+    const nextIndex = (previewImageIndex + direction + completedImages.length) % completedImages.length;
+    setPreviewImageId(completedImages[nextIndex].id);
+    setPreviewZoom(1);
+  }
+
+  function changePreviewZoom(delta: number) {
+    setPreviewZoom((zoom) => Math.min(2, Math.max(0.75, zoom + delta)));
+  }
+
+  function toggleImageSelection(imageId: string, selected: boolean) {
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      if (selected) {
+        nextIds.add(imageId);
+      } else {
+        nextIds.delete(imageId);
+      }
+      return nextIds;
+    });
+  }
+
+  function toggleAllCompletedImages(selected: boolean) {
+    setSelectedImageIds(selected ? new Set(completedImages.map((image) => image.id)) : new Set());
+  }
+
+  function toggleGeneratedGroupSelection(images: GeneratedDetailImage[], selected: boolean) {
+    const groupImageIds = images
+      .filter((image) => image.kind !== "source-image" && image.kind !== "listing-copy" && image.status === "complete")
+      .map((image) => image.id);
+
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      for (const imageId of groupImageIds) {
+        if (selected) {
+          nextIds.add(imageId);
+        } else {
+          nextIds.delete(imageId);
+        }
+      }
+      return nextIds;
+    });
+  }
+
+  async function deleteSelectedImages() {
+    if (selectedImageIds.size === 0 || bulkDeleteSubmitting) {
+      return;
+    }
+
+    const selectedTargets = visibleImageItems.filter((image) => selectedImageIds.has(image.id));
+    setBulkDeleteSubmitting(true);
+    try {
+      for (const image of selectedTargets) {
+        try {
+          await deleteImageWithPersistence(image);
+        } catch (error) {
+          showCopyToast(errorMessage(error, "图片删除失败。"));
+        }
+      }
+    } finally {
+      setBulkDeleteSubmitting(false);
+    }
+  }
+
+  function deleteImageById(imageId: string) {
+    setRemovedImageIds((currentIds) => new Set([...currentIds, imageId]));
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(imageId);
+      return nextIds;
+    });
+    if (previewImageId === imageId) {
+      closeImagePreview();
+    }
+  }
+
+  async function deleteImageWithPersistence(image: GeneratedDetailImage) {
+    if (onImageDelete) {
+      await onImageDelete(image);
+    }
+    deleteImageById(image.id);
+  }
+
+  function openImageRewriteDialog(image: GeneratedDetailImage) {
+    setImageRewriteTargetId(image.id);
+    setImageRewritePrompt("");
+  }
+
+  function closeImageRewriteDialog() {
+    setImageRewriteTargetId(null);
+    setImageRewritePrompt("");
+  }
+
+  async function openResizeDialog(image: GeneratedDetailImage) {
+    if (resizeSubmitting) {
+      return;
+    }
+    const requestId = resizeRequestIdRef.current + 1;
+    resizeRequestIdRef.current = requestId;
+    setResizeTargetId(image.id);
+    setResizeOptions(null);
+    setSelectedResizeOptionId(null);
+    setResizeError(null);
+    setResizeLoading(true);
+    try {
+      if (!onLoadImageSizeOptions) {
+        throw new Error("当前页面未提供图片尺寸能力。");
+      }
+      const loadedOptions = await onLoadImageSizeOptions(image);
+      if (resizeRequestIdRef.current !== requestId) {
+        return;
+      }
+      setResizeOptions(loadedOptions);
+      const defaultOption = findClosestImageSizeOption(image, loadedOptions.options);
+      setSelectedResizeOptionId(defaultOption?.id ?? null);
+      if (loadedOptions.options.length === 0) {
+        setResizeError("当前模型暂未配置可用的图片尺寸。");
+      }
+    } catch (error) {
+      if (resizeRequestIdRef.current === requestId) {
+        setResizeError(errorMessage(error, "图片尺寸选项加载失败。"));
+      }
+    } finally {
+      if (resizeRequestIdRef.current === requestId) {
+        setResizeLoading(false);
+      }
+    }
+  }
+
+  function closeResizeDialog() {
+    if (resizeSubmitting) {
+      return;
+    }
+    resizeRequestIdRef.current += 1;
+    setResizeTargetId(null);
+    setResizeOptions(null);
+    setSelectedResizeOptionId(null);
+    setResizeError(null);
+  }
+
+  async function submitResize() {
+    const target = resizeTarget;
+    const option = resizeOptions?.options.find((item) => item.id === selectedResizeOptionId);
+    if (!target || !option || !onImageResize || resizeSubmitting) {
+      return;
+    }
+
+    setResizeSubmitting(true);
+    setResizeTargetId(null);
+    const operationToken = markImageRegenerating(target.id);
+    try {
+      await onImageResize(target, option);
+      setResizeOptions(null);
+      setSelectedResizeOptionId(null);
+      setResizeError(null);
+    } catch (error) {
+      showCopyToast(errorMessage(error, "图片尺寸修改失败。"));
+    } finally {
+      setResizeSubmitting(false);
+      clearImageRegenerating(operationToken);
+    }
+  }
+
+  function openDeleteDialog(image: GeneratedDetailImage) {
+    setDeleteTargetId(image.id);
+    setDeleteError(null);
+  }
+
+  function closeDeleteDialog() {
+    if (deleteSubmitting) {
+      return;
+    }
+    setDeleteTargetId(null);
+    setDeleteError(null);
+  }
+
+  async function confirmDeleteImage() {
+    if (!deleteTarget || deleteSubmitting) {
+      return;
+    }
+    setDeleteSubmitting(true);
+    setDeleteError(null);
+    try {
+      await deleteImageWithPersistence(deleteTarget);
+      setDeleteTargetId(null);
+    } catch (error) {
+      setDeleteError(errorMessage(error, "图片删除失败。"));
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
+
+  function markImageRegenerating(targetId: string, scopeId = textEditScopeIdRef.current, sessionId?: number) {
+    const sequence = imageOperationSequenceRef.current + 1;
+    imageOperationSequenceRef.current = sequence;
+    const operationToken = sessionId === undefined ? `operation-${sequence}` : `text-edit-${sessionId}-${sequence}`;
+    setRegeneratingImageOperations((currentOperations) => [
+      ...currentOperations,
+      { imageId: targetId, scopeId, token: operationToken },
+    ]);
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(targetId);
+      return nextIds;
+    });
+    if (previewImageId === targetId) {
+      closeImagePreview();
+    }
+    return operationToken;
+  }
+
+  function clearImageRegenerating(operationToken: string) {
+    setRegeneratingImageOperations((currentOperations) =>
+      currentOperations.filter((operation) => operation.token !== operationToken),
+    );
+  }
+
+  function regenerateImageById(targetId: string) {
+    const operationToken = markImageRegenerating(targetId);
+    window.setTimeout(() => {
+      clearImageRegenerating(operationToken);
+    }, 3000);
+  }
+
+  async function retryImage(image: GeneratedDetailImage) {
+    if (onImageRetry) {
+      const operationToken = markImageRegenerating(image.id);
+      try {
+        await onImageRetry(image);
+      } finally {
+        clearImageRegenerating(operationToken);
+      }
+      return;
+    }
+
+    regenerateImageById(image.id);
+  }
+
+  async function retryListingCopy(image: GeneratedDetailImage) {
+    if (!onListingCopyRetry) {
+      regenerateImageById(image.id);
+      return;
+    }
+
+    const operationToken = markImageRegenerating(image.id);
+    try {
+      await onListingCopyRetry(image);
+    } finally {
+      clearImageRegenerating(operationToken);
+    }
+  }
+
+  async function regenerateImage() {
+    if (!imageRewriteTargetId) {
+      return;
+    }
+
+    const targetId = imageRewriteTargetId;
+    const target = imageRewriteTarget;
+    const instruction = imageRewritePrompt.trim();
+    closeImageRewriteDialog();
+
+    if (target && onImageRewrite) {
+      const operationToken = markImageRegenerating(target.id);
+      try {
+        await onImageRewrite(target, instruction);
+      } catch (error) {
+        showCopyToast(errorMessage(error, "AI 改图失败。"));
+      } finally {
+        clearImageRegenerating(operationToken);
+      }
+      return;
+    }
+
+    regenerateImageById(targetId);
+  }
+
+  function openTextEditDialog(image: GeneratedDetailImage) {
+    const sessionId = textEditSessionIdRef.current + 1;
+    const identity = {
+      scopeId: textEditScopeIdRef.current,
+      sessionId,
+      sourceAssetId: image.assetId ?? "",
+      targetImageId: image.id,
+    };
+    textEditSessionIdRef.current = sessionId;
+    textEditDialogIdentityRef.current = identity;
+    setTextEditTargetId(image.id);
+    setTextEditSourceAssetId(identity.sourceAssetId);
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
+    void recognizeImageText(image, identity);
+  }
+
+  async function recognizeImageText(image: GeneratedDetailImage, identity: TextEditDialogIdentity) {
+    const requestId = textEditRecognitionRequestIdRef.current + 1;
+    textEditRecognitionRequestIdRef.current = requestId;
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
+
+    if (!onRecognizeImageText) {
+      if (isCurrentTextEditRequest(identity, requestId)) {
+        setTextEditError({
+          code: "MODEL_CAPABILITY_UNAVAILABLE",
+          message: "当前页面未提供图片文字识别能力。",
+          retryable: false,
+        });
+        setTextEditPhase("error");
+      }
+      return;
+    }
+
+    try {
+      const result = await onRecognizeImageText(image);
+      if (!isCurrentTextEditRequest(identity, requestId)) {
+        return;
+      }
+      if (result.items.length === 0) {
+        onImageTextRecognitionEmpty?.();
+        resetTextEditDialog(identity);
+        return;
+      }
+      setTextEditItems(result.items);
+      setTextEditValues(result.items.map((item) => item.text));
+      setTextEditPhase("ready");
+    } catch (error) {
+      if (!isCurrentTextEditRequest(identity, requestId)) {
+        return;
+      }
+      setTextEditError(normalizeTextRecognitionError(error));
+      setTextEditPhase("error");
+    }
+  }
+
+  function isCurrentTextEditRequest(identity: TextEditDialogIdentity, requestId: number) {
+    return textEditRecognitionRequestIdRef.current === requestId && isCurrentTextEditIdentity(identity);
+  }
+
+  function isCurrentTextEditIdentity(identity: TextEditDialogIdentity) {
+    return (
+      textEditScopeIdRef.current === identity.scopeId &&
+      matchesTextEditIdentity(textEditDialogIdentityRef.current, identity)
+    );
+  }
+
+  function isTextEditSourceCurrent(identity: TextEditDialogIdentity) {
+    return textEditScopeIdRef.current === identity.scopeId && detailImagesRef.current.some(
+      (image) =>
+        image.id === identity.targetImageId &&
+        image.assetId === identity.sourceAssetId &&
+        image.status === "complete" &&
+        image.kind !== "listing-copy" &&
+        image.kind !== "source-image",
+    );
+  }
+
+  function retryTextRecognition() {
+    const identity = textEditDialogIdentityRef.current;
+    const target = textEditTarget;
+    if (!identity || !target || textEditPhase === "submitting") {
+      return;
+    }
+    void recognizeImageText(target, identity);
+  }
+
+  function openListingCopyDialog(image: GeneratedDetailImage) {
+    if (image.kind !== "listing-copy" || image.status !== "complete") {
+      return;
+    }
+
+    setListingCopyTargetId(image.id);
+  }
+
+  function closeListingCopyDialog() {
+    setListingCopyTargetId(null);
+  }
+
+  function showCopyToast(message: string) {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    setToastMessage(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 1800);
+  }
+
+  async function copyProductListingCopy(copy: ProductListingCopy) {
+    const clipboard = window.navigator?.clipboard;
+    if (!clipboard?.writeText) {
+      showCopyToast("当前环境不支持复制");
+      return;
+    }
+
+    try {
+      await clipboard.writeText(formatProductListingCopy(copy));
+      showCopyToast("已复制商品上架文案");
+    } catch {
+      showCopyToast("复制失败，请重试");
+    }
+  }
+
+  function closeTextEditDialog() {
+    if (textEditPhase === "submitting") {
+      return;
+    }
+    resetTextEditDialog(textEditDialogIdentityRef.current);
+  }
+
+  function resetTextEditDialog(identity: TextEditDialogIdentity | null) {
+    if (identity && !matchesTextEditIdentity(textEditDialogIdentityRef.current, identity)) {
+      return;
+    }
+    textEditRecognitionRequestIdRef.current += 1;
+    textEditDialogIdentityRef.current = null;
+    setTextEditTargetId(null);
+    setTextEditSourceAssetId(null);
+    setTextEditItems([]);
+    setTextEditValues([]);
+    setTextEditError(null);
+    setTextEditPhase("recognizing");
+  }
+
+  function updateTextEditValue(index: number, value: string) {
+    setTextEditValues((currentValues) =>
+      currentValues.map((currentValue, currentIndex) => (currentIndex === index ? value : currentValue)),
+    );
+  }
+
+  async function confirmTextEdit() {
+    const identity = textEditDialogIdentityRef.current;
+    const target = textEditTarget;
+    const changes = textEditChanges;
+    if (
+      !identity ||
+      !target ||
+      !onImageTextRewrite ||
+      textEditPhase !== "ready" ||
+      changes.length === 0 ||
+      target.assetId !== textEditSourceAssetId ||
+      textEditSourceAssetId !== identity.sourceAssetId
+    ) {
+      return;
+    }
+
+    setTextEditPhase("submitting");
+    const operationToken = markTextEditOperation(target.id, identity.scopeId, identity.sessionId);
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(target.id);
+      return nextIds;
+    });
+    if (previewImageId === target.id) {
+      closeImagePreview();
+    }
+    try {
+      await onImageTextRewrite(target, changes);
+      if (isCurrentTextEditIdentity(identity)) {
+        resetTextEditDialog(identity);
+      }
+    } catch (error) {
+      if (!isCurrentTextEditIdentity(identity)) {
+        return;
+      }
+      if (!isTextEditSourceCurrent(identity)) {
+        onImageTextRewriteError?.("当前图片已变化，请重新识别文字。");
+        resetTextEditDialog(identity);
+        return;
+      }
+      onImageTextRewriteError?.(errorMessage(error, "图片文字修改失败。"));
+      setTextEditPhase("ready");
+    } finally {
+      clearTextEditOperation(operationToken);
+    }
+  }
+
+  useEffect(() => {
+    if (!detailImages.some((image) => image.status === "generating")) {
+      return;
+    }
+
+    setRemovedImageIds(new Set());
+    setSelectedImageIds(new Set());
+    setImageRewriteTargetId(null);
+    setImageRewritePrompt("");
+    setListingCopyTargetId(null);
+    setLongPreviewOpen(false);
+    setPreviewImageId(null);
+    setPreviewZoom(1);
+  }, [detailImages]);
+
+  useEffect(() => {
+    const identity = textEditDialogIdentityRef.current;
+    if (!identity) {
+      return;
+    }
+    if (textEditScopeIdRef.current !== identity.scopeId) {
+      resetTextEditDialog(identity);
+      return;
+    }
+    if (textEditPhase === "submitting") {
+      return;
+    }
+    if (!isTextEditSourceCurrent(identity)) {
+      resetTextEditDialog(identity);
+    }
+  }, [detailImages, textEditPhase, textEditScopeId]);
+
+  useEffect(() => {
+    return () => {
+      textEditRecognitionRequestIdRef.current += 1;
+      textEditDialogIdentityRef.current = null;
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function saveGeneratedFile(
+    defaultPath: string,
+    extension: string,
+    createBytes: () => Promise<Uint8Array> | Uint8Array,
+  ) {
+    const path = await save({
+      defaultPath,
+      filters: [{ extensions: [extension], name: extension.toUpperCase() }],
+    });
+    if (!path) {
+      return;
+    }
+
+    const bytes = await createBytes();
+    if (bytes.length > maxIpcDownloadBytes) {
+      throw new Error(extension === "zip" ? archiveSizeLimitMessage : fileSizeLimitMessage);
+    }
+    await invoke("save_generated_asset", {
+      bytes: Array.from(bytes),
+      path,
+    });
+  }
+
+  async function downloadImage(image: GeneratedDetailImage) {
+    if (!beginDownloadOperation()) {
+      return;
+    }
+
+    setDownloadingImageId(image.id);
+    try {
+      const file = await readGeneratedImageFile(image, maxIpcDownloadBytes, fileSizeLimitMessage);
+      await saveGeneratedFile(
+        `${sanitizeFilename(image.title)}.${file.extension}`,
+        file.extension,
+        () => file.bytes,
+      );
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "图片下载失败，请重试"));
+    } finally {
+      setDownloadingImageId(null);
+      finishDownloadOperation();
+    }
+  }
+
+  async function downloadLongImage() {
+    if (longPreviewItems.length === 0 || !beginDownloadOperation()) {
+      return;
+    }
+
+    setLongImageDownloading(true);
+    try {
+      await saveGeneratedFile(`${generatedResultFilePrefix}-长图.png`, "png", async () =>
+        blobToBytes(await createLongImageBlob(longPreviewItems)),
+      );
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "长图下载失败，请重试"));
+    } finally {
+      setLongImageDownloading(false);
+      finishDownloadOperation();
+    }
+  }
+
+  async function downloadImagesZip(images: GeneratedDetailImage[], zipLabel: string) {
+    if (images.length === 0 || !beginDownloadOperation()) {
+      return;
+    }
+
+    setArchiveDownloading(true);
+    try {
+      await saveGeneratedFile(`${generatedResultFilePrefix}-${zipLabel}.zip`, "zip", async () => {
+        const files: Array<{ bytes: Uint8Array; name: string }> = [];
+        let sourceBytes = 0;
+        for (const [index, image] of images.entries()) {
+          const file = await readGeneratedImageFile(
+            image,
+            maxArchiveSourceBytes - sourceBytes,
+            archiveSizeLimitMessage,
+          );
+          sourceBytes += file.bytes.length;
+          files.push({
+            bytes: file.bytes,
+            name: `${String(index + 1).padStart(2, "0")}-${sanitizeFilename(image.title)}.${file.extension}`,
+          });
+        }
+        return createZipBytes(files);
+      });
+    } catch (error) {
+      showCopyToast(downloadErrorMessage(error, "图片下载失败，请重试"));
+    } finally {
+      setArchiveDownloading(false);
+      finishDownloadOperation();
+    }
+  }
+
+  function beginDownloadOperation() {
+    if (downloadOperationLockedRef.current) {
+      return false;
+    }
+    downloadOperationLockedRef.current = true;
+    return true;
+  }
+
+  function finishDownloadOperation() {
+    downloadOperationLockedRef.current = false;
+  }
+
+  function renderGeneratedResultCard(image: GeneratedDetailImage) {
+    if (image.kind === "source-image") {
+      return <GeneratedSourceImageCard image={image} key={image.id} />;
+    }
+
+    if (image.kind === "listing-copy") {
+      return (
+        <GeneratedListingCopyCard
+          image={image}
+          key={image.id}
+          onCopy={(copy) => void copyProductListingCopy(copy)}
+          onOpen={() => openListingCopyDialog(image)}
+          onRetry={() => void retryListingCopy(image)}
+        />
+      );
+    }
+
+    if (image.status === "failed") {
+      return (
+        <GeneratedFailedResultCard
+          image={image}
+          key={image.id}
+          onDelete={() => openDeleteDialog(image)}
+          onRetry={() => void retryImage(image)}
+          onSelect={(selected) => toggleImageSelection(image.id, selected)}
+          selected={selectedImageIds.has(image.id)}
+        />
+      );
+    }
+
+    const imageIndex = visibleImageItems.findIndex((visibleImage) => visibleImage.id === image.id);
+
+    return (
+      <GeneratedDetailImageCard
+        image={image}
+        index={imageIndex}
+        downloadBusy={downloadingImageId === image.id}
+        downloadDisabled={downloadInProgress}
+        key={image.id}
+        onOpenPreview={openImagePreview}
+        onSelect={(selected) => toggleImageSelection(image.id, selected)}
+        onDownload={() => void downloadImage(image)}
+        onDelete={() => openDeleteDialog(image)}
+        onResize={() => void openResizeDialog(image)}
+        onRewrite={() => openImageRewriteDialog(image)}
+        onEditText={() => openTextEditDialog(image)}
+        selected={selectedImageIds.has(image.id)}
+      />
+    );
+  }
+
+  useEffect(() => {
+    const visibleImageIds = new Set(visibleImages.map((image) => image.id));
+    setSelectedImageIds((currentIds) => {
+      const nextIds = new Set([...currentIds].filter((imageId) => visibleImageIds.has(imageId)));
+      return nextIds.size === currentIds.size ? currentIds : nextIds;
+    });
+  }, [detailImages, removedImageIds]);
+
+  useEffect(() => {
+    if (!previewImage) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        showAdjacentPreviewImage(-1);
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        showAdjacentPreviewImage(1);
+      }
+
+      if (event.key === "Escape") {
+        closeImagePreview();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [completedImages, previewImage, previewImageIndex]);
+
+  useEffect(() => {
+    if (!previewImage) {
+      return;
+    }
+
+    function handleGestureChange(event: Event) {
+      const gestureEvent = event as Event & { scale?: number };
+      event.preventDefault();
+      if (!gestureEvent.scale || gestureEvent.scale === 1) {
+        return;
+      }
+
+      changePreviewZoom(gestureEvent.scale > 1 ? 0.25 : -0.25);
+    }
+
+    window.addEventListener("gesturechange", handleGestureChange, { passive: false });
+
+    return () => window.removeEventListener("gesturechange", handleGestureChange);
+  }, [previewImage]);
+
+  return (
+    <main
+      aria-label="生成预览画布"
+      className="relative min-h-0 overflow-hidden bg-[#f5f6f8]"
+    >
+      <section className="relative h-full overflow-y-auto px-10 py-8 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.55)_transparent]">
+        <div className="mb-8 flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <h1 className="text-[18px] font-semibold text-slate-950">生成结果:</h1>
+            <div className={cn("mt-7 flex items-center gap-2 text-[13px] font-medium text-slate-700", hasGroupedResults && "hidden")}>
+              <input
+                aria-label="选择本次生成结果"
+                className="size-3.5 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/20"
+                type="checkbox"
+              />
+              <span>2026-06-29 15:52</span>
+              <Pencil className="size-3.5 text-slate-500" />
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-col items-end gap-8">
+            <div className="flex min-h-7 items-center gap-2" data-testid="generated-detail-bulk-actions">
+              {selectedImageIds.size > 0 ? (
+                <>
+                  <button
+                    aria-label="删除所选图片"
+                    className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-white px-2.5 text-[12px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors hover:bg-slate-50"
+                    disabled={bulkDeleteSubmitting}
+                    onClick={() => void deleteSelectedImages()}
+                    type="button"
+                  >
+                    <Trash2 className="size-3.5" />
+                    {bulkDeleteSubmitting ? "删除中…" : "删除"}
+                  </button>
+                  {selectedImages.length > 0 ? (
+                    <button
+                      aria-busy={archiveDownloading}
+                      aria-label="批量下载所选图片"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[#1f1f21] px-2.5 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.16)] transition-colors hover:bg-black"
+                      disabled={downloadInProgress}
+                      onClick={() => void downloadImagesZip(selectedImages, "已选图片")}
+                      type="button"
+                    >
+                      <Download className="size-3.5" />
+                      {archiveDownloading ? "下载中…" : "批量下载"}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              <label className="inline-flex items-center gap-1.5 text-[12px] text-slate-600">
+                <input
+                  aria-label="全选"
+                  checked={allCompletedSelected}
+                  className="size-3.5 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/20"
+                  onChange={(event) => toggleAllCompletedImages(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                全选
+              </label>
+            </div>
+            {!hasGroupedResults ? (
+              <div className="flex items-center gap-2">
+                <button
+                  className="h-8 rounded-[8px] bg-white px-3 text-[12px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-colors hover:bg-slate-50"
+                  onClick={() => setLongPreviewOpen(true)}
+                  type="button"
+                >
+                  预览长图
+                </button>
+                <button
+                  aria-busy={archiveDownloading}
+                  aria-label="下载全部"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                  disabled={downloadInProgress}
+                  onClick={() => void downloadImagesZip(completedImages, "全部图片")}
+                  type="button"
+                >
+                  <Download className="size-3.5" />
+                  {archiveDownloading ? "下载中…" : "下载"}
+                </button>
+                <button
+                  aria-label="更多生成结果操作"
+                  className="grid size-8 place-items-center rounded-[8px] bg-[#1f1f21] text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                  type="button"
+                >
+                  <MoreHorizontal className="size-4" />
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {hasGroupedResults ? (
+          <div className="space-y-10">
+            {groupedResultSections.map((group) => {
+              const groupCompletedImages = group.images.filter(
+                (image) => image.kind !== "source-image" && image.kind !== "listing-copy" && image.status === "complete",
+              );
+              const allGroupImagesSelected =
+                groupCompletedImages.length > 0 && groupCompletedImages.every((image) => selectedImageIds.has(image.id));
+
+              return (
+                <section className="space-y-4" data-testid="generated-result-group" key={group.id}>
+                  <div className="flex items-center justify-between gap-4">
+                    <label className="inline-flex min-w-0 items-center gap-2 text-[13px] font-semibold text-slate-700">
+                      <input
+                        aria-label={`选择 ${group.title} 分组`}
+                        checked={allGroupImagesSelected}
+                        className="size-3.5 rounded-[4px] border-slate-300 text-app-blue focus:ring-app-blue/20"
+                        disabled={groupCompletedImages.length === 0}
+                        onChange={(event) => toggleGeneratedGroupSelection(group.images, event.currentTarget.checked)}
+                        type="checkbox"
+                      />
+                      <span className="shrink-0">2026-06-30 16:53</span>
+                      <span className="truncate">{group.title}</span>
+                      <Pencil className="size-3.5 shrink-0 text-slate-500" />
+                    </label>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        aria-busy={archiveDownloading}
+                        aria-label={`下载 ${group.title}`}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-[8px] bg-[#1f1f21] px-3 text-[12px] font-medium text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                        disabled={groupCompletedImages.length === 0 || downloadInProgress}
+                        onClick={() => void downloadImagesZip(groupCompletedImages, group.title)}
+                        type="button"
+                      >
+                        <Download className="size-3.5" />
+                        {archiveDownloading ? "下载中…" : "下载"}
+                      </button>
+                      <button
+                        aria-label={`更多 ${group.title} 操作`}
+                        className="grid size-8 place-items-center rounded-[8px] bg-[#1f1f21] text-white shadow-[0_4px_12px_rgba(15,23,42,0.18)] transition-colors hover:bg-black"
+                        type="button"
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-4">
+                    {group.images.map((image) => renderGeneratedResultCard(image))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-4" data-testid="generated-result-grid">
+            {visibleImages.map((image) => renderGeneratedResultCard(image))}
+          </div>
+        )}
+      </section>
+      {toastMessage ? (
+        <div
+          className="fixed left-1/2 top-[72px] z-[140] -translate-x-1/2 rounded-full bg-slate-950 px-4 py-2 text-[13px] font-medium text-white shadow-[0_12px_30px_rgba(15,23,42,0.22)]"
+          role="status"
+        >
+          {toastMessage}
+        </div>
+      ) : null}
+      {resizeTarget
+        ? createPortal(
+            <div
+              aria-label="修改图片尺寸"
+              aria-modal="true"
+              className="fixed inset-0 z-[118] flex items-center justify-center bg-slate-950/26 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeResizeDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-[380px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.16),0_8px_18px_rgba(15,23,42,0.08)]">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-[16px] font-semibold text-slate-950">修改图片尺寸</h2>
+                    {resizeOptions ? (
+                      <p className="mt-1 text-[12px] text-slate-500">当前模型：{resizeOptions.model}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    aria-label="关闭修改图片尺寸"
+                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    disabled={resizeSubmitting}
+                    onClick={closeResizeDialog}
+                    type="button"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+                <div className="mt-4 space-y-2">
+                  {resizeLoading ? <p className="py-5 text-center text-[13px] text-slate-500">正在读取模型尺寸…</p> : null}
+                  {!resizeLoading
+                    ? resizeOptions?.options.map((option) => {
+                        const label = imageSizeOptionLabel(option);
+                        return (
+                          <label
+                            className={cn(
+                              "flex cursor-pointer items-center gap-3 rounded-[9px] border px-3 py-2.5 text-[13px] transition-colors",
+                              selectedResizeOptionId === option.id
+                                ? "border-app-blue bg-blue-50 text-slate-950"
+                                : "border-slate-200 text-slate-600 hover:bg-slate-50",
+                            )}
+                            key={option.id}
+                          >
+                            <input
+                              aria-label={label}
+                              checked={selectedResizeOptionId === option.id}
+                              className="size-3.5 text-app-blue focus:ring-app-blue/20"
+                              name="generated-image-size"
+                              onChange={() => setSelectedResizeOptionId(option.id)}
+                              type="radio"
+                            />
+                            <span>{label}</span>
+                          </label>
+                        );
+                      })
+                    : null}
+                  {resizeError ? <p className="rounded-[8px] bg-red-50 px-3 py-2 text-[12px] text-red-700">{resizeError}</p> : null}
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <button
+                    className="h-8 rounded-control bg-slate-100 px-3 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                    disabled={resizeSubmitting}
+                    onClick={closeResizeDialog}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="h-8 rounded-control bg-[#1f1f21] px-4 text-[13px] font-medium text-white transition-colors hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                    disabled={resizeLoading || resizeSubmitting || !selectedResizeOptionId || Boolean(resizeError)}
+                    onClick={() => void submitResize()}
+                    type="button"
+                  >
+                    {resizeSubmitting ? "修改中…" : "修改"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {deleteTarget
+        ? createPortal(
+            <div
+              aria-label="删除图片"
+              aria-modal="true"
+              className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/32 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeDeleteDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-[340px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.18)]">
+                <h2 className="text-[16px] font-semibold text-slate-950">删除图片</h2>
+                <p className="mt-2 text-[13px] leading-6 text-slate-600">
+                  确认删除“{deleteTarget.title}”吗？该图片会从本次结果和生成记录中移除。
+                </p>
+                {deleteError ? <p className="mt-3 rounded-[8px] bg-red-50 px-3 py-2 text-[12px] text-red-700">{deleteError}</p> : null}
+                <div className="mt-5 flex justify-end gap-2">
+                  <button
+                    className="h-8 rounded-control bg-slate-100 px-3 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                    disabled={deleteSubmitting}
+                    onClick={closeDeleteDialog}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="h-8 rounded-control bg-red-600 px-4 text-[13px] font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-red-300"
+                    disabled={deleteSubmitting}
+                    onClick={() => void confirmDeleteImage()}
+                    type="button"
+                  >
+                    {deleteSubmitting ? "删除中…" : "确认删除"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {listingCopyTarget?.listingCopy
+        ? createPortal(
+            <ProductListingCopyDialog
+              copy={listingCopyTarget.listingCopy}
+              onClose={closeListingCopyDialog}
+              onCopy={(copy) => void copyProductListingCopy(copy)}
+            />,
+            document.body,
+          )
+        : null}
+      {imageRewriteTarget
+        ? createPortal(
+            <div
+              aria-label="输入微调方向"
+              aria-modal="true"
+              className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/32 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeImageRewriteDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="w-[360px] rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.16),0_8px_18px_rgba(15,23,42,0.08)]">
+                <div className="mb-3 flex items-center justify-between gap-4">
+                  <h2 className="text-[16px] font-semibold text-slate-950">输入微调方向</h2>
+                  <button
+                    aria-label="关闭微调弹窗"
+                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    onClick={closeImageRewriteDialog}
+                    type="button"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+                <textarea
+                  aria-label="输入调整要求"
+                  className="h-44 w-full resize-none rounded-[9px] border border-slate-200 bg-white px-3 py-3 text-[14px] leading-7 text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-slate-300"
+                  onChange={(event) => setImageRewritePrompt(event.target.value)}
+                  placeholder="输入调整要求，空着将默认重绘。如：商品向左移动一点，换成浅灰色背景..."
+                  value={imageRewritePrompt}
+                />
+                <div className="mt-4 flex justify-end">
+                  <button
+                    aria-label="重新生成"
+                    className="inline-flex h-8 items-center justify-center gap-1 rounded-control border border-slate-900 bg-[#1f1f21] px-3 text-[13px] font-medium text-white shadow-none transition-colors hover:bg-black"
+                    onClick={regenerateImage}
+                    type="button"
+                  >
+                    重新生成
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {textEditTarget
+        ? createPortal(
+            <div
+              aria-label="编辑文字"
+              aria-modal="true"
+              className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/32 p-8 backdrop-blur-[2px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && textEditPhase !== "submitting") {
+                  closeTextEditDialog();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="flex max-h-[520px] w-[360px] flex-col rounded-[14px] border border-white/80 bg-white p-5 shadow-[0_20px_46px_rgba(15,23,42,0.16),0_8px_18px_rgba(15,23,42,0.08)]">
+                <div className="mb-3 flex shrink-0 items-center justify-between gap-4">
+                  <h2 className="text-[16px] font-semibold text-slate-950">编辑文字</h2>
+                  <button
+                    aria-label="关闭编辑文字"
+                    className="grid size-7 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={textEditPhase === "submitting"}
+                    onClick={closeTextEditDialog}
+                    type="button"
+                  >
+                    <X className="size-5" />
+                  </button>
+                </div>
+                <div
+                  aria-busy={textEditPhase === "recognizing"}
+                  className="min-h-0 max-h-72 flex-1 space-y-3 overflow-y-auto pr-2 [scrollbar-color:rgba(148,163,184,0.72)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin]"
+                >
+                  {textEditPhase === "recognizing" ? <TextRecognitionSkeleton /> : null}
+                  {textEditPhase === "error" && textEditError ? (
+                    <div className="rounded-[9px] border border-rose-100 bg-rose-50/70 p-4 text-[13px] leading-6 text-rose-700">
+                      <p>{textEditError.message}</p>
+                      {textEditError.retryable ? (
+                        <button
+                          className="mt-3 inline-flex h-8 items-center justify-center rounded-control border border-rose-200 bg-white px-3 font-medium text-rose-700 transition-colors hover:bg-rose-50"
+                          onClick={retryTextRecognition}
+                          type="button"
+                        >
+                          重试
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {textEditPhase === "ready" || textEditPhase === "submitting"
+                    ? textEditValues.map((value, index) => (
+                        <input
+                          aria-label={`编辑文字 ${index + 1}`}
+                          className="h-10 w-full rounded-[9px] border border-slate-200 bg-slate-50/70 px-3 text-[14px] text-slate-700 outline-none transition-colors focus:border-app-blue focus:bg-white disabled:cursor-wait disabled:opacity-70"
+                          disabled={textEditPhase === "submitting"}
+                          key={textEditItems[index]?.id ?? `${textEditTarget.id}-${index}`}
+                          onChange={(event) => updateTextEditValue(index, event.target.value)}
+                          value={value}
+                        />
+                      ))
+                    : null}
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    className="inline-flex h-8 items-center justify-center rounded-control border border-slate-100 bg-slate-100 px-3 text-[13px] font-medium text-slate-800 shadow-none transition-colors hover:bg-slate-200/80 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={textEditPhase === "submitting"}
+                    onClick={closeTextEditDialog}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    aria-busy={textEditPhase === "submitting"}
+                    aria-label="确认改字"
+                    className="inline-flex h-8 items-center justify-center rounded-control border border-slate-900 bg-[#1f1f21] px-3 text-[13px] font-medium text-white shadow-none transition-colors hover:bg-black disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-400"
+                    disabled={!onImageTextRewrite || textEditPhase !== "ready" || textEditChanges.length === 0}
+                    onClick={() => void confirmTextEdit()}
+                    type="button"
+                  >
+                    确认改字
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {longPreviewOpen
+        ? createPortal(
+            <div
+              aria-label="长图预览"
+              aria-modal="true"
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-9 backdrop-blur-sm"
+              role="dialog"
+            >
+              <div className="flex h-[82vh] w-[82vw] max-w-[1180px] flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_24px_80px_rgba(0,0,0,0.34)]">
+                <div className="flex h-11 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+                  <div className="text-[13px] font-medium text-slate-700">生成结果 2026-06-29 15:52:34</div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      aria-busy={longImageDownloading}
+                      aria-label="下载长图"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[6px] bg-slate-100 px-2.5 text-[12px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                      disabled={downloadInProgress || longPreviewItems.length === 0}
+                      onClick={() => void downloadLongImage()}
+                      type="button"
+                    >
+                      <Download className="size-3.5" />
+                      {longImageDownloading ? "下载中…" : "下载长图"}
+                    </button>
+                    <button
+                      aria-busy={archiveDownloading}
+                      aria-label="下载全部图片"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[6px] bg-slate-100 px-2.5 text-[12px] font-medium text-slate-700 transition-colors hover:bg-slate-200"
+                      disabled={downloadInProgress}
+                      onClick={() => void downloadImagesZip(completedImages, "全部图片")}
+                      type="button"
+                    >
+                      <Download className="size-3.5" />
+                      {archiveDownloading ? "下载中…" : "下载全部图片"}
+                    </button>
+                    <button
+                      aria-label="关闭长图预览"
+                      className="grid size-7 place-items-center rounded-[6px] text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                      onClick={() => setLongPreviewOpen(false)}
+                      type="button"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto bg-white px-10 py-4">
+                  <div className="mx-auto w-full max-w-[620px]">
+                    {longPreviewItems.map((item, index) => (
+                      <div
+                        className={cn(
+                          "relative w-full overflow-hidden",
+                          item.src ? "bg-white" : generatedImageBackgrounds[index % generatedImageBackgrounds.length],
+                        )}
+                        data-testid="long-preview-image-section"
+                        key={item.id}
+                      >
+                        {item.src ? (
+                          <img
+                            alt={`长图 ${item.title}`}
+                            className="block h-auto w-full object-contain"
+                            draggable={false}
+                            src={item.src}
+                          />
+                        ) : (
+                          <div className="h-[384px] w-full" />
+                        )}
+                        {item.badge ? (
+                          <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/85 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+                            {item.badge}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {previewImage
+        ? createPortal(
+            <div
+              aria-label="图片相册预览"
+              aria-modal="true"
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/40 p-8 backdrop-blur-xl"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  closeImagePreview();
+                }
+              }}
+              role="dialog"
+            >
+              <div className="absolute left-8 top-7 text-sm font-semibold text-white">
+                {previewImageIndex + 1} / {completedImages.length}
+              </div>
+              <div className="absolute right-8 top-6 flex items-center gap-2">
+                <button
+                  aria-label="缩小图片"
+                  className="grid size-9 place-items-center rounded-full bg-white/12 text-white backdrop-blur-md transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={previewZoom <= 0.75}
+                  onClick={() => changePreviewZoom(-0.25)}
+                  type="button"
+                >
+                  <Minus className="size-4" />
+                </button>
+                <span className="w-14 text-center text-xs font-semibold text-white">{Math.round(previewZoom * 100)}%</span>
+                <button
+                  aria-label="放大图片"
+                  className="grid size-9 place-items-center rounded-full bg-white/12 text-white backdrop-blur-md transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={previewZoom >= 2}
+                  onClick={() => changePreviewZoom(0.25)}
+                  type="button"
+                >
+                  <Plus className="size-4" />
+                </button>
+                <button
+                  aria-label="关闭图片预览"
+                  className="ml-2 grid size-9 place-items-center rounded-full bg-white/12 text-white backdrop-blur-md transition-colors hover:bg-white/20"
+                  onClick={closeImagePreview}
+                  type="button"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+              <button
+                aria-label="上一张图片"
+                className="absolute left-8 grid size-11 place-items-center rounded-full bg-white/12 text-white backdrop-blur-md transition-colors hover:bg-white/20"
+                onClick={() => showAdjacentPreviewImage(-1)}
+                type="button"
+              >
+                <ChevronLeft className="size-5" />
+              </button>
+              <div className="relative flex max-h-[82vh] max-w-[78vw] flex-col items-center gap-4">
+                <div
+                  aria-label={`预览 ${previewImage.title}`}
+                  className={cn(
+                    "relative origin-center overflow-hidden rounded-[14px] shadow-[0_24px_80px_rgba(0,0,0,0.36)] transition-transform duration-200",
+                    previewImage.src
+                      ? "max-h-[68vh] max-w-[70vw] bg-transparent"
+                      : cn(
+                          "h-[68vh] w-[min(68vh,70vw)]",
+                          generatedImageBackgrounds[Math.max(previewImageIndex, 0) % generatedImageBackgrounds.length],
+                        ),
+                  )}
+                  onWheel={(event) => {
+                    event.preventDefault();
+                    changePreviewZoom(event.deltaY < 0 ? 0.25 : -0.25);
+                  }}
+                  style={{ transform: `scale(${previewZoom})` }}
+                >
+                  {previewImage.src ? (
+                    <img
+                      alt={previewImage.title}
+                      className="block h-auto w-auto max-h-[68vh] max-w-[70vw] object-contain"
+                      draggable={false}
+                      src={previewImage.src}
+                    />
+                  ) : null}
+                  {!previewImage.src ? (
+                    <div className="absolute inset-0 rounded-[14px] bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
+                  ) : null}
+                </div>
+                <div className="rounded-full bg-black/32 px-4 py-2 text-sm font-medium text-white backdrop-blur-md">
+                  {previewImage.title}
+                </div>
+              </div>
+              <button
+                aria-label="下一张图片"
+                className="absolute right-8 grid size-11 place-items-center rounded-full bg-white/12 text-white backdrop-blur-md transition-colors hover:bg-white/20"
+                onClick={() => showAdjacentPreviewImage(1)}
+                type="button"
+              >
+                <ChevronRight className="size-5" />
+              </button>
+              <div
+                className="absolute bottom-7 left-1/2 flex max-w-[72vw] -translate-x-1/2 gap-2 overflow-x-auto rounded-[16px] bg-black/24 p-2 backdrop-blur-xl [scrollbar-width:none]"
+                data-testid="image-lightbox-thumbnail-strip"
+              >
+                {completedImages.map((image, index) => (
+                  <button
+                    aria-label={`查看缩略图 ${image.title}`}
+                    className={cn(
+                      "h-14 w-14 shrink-0 overflow-hidden rounded-[10px] border transition-all duration-200",
+                      previewImage.id === image.id ? "border-white shadow-[0_0_0_2px_rgba(255,255,255,0.28)]" : "border-white/20 opacity-70 hover:opacity-100",
+                    )}
+                    key={image.id}
+                    onClick={() => {
+                      setPreviewImageId(image.id);
+                      setPreviewZoom(1);
+                    }}
+                    type="button"
+                  >
+                    {image.src ? (
+                      <img
+                        alt={`缩略图 ${image.title}`}
+                        className="block h-full w-full object-cover"
+                        draggable={false}
+                        src={image.src}
+                      />
+                    ) : (
+                      <span
+                        className={cn("block h-full w-full", generatedImageBackgrounds[index % generatedImageBackgrounds.length])}
+                      />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      <button
+        className="absolute bottom-5 right-5 grid size-9 place-items-center rounded-full border border-white/80 bg-white/80 text-[13px] font-semibold text-app-text shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_6px_16px_rgba(15,23,42,0.1)] backdrop-blur-xl transition-all duration-200 hover:bg-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_10px_22px_rgba(15,23,42,0.12)] active:scale-95"
+        type="button"
+      >
+        ?
+      </button>
+    </main>
+  );
+}
+
+function GeneratedSourceImageCard({ image }: { image: GeneratedDetailImage }) {
+  const sourceImages = image.sourceImages ?? [];
+
+  return (
+    <article
+      className="relative aspect-square overflow-hidden rounded-[8px] border-2 border-white/80 bg-slate-100 shadow-[0_1px_2px_rgba(15,23,42,0.06)]"
+      data-testid="generated-source-image-card"
+    >
+      <div className="absolute left-2 top-2 z-10 rounded-[5px] bg-slate-950/85 px-2 py-1 text-[11px] font-semibold leading-none text-white shadow-sm">
+        原图
+      </div>
+      {sourceImages.length > 0 ? (
+        <div className={cn("h-full w-full", sourceImages.length === 1 ? "block" : "grid grid-cols-2 gap-px bg-white")}>
+          {sourceImages.map((sourceImage) => (
+            <img
+              alt={sourceImage.name}
+              className="h-full w-full object-cover"
+              draggable={false}
+              key={sourceImage.id}
+              src={sourceImage.src}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="h-full w-full bg-[linear-gradient(135deg,#f8fafc,#dbe3ee)]" />
+      )}
+    </article>
+  );
+}
+
+function GeneratedListingCopyCard({
+  image,
+  onCopy,
+  onOpen,
+  onRetry,
+}: {
+  image: GeneratedDetailImage;
+  onCopy: (copy: ProductListingCopy) => void;
+  onOpen: () => void;
+  onRetry: () => void;
+}) {
+  const complete = image.status === "complete";
+  const failed = image.status === "failed";
+  const copy = image.listingCopy;
+
+  return (
+    <article
+      className="group relative aspect-square cursor-default overflow-hidden rounded-[8px] border-2 border-white/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all duration-200 hover:shadow-[0_10px_22px_rgba(15,23,42,0.14)]"
+      data-testid="listing-copy-result-card"
+    >
+      {complete && copy ? (
+        <div className="flex h-full w-full flex-col bg-white p-4 text-left">
+          <div className="flex items-center justify-between gap-3">
+            <span className="rounded-[6px] bg-blue-50 px-1.5 py-1 text-[12px] font-medium leading-none text-app-blue">
+              商品上架文案
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                aria-label="查看商品上架文案"
+                className="grid size-7 place-items-center rounded-[7px] text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-950"
+                onClick={onOpen}
+                type="button"
+              >
+                <Eye className="size-4" />
+              </button>
+              <button
+                aria-label="复制商品上架文案卡片"
+                className="grid size-7 place-items-center rounded-[7px] text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-950"
+                onClick={() => onCopy(copy)}
+                type="button"
+              >
+                <Copy className="size-4" />
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 h-px bg-slate-100" />
+          <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-hidden">
+            <ListingCopyPreviewSection title="宝贝标题" value={copy.title} />
+            <ListingCopyPreviewSection title="核心卖点/促销利益点" value={copy.sellingPoints[0] ?? ""} />
+            <ListingCopyPreviewSection title="详情页文案" value={copy.detailCopy} />
+            <ListingCopyPreviewSection title="搜索关键词/属性词" value={copy.keywords} />
+          </div>
+        </div>
+      ) : failed ? (
+        <div className="absolute inset-0 flex flex-col bg-white p-4 text-left">
+          <span className="w-fit rounded-[6px] bg-blue-50 px-1.5 py-1 text-[12px] font-medium leading-none text-app-blue">
+            商品上架文案
+          </span>
+          <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
+            <div className="grid size-11 place-items-center rounded-full border-[3px] border-slate-500/70 text-[28px] font-semibold leading-none text-slate-500/80">
+              !
+            </div>
+            <h2 className="mt-4 text-[15px] font-medium text-slate-500">生成失败</h2>
+            {image.errorMessage ? <p className="mt-2 line-clamp-2 text-[12px] leading-5 text-slate-400">{image.errorMessage}</p> : null}
+          </div>
+          <button
+            aria-label="重新生成商品上架文案"
+            className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
+            onClick={onRetry}
+            type="button"
+          >
+            重新生成
+          </button>
+        </div>
+      ) : (
+        <div className="absolute inset-0 grid place-items-center bg-[linear-gradient(135deg,#eef2f7,#e2e8f0)] text-slate-500">
+          <div className="flex flex-col items-center gap-3">
+            <div className="flex items-center gap-2" aria-hidden="true">
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:120ms]" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:240ms]" />
+            </div>
+            <span className="text-[13px] font-semibold">AI 生成中</span>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ListingCopyPreviewSection({ title, value }: { title: string; value: string }) {
+  return (
+    <section>
+      <h3 className="text-[12px] font-semibold leading-5 text-slate-950">{title}</h3>
+      <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-slate-400">{value}</p>
+    </section>
+  );
+}
+
+function GeneratedFailedResultCard({
+  image,
+  onDelete,
+  onRetry,
+  onSelect,
+  selected,
+}: {
+  image: GeneratedDetailImage;
+  onDelete: () => void;
+  onRetry: () => void;
+  onSelect: (selected: boolean) => void;
+  selected: boolean;
+}) {
+  const failedTitle = image.errorMessage === "生成中断" ? "生成中断" : "生成失败";
+
+  return (
+    <article
+      className={cn(
+        "group relative aspect-square cursor-default overflow-hidden rounded-[8px] border-2 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all duration-200 hover:border-slate-950/90 hover:shadow-[0_10px_22px_rgba(15,23,42,0.14)]",
+        selected ? "border-slate-950" : "border-transparent",
+      )}
+      data-testid="failed-result-card"
+    >
+      <div className={cn("absolute left-2 top-2 z-10 transition-opacity duration-200 group-hover:opacity-100", selected ? "opacity-100" : "opacity-0")}>
+        <input
+          aria-label={`选择 ${image.title}`}
+          checked={selected}
+          className="size-3.5 rounded-[4px] border-slate-300 bg-white text-app-blue shadow-sm focus:ring-app-blue/20"
+          onChange={(event) => onSelect(event.currentTarget.checked)}
+          type="checkbox"
+        />
+      </div>
+      <div className="absolute right-2 top-2 z-10 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+        <IconActionButton icon={Trash2} label={`删除 ${image.title}`} onClick={onDelete} />
+      </div>
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,#ffffff_0%,#eeeeef_46%,#a6a6a6_100%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_13%,rgba(255,255,255,0.72),transparent_42%)]" />
+      <div className="relative flex h-full flex-col items-center justify-center px-5 pb-14 pt-8 text-center">
+        <div className="grid size-11 place-items-center rounded-full border-[3px] border-slate-500/70 text-[28px] font-semibold leading-none text-slate-500/80">
+          !
+        </div>
+        <h2 className="mt-4 text-[15px] font-medium text-slate-500">{failedTitle}</h2>
+      </div>
+      <div className="absolute inset-x-2.5 bottom-2.5 translate-y-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100">
+        <button
+          aria-label={`重试 ${image.title}`}
+          className="inline-flex h-7 w-full items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
+          onClick={onRetry}
+          type="button"
+        >
+          重新生成
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function ProductListingCopyDialog({
+  copy,
+  onClose,
+  onCopy,
+}: {
+  copy: ProductListingCopy;
+  onClose: () => void;
+  onCopy: (copy: ProductListingCopy) => void;
+}) {
+  return (
+    <div
+      aria-label="商品上架文案"
+      aria-modal="true"
+      className="fixed inset-0 z-[115] flex items-center justify-center bg-black/42 p-6"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+      role="dialog"
+    >
+      <div className="flex max-h-[88vh] w-[min(96vw,1120px)] flex-col rounded-[26px] bg-white p-5 shadow-[0_28px_90px_rgba(15,23,42,0.28)]">
+        <header className="mb-4 flex shrink-0 items-center justify-between gap-4">
+          <h2 className="text-[18px] font-semibold text-slate-950">商品上架文案</h2>
+          <div className="flex items-center gap-2">
+            <button
+              aria-label="翻译"
+              className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-slate-100 px-4 text-[14px] font-medium text-slate-700 transition-colors hover:bg-slate-200/80"
+              type="button"
+            >
+              <Languages className="size-4" />
+              翻译
+              <span className="relative h-5 w-9 rounded-full bg-white shadow-inner">
+                <span className="absolute left-0.5 top-1/2 size-4 -translate-y-1/2 rounded-full bg-white shadow-[0_1px_4px_rgba(15,23,42,0.22)]" />
+              </span>
+            </button>
+            <button
+              aria-label="复制商品上架文案"
+              className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-slate-100 px-4 text-[14px] font-medium text-slate-700 transition-colors hover:bg-slate-200/80"
+              onClick={() => onCopy(copy)}
+              type="button"
+            >
+              <Copy className="size-4" />
+              复制
+            </button>
+            <button
+              aria-label="关闭商品上架文案"
+              className="grid size-9 place-items-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+              onClick={onClose}
+              type="button"
+            >
+              <X className="size-6" />
+            </button>
+          </div>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-[18px] bg-slate-100 px-5 py-4 text-slate-700 [scrollbar-width:thin] [scrollbar-color:rgba(148,163,184,0.48)_transparent]">
+          <ListingCopySection title="宝贝标题" value={copy.title} />
+          <ListingCopySection title="核心卖点/促销利益点" value={copy.sellingPoints.join("\n")} />
+          <ListingCopySection title="详情页文案" value={copy.detailCopy} />
+          <ListingCopySection title="搜索关键词/属性词" value={copy.keywords} />
+          <ListingCopySection title="主图拍摄规划" value={copy.shootingPlan.map((plan, index) => `${index + 1}. ${plan}`).join("\n")} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatProductListingCopy(copy: ProductListingCopy) {
+  return [
+    `宝贝标题\n${copy.title}`,
+    `核心卖点/促销利益点\n${copy.sellingPoints.join("\n")}`,
+    `详情页文案\n${copy.detailCopy}`,
+    `搜索关键词/属性词\n${copy.keywords}`,
+    `主图拍摄规划\n${copy.shootingPlan.map((plan, index) => `${index + 1}. ${plan}`).join("\n")}`,
+  ].join("\n\n");
+}
+
+function ListingCopySection({ title, value }: { title: string; value: string }) {
+  return (
+    <section className="py-4 first:pt-1">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <h3 className="text-[17px] font-semibold text-slate-950">{title}</h3>
+        <button
+          aria-label={`复制 ${title}`}
+          className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-[13px] font-medium text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
+          type="button"
+        >
+          <Copy className="size-4" />
+          复制
+        </button>
+      </div>
+      <p className="whitespace-pre-line text-[15px] leading-8 text-slate-600">{value}</p>
+    </section>
+  );
+}
+
+function GeneratedDetailImageCard({
+  image,
+  index,
+  downloadBusy,
+  downloadDisabled,
+  onOpenPreview,
+  onSelect,
+  onDownload,
+  onDelete,
+  onResize,
+  onRewrite,
+  onEditText,
+  selected,
+}: {
+  downloadBusy: boolean;
+  downloadDisabled: boolean;
+  image: GeneratedDetailImage;
+  index: number;
+  onDownload: () => void;
+  onDelete: () => void;
+  onEditText: () => void;
+  onOpenPreview: (image: GeneratedDetailImage) => void;
+  onResize: () => void;
+  onRewrite: () => void;
+  onSelect: (selected: boolean) => void;
+  selected: boolean;
+}) {
+  const complete = image.status === "complete";
+
+  return (
+    <article
+      className={cn(
+        "group relative aspect-square overflow-hidden rounded-[8px] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)] transition-all duration-200 hover:shadow-[0_10px_22px_rgba(15,23,42,0.14)]",
+        complete ? "cursor-zoom-in" : "cursor-default",
+        selected ? "border-2 border-slate-950" : "border-2 border-white/80",
+      )}
+      data-prompt={image.prompt}
+      data-testid="generated-detail-image-card"
+      onClick={() => {
+        if (complete) {
+          onOpenPreview(image);
+        }
+      }}
+    >
+      <div
+        className={cn(
+          "absolute inset-0",
+          complete && !image.src
+            ? generatedImageBackgrounds[index % generatedImageBackgrounds.length]
+            : "bg-[linear-gradient(135deg,#eef2f7,#e2e8f0)]",
+        )}
+      />
+      {complete && image.src ? (
+        <img
+          alt={image.title}
+          className="absolute inset-0 h-full w-full object-cover"
+          draggable={false}
+          src={image.src}
+        />
+      ) : null}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(255,255,255,0.72),transparent_42%)]" />
+
+      {complete ? (
+        <>
+          <div className={cn("absolute left-2 top-2 transition-opacity duration-200 group-hover:opacity-100", selected ? "opacity-100" : "opacity-0")}>
+            <input
+              aria-label={`选择 ${image.title}`}
+              className="size-3.5 rounded-[4px] border-white/80 bg-white/80 text-app-blue shadow-sm focus:ring-app-blue/20"
+              checked={selected}
+              onChange={(event) => onSelect(event.currentTarget.checked)}
+              onClick={(event) => event.stopPropagation()}
+              type="checkbox"
+            />
+          </div>
+          <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            <IconActionButton icon={Maximize2} label={`修改尺寸 ${image.title}`} onClick={onResize} />
+            <IconActionButton
+              busy={downloadBusy}
+              disabled={downloadDisabled}
+              icon={Download}
+              label={`下载 ${image.title}`}
+              onClick={onDownload}
+            />
+            <IconActionButton icon={Trash2} label={`删除 ${image.title}`} onClick={onDelete} />
+          </div>
+          <div className="absolute inset-x-0 bottom-0 h-[104px] bg-[linear-gradient(180deg,transparent,rgba(15,23,42,0.58)_24%,rgba(15,23,42,0.88))] px-2.5 pb-2.5 text-white">
+            <h2
+              className="absolute inset-x-2.5 bottom-10 translate-y-8 truncate text-[12px] font-medium transition-transform duration-300 ease-out group-hover:translate-y-0"
+              data-testid="generated-image-title"
+            >
+              {image.title}：{generatedImageSubtitles[index % generatedImageSubtitles.length]}
+            </h2>
+            <div
+              className="absolute inset-x-2.5 bottom-2.5 grid translate-y-2 grid-cols-2 gap-2 opacity-0 transition-all duration-300 ease-out group-hover:translate-y-0 group-hover:opacity-100"
+              data-testid="generated-image-card-actions"
+            >
+              <button
+                aria-label={`AI改图 ${image.title}`}
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRewrite();
+                }}
+                type="button"
+              >
+                <WandSparkles className="size-3" />
+                AI改图
+              </button>
+              <button
+                aria-label={`编辑文字 ${image.title}`}
+                className="inline-flex h-7 items-center justify-center gap-1 rounded-[6px] bg-[#e4e4e4] px-2 text-[11px] font-medium text-slate-700 transition-colors duration-300 ease-out hover:bg-[#3f3f3f] hover:text-white"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onEditText();
+                }}
+                type="button"
+              >
+                <Type className="size-3" />
+                编辑文字
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="absolute inset-0 grid place-items-center text-slate-500">
+          <div className="flex flex-col items-center gap-3">
+            <div className="flex items-center gap-2" aria-hidden="true">
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:120ms]" />
+              <span className="size-2.5 animate-pulse rounded-full bg-slate-400 [animation-delay:240ms]" />
+            </div>
+            <span className="text-[13px] font-semibold">AI 生成中</span>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function IconActionButton({
+  busy = false,
+  disabled = false,
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  busy?: boolean;
+  disabled?: boolean;
+  icon: LucideIcon;
+  label: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      aria-busy={busy}
+      aria-label={label}
+      className="grid size-7 place-items-center rounded-[7px] bg-white/86 text-slate-700 shadow-[0_4px_12px_rgba(15,23,42,0.14)] backdrop-blur-md transition-all hover:bg-white hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.();
+      }}
+      type="button"
+    >
+      <Icon className="size-3.5" />
+    </button>
+  );
+}
+
+const generatedResultFilePrefix = "生成结果-2026-06-29-1552";
+const generatedImageSize = { height: 600, width: 970 };
+const maxLongImageCanvasDimension = 16_000;
+const maxLongImageCanvasPixels = 16_000_000;
+const maxIpcDownloadBytes = 32 * 1024 * 1024;
+const maxArchiveSourceBytes = maxIpcDownloadBytes;
+const archiveSizeLimitMessage = "图片总大小超过 32 MB，请分组或分批下载";
+const fileSizeLimitMessage = "图片文件超过 32 MB，当前版本无法下载";
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function downloadErrorMessage(error: unknown, fallback: string) {
+  if (
+    error instanceof Error &&
+    (error.message === archiveSizeLimitMessage || error.message === fileSizeLimitMessage)
+  ) {
+    return error.message;
+  }
+  return fallback;
+}
+
+function matchesTextEditIdentity(
+  current: TextEditDialogIdentity | null,
+  expected: TextEditDialogIdentity,
+) {
+  return (
+    current?.sessionId === expected.sessionId &&
+    current.scopeId === expected.scopeId &&
+    current.targetImageId === expected.targetImageId &&
+    current.sourceAssetId === expected.sourceAssetId
+  );
+}
+
+function normalizeTextRecognitionError(error: unknown): TextEditRecognitionError {
+  if (error instanceof ImageTextRecognitionError) {
+    return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  return {
+    code: "UNKNOWN_ERROR",
+    message: errorMessage(error, "图片文字识别失败。"),
+    retryable: false,
+  };
+}
+
+function createResultImageTextChanges(
+  items: RecognizedImageTextItem[],
+  values: string[],
+): ResultImageTextChange[] {
+  return items.flatMap((item, index): ResultImageTextChange[] => {
+    const originalText = item.text.trim();
+    const replacementText = (values[index] ?? "").trim();
+    if (replacementText === originalText) {
+      return [];
+    }
+    if (!replacementText) {
+      return [{ box: item.box, lineId: item.id, operation: "delete", originalText }];
+    }
+    return [
+      {
+        box: item.box,
+        lineId: item.id,
+        operation: "replace",
+        originalText,
+        replacementText,
+      },
+    ];
+  });
+}
+
+function TextRecognitionSkeleton() {
+  return (
+    <div data-testid="image-text-recognition-skeleton">
+      <span className="sr-only" role="status">
+        正在识别图片文字
+      </span>
+      <div aria-hidden="true" className="space-y-3">
+        {Array.from({ length: 5 }, (_, index) => (
+          <div
+            className="h-10 animate-pulse rounded-[9px] border border-slate-100 bg-slate-100"
+            key={index}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function imageSizeOptionLabel(option: ImageSizeOption) {
+  return option.label.replace(/(\d)x(\d)/g, "$1×$2");
+}
+
+function findClosestImageSizeOption(image: GeneratedDetailImage, options: ImageSizeOption[]) {
+  if (options.length === 0) {
+    return undefined;
+  }
+  const currentRatio =
+    image.width && image.height
+      ? image.width / image.height
+      : parseImageRatio(image.ratio) ?? parseImageRatio(options[0].ratio) ?? 1;
+
+  return options.reduce((closest, option) => {
+    const closestRatio = parseImageRatio(closest.ratio) ?? closest.width / closest.height;
+    const optionRatio = parseImageRatio(option.ratio) ?? option.width / option.height;
+    return Math.abs(Math.log(currentRatio / optionRatio)) < Math.abs(Math.log(currentRatio / closestRatio))
+      ? option
+      : closest;
+  });
+}
+
+function parseImageRatio(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const [width, height] = value.split(":").map(Number);
+  if (!width || !height || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return width / height;
+}
+
+function generatedImageFileExtension(image: GeneratedDetailImage, mimeType: string) {
+  const pathExtension = image.assetRelativePath
+    ?.split(/[?#]/, 1)[0]
+    .match(/\.([a-zA-Z0-9]+)$/)?.[1]
+    ?.toLowerCase();
+  if (pathExtension && ["png", "jpg", "jpeg", "webp"].includes(pathExtension)) {
+    return pathExtension;
+  }
+  if (mimeType === "image/jpeg") {
+    return "jpg";
+  }
+  if (mimeType === "image/webp") {
+    return "webp";
+  }
+  return "png";
+}
+
+const generatedImageBackgrounds = [
+  "bg-[linear-gradient(135deg,#111827,#334155_38%,#94a3b8_39%,#0f172a_68%,#020617)]",
+  "bg-[linear-gradient(145deg,#f8fafc,#cbd5e1_48%,#64748b)]",
+  "bg-[linear-gradient(135deg,#0f172a,#1d4ed8_42%,#111827_43%,#2563eb)]",
+  "bg-[linear-gradient(145deg,#f8fafc,#e2e8f0_44%,#94a3b8_45%,#334155)]",
+  "bg-[linear-gradient(145deg,#f8fafc,#d1d5db_48%,#111827)]",
+];
+
+const generatedImageSubtitles = [
+  "突出商品核心卖点，强化购买决策",
+  "展示多场景适配性，提升代入感",
+  "清晰展示尺码参数，降低选码误差",
+  "展示完整产品信息，打消决策顾虑",
+  "传递品牌运动潮流理念，建立用户信任",
+];
+
+function sanitizeFilename(name: string) {
+  return name.replace(/[\\/:*?"<>|]/g, "-");
+}
+
+function createLongPreviewImageItems(images: GeneratedDetailImage[]): LongPreviewImageItem[] {
+  const items: LongPreviewImageItem[] = [];
+
+  images.forEach((image) => {
+    if (image.status !== "complete" || image.kind === "listing-copy" || image.kind === "source-image") {
+      return;
+    }
+
+    items.push({
+      height: image.height,
+      id: image.id,
+      src: image.src,
+      title: image.title,
+      width: image.width,
+    });
+  });
+
+  return items;
+}
+
+async function blobToBytes(blob: Blob) {
+  if (typeof blob.arrayBuffer !== "function") {
+    throw new Error("当前环境无法读取生成图片。");
+  }
+
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+async function readGeneratedImageFile(
+  image: GeneratedDetailImage,
+  maximumBytes?: number,
+  sizeLimitMessage = fileSizeLimitMessage,
+) {
+  if (!image.src) {
+    throw new Error("生成图片缺少可下载资源。");
+  }
+
+  const response = await fetch(image.src);
+  if (!response.ok) {
+    throw new Error(`读取生成资产失败：${response.status}`);
+  }
+  const contentLength = response.headers.get("content-length");
+  if (maximumBytes !== undefined && contentLength !== null && Number(contentLength) > maximumBytes) {
+    throw new Error(sizeLimitMessage);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length === 0) {
+    throw new Error("生成图片内容为空。");
+  }
+  if (maximumBytes !== undefined && bytes.length > maximumBytes) {
+    throw new Error(sizeLimitMessage);
+  }
+  const mimeType = response.headers.get("content-type")?.split(";", 1)[0]?.trim() ?? "";
+  return {
+    bytes,
+    extension: generatedImageFileExtension(image, mimeType),
+  };
+}
+
+async function createLongImageBlob(items: LongPreviewImageItem[]) {
+  if (items.length === 0) {
+    throw new Error("没有可下载的生成图片。");
+  }
+
+  const assets: LongImageAsset[] = [];
+  let sourceBytes = 0;
+  for (const item of items) {
+    if (!item.src) {
+      throw new Error("生成图片缺少可下载资源。");
+    }
+    const response = await fetch(item.src);
+    if (!response.ok) {
+      throw new Error(`读取生成资产失败：${response.status}`);
+    }
+    const contentLength = response.headers.get("content-length");
+    if (
+      contentLength !== null &&
+      Number(contentLength) > maxIpcDownloadBytes - sourceBytes
+    ) {
+      throw new Error(fileSizeLimitMessage);
+    }
+    const blob = await response.blob();
+    if (blob.size === 0) {
+      throw new Error("生成图片内容为空。");
+    }
+    sourceBytes += blob.size;
+    if (sourceBytes > maxIpcDownloadBytes) {
+      throw new Error(fileSizeLimitMessage);
+    }
+
+    let width = item.width;
+    let height = item.height;
+    if (!width || !height || width <= 0 || height <= 0) {
+      const decoded = await decodeImageBlobForCanvas(blob);
+      try {
+        width = decoded.width;
+        height = decoded.height;
+      } finally {
+        decoded.release();
+      }
+    }
+    if (!width || !height || width <= 0 || height <= 0) {
+      throw new Error("无法读取生成图片尺寸。");
+    }
+    assets.push({ blob, height, item, width });
+  }
+
+  const baseHeight = assets.reduce(
+    (sum, asset) => sum + (generatedImageSize.width / asset.width) * asset.height,
+    0,
+  );
+  const scale = Math.min(
+    1,
+    maxLongImageCanvasDimension / generatedImageSize.width,
+    maxLongImageCanvasDimension / baseHeight,
+    Math.sqrt(maxLongImageCanvasPixels / (generatedImageSize.width * baseHeight)),
+  );
+  const canvasWidth = Math.floor(generatedImageSize.width * scale);
+  const actualScale = Math.min(
+    canvasWidth / generatedImageSize.width,
+    maxLongImageCanvasDimension / baseHeight,
+    Math.sqrt(maxLongImageCanvasPixels / (generatedImageSize.width * baseHeight)),
+  );
+  const canvasHeight = Math.floor(baseHeight * actualScale);
+  if (canvasWidth <= 0 || canvasHeight <= 0) {
+    throw new Error("生成图片数量过多，无法合成长图。");
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
+  const context = getCanvasContext(canvas);
+  if (!context) {
+    throw new Error("当前环境无法创建长图画布。");
+  }
+  context.scale(actualScale, actualScale);
+
+  let y = 0;
+  for (const asset of assets) {
+    const sectionHeight = (generatedImageSize.width / asset.width) * asset.height;
+    const decoded = await decodeImageBlobForCanvas(asset.blob);
+    try {
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, y, generatedImageSize.width, sectionHeight);
+      context.drawImage(decoded.source, 0, y, generatedImageSize.width, sectionHeight);
+      if (asset.item.badge) {
+        drawLongPreviewBadge(context, asset.item.badge, 24, y + 24);
+      }
+    } finally {
+      decoded.release();
+    }
+    y += sectionHeight;
+  }
+
+  return canvasToPngBlob(canvas);
+}
+
+function getCanvasContext(canvas: HTMLCanvasElement) {
+  try {
+    return canvas.getContext("2d");
+  } catch {
+    return null;
+  }
+}
+
+function decodeImageBlobForCanvas(blob: Blob): Promise<DecodedCanvasImage> {
+  if (typeof createImageBitmap === "function") {
+    return createImageBitmap(blob).then((image) => ({
+      height: image.height,
+      release: () => image.close(),
+      source: image,
+      width: image.width,
+    }));
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve({
+      height: image.naturalHeight || image.height,
+      release: () => {
+        image.src = "";
+        URL.revokeObjectURL(objectUrl);
+      },
+      source: image,
+      width: image.naturalWidth || image.width,
+    });
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("图片加载失败。"));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function drawLongPreviewBadge(context: CanvasRenderingContext2D, label: string, x: number, y: number) {
+  context.save();
+  context.font = "700 22px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+  const width = Math.ceil(context.measureText(label).width + 32);
+  const height = 34;
+  context.fillStyle = "rgba(15,23,42,0.85)";
+  fillRoundedRect(context, x, y, width, height, 10);
+  context.fillStyle = "#ffffff";
+  context.textBaseline = "middle";
+  context.fillText(label, x + 16, y + height / 2 + 1);
+  context.restore();
+}
+
+function fillRoundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const right = x + width;
+  const bottom = y + height;
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(right - radius, y);
+  context.quadraticCurveTo(right, y, right, y + radius);
+  context.lineTo(right, bottom - radius);
+  context.quadraticCurveTo(right, bottom, right - radius, bottom);
+  context.lineTo(x + radius, bottom);
+  context.quadraticCurveTo(x, bottom, x, bottom - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+  context.fill();
+}
+
+function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    if (!canvas.toBlob) {
+      reject(new Error("当前环境无法生成 PNG 长图。"));
+      return;
+    }
+
+    try {
+      canvas.toBlob((blob) => {
+        if (!blob || blob.type.toLowerCase() !== "image/png") {
+          reject(new Error("当前环境无法生成 PNG 长图。"));
+          return;
+        }
+        resolve(blob);
+      }, "image/png");
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function createZipBytes(files: Array<{ bytes: Uint8Array; name: string }>) {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  files.forEach((file) => {
+    const nameBytes = encoder.encode(file.name);
+    const crc = crc32(file.bytes);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, 0, true);
+    localView.setUint16(12, 0, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, file.bytes.length, true);
+    localView.setUint32(22, file.bytes.length, true);
+    localView.setUint16(26, nameBytes.length, true);
+    localHeader.set(nameBytes, 30);
+    localParts.push(localHeader, file.bytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0800, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, 0, true);
+    centralView.setUint16(14, 0, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, file.bytes.length, true);
+    centralView.setUint32(24, file.bytes.length, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+    centralParts.push(centralHeader);
+
+    offset += localHeader.length + file.bytes.length;
+  });
+
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const endRecord = new Uint8Array(22);
+  const endView = new DataView(endRecord.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+
+  return concatBytes([...localParts, ...centralParts, endRecord]);
+}
+
+function concatBytes(parts: Uint8Array[]) {
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  parts.forEach((part) => {
+    result.set(part, offset);
+    offset += part.length;
+  });
+  return result;
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createGeneratedResultGroups(images: GeneratedDetailImage[]) {
+  const groupedImages = images.filter((image) => image.groupId);
+  if (groupedImages.length === 0) {
+    return [];
+  }
+
+  const groupMap = new Map<string, { id: string; images: GeneratedDetailImage[]; title: string }>();
+  for (const image of groupedImages) {
+    const groupId = image.groupId ?? image.id;
+    const currentGroup = groupMap.get(groupId);
+    if (currentGroup) {
+      currentGroup.images.push(image);
+    } else {
+      groupMap.set(groupId, {
+        id: groupId,
+        images: [image],
+        title: image.groupTitle ?? "生成结果",
+      });
+    }
+  }
+
+  return Array.from(groupMap.values());
+}

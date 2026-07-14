@@ -1,0 +1,3 @@
+{"file":"desktop/src/app/components/StudioToolbar.test.tsx","reason":"窗口拖动、双击、平台布局和按钮显示回归"}
+{"file":"desktop/src/shared/ui/platform-window-controls.test.tsx","reason":"Windows 最小化、最大化和关闭动作验证"}
+{"file":"desktop/src-tauri/capabilities/default.json","reason":"自绘窗口操作所需 Tauri 权限核对"}
