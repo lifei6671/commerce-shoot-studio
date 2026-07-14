@@ -2018,7 +2018,7 @@ SaaS 版本中：
 
 ## 12. 跨平台兼容约束
 
-MVP 必须同时考虑 macOS 和 Windows。平台差异由 Rust runtime 和 Shell adapter 屏蔽，React 页面不写平台分支。
+MVP 必须同时考虑 macOS 和 Windows。业务能力与 IO 差异由 Rust runtime、Shell adapter 和 Runtime Ports 屏蔽，React feature 页面不写平台分支。AppShell、标题栏等宿主 chrome 可以使用 WebView 可执行的显式平台识别选择平台布局，但不得借此绕过 Runtime Ports 调用业务能力。
 
 ### 12.1 路径与文件名
 
@@ -2049,8 +2049,8 @@ MVP 必须同时考虑 macOS 和 Windows。平台差异由 Rust runtime 和 Shel
 - MVP 不依赖 macOS Keychain 或 Windows Credential Manager，secret 统一由 SQLite 本地密钥表保存。
 - Rust runtime 必须在初始化 workspace 时尽力设置目录和 DB 文件权限；Windows 下使用当前用户 ACL，避免 Everyone / Users 可写。
 - `ShellPort.revealPath` 在 macOS 映射 Finder，在 Windows 映射 Explorer。
-- 系统通知、开机启动、托盘、窗口控制等能力只能通过 `RuntimeInfoPort.features` 暴露给 UI。
-- Windows 11 下应优先保留符合平台预期的窗口控制；自绘标题栏必须验证拖拽区域、缩放和高 DPI。
+- 系统通知、开机启动、托盘等能力通过 `RuntimeInfoPort.features` 暴露给 UI；当前窗口的拖动、最小化、最大化和关闭由共享 AppShell chrome 调用 Tauri window API，不下沉到业务 feature。
+- Windows 使用平台专属 Tauri 配置关闭原生 decorations，显示 44px 自绘标题栏和三枚窗口按钮；应用内层不再重复绘制外框圆角和白色边框，由 Windows 11 系统窗口负责圆角裁切，保证关闭按钮悬停背景贴合右上外框。最大化按钮在窗口 resize 后读取真实 `isMaximized` 状态：普通状态显示单方框和“最大化”，最大化状态显示双方框和“还原”。Windows 继续启用 `shadow: true` 保留 DWM 阴影与圆角，并在 Tauri setup 中用 `DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE` 抑制蓝色/强调色系统外框，再将 Tao 为阴影保留的顶部非客户区 `DWMWA_CAPTION_COLOR` 设为标题栏白色，消除顶部蓝线；不支持相关属性时输出固定 warning 并继续启动。macOS 保持 `decorations: true`、Overlay 标题栏及原生交通灯。Windows 自绘标题栏必须验证拖动、双击最大化、交互控件隔离、关闭按钮贴边、最大化/还原图标同步、聚焦/失焦无强调色边框、边缘缩放、高 DPI 和最大化/还原布局；原生 Snap Layout 悬停菜单当前不在范围内。
 
 ## 13. 单机到 SaaS 的切换策略
 
@@ -2422,4 +2422,4 @@ Windows：
 10. PromptPlan 当前状态和 Task 执行快照必须分离。
 11. MVP 不开放任意 custom gateway。
 12. MVP 后台本地任务最多并发 4 个；同步执行器和单元测试固定为 1，真实 Provider 调用另受进程级限流池约束。
-13. macOS / Windows 平台差异只能由 runtime adapter 屏蔽，React 页面不写平台分支。
+13. macOS / Windows 的业务能力和 IO 差异由 runtime adapter 屏蔽，React feature 页面不写平台分支；AppShell、标题栏等宿主 chrome 可以显式选择平台布局，但不得绕过 Runtime Ports 调用业务能力。

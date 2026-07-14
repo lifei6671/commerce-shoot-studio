@@ -46,6 +46,64 @@ Questions to answer:
 
 ## Code Review Checklist
 
+## Scenario: Windows DWM border suppression
+
+### 1. Scope / Trigger
+
+- Trigger: the borderless Windows Tauri main window keeps `shadow: true` for DWM shadow and rounded corners but must not draw the focused blue/accent border.
+
+### 2. Signatures
+
+- Startup hook: `configure_windows_dwm_border(app: &tauri::App) -> Result<(), &'static str>`.
+- Native calls: `DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE)` and `DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, 0x00FFFFFF)`.
+- Direct dependency: target-specific `windows 0.61` with only `Win32_Foundation` and `Win32_Graphics_Dwm`.
+
+### 3. Contracts
+
+- All dependency imports, native code, and setup calls are compiled only for `target_os = "windows"`.
+- The HWND comes from the already-created Tauri `main` window during setup.
+- Keep `decorations: false` and `shadow: true`; suppress the DWM border color and paint Tao's retained top non-client strip with the app's white titlebar color.
+- Do not subclass `WM_NCCALCSIZE`, disable `WS_THICKFRAME`, or turn off the system shadow for this cosmetic fix.
+- The `unsafe` block covers only `DwmSetWindowAttribute`, with a safety comment describing the live HWND, pointer lifetime, and COLORREF size.
+- No Runtime Port, command, DTO, capability, or frontend API exposes this startup-only host configuration.
+
+### 4. Validation & Error Matrix
+
+- Missing main window or unavailable HWND -> return a fixed internal error.
+- Unsupported DWM attribute or native call failure -> emit one fixed warning and continue startup.
+- Supported Windows 11 calls succeed -> no warning, no system accent border, and no blue top non-client strip.
+- Non-Windows build -> no Windows dependency import or DWM call is compiled.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Windows 11 retains system shadow and rounded corners without a blue focused border or top line.
+- Base: an older Windows version retains its default border and the application still opens.
+- Bad: set `shadow: false` and unintentionally remove the shadow, or fail application startup for a cosmetic DWM error.
+
+### 6. Tests Required
+
+- Run Rust formatting, compile checks, and library tests on Windows.
+- Build a Windows Release executable through Tauri so the platform config and setup hook compile together.
+- Manually verify focus/unfocus, shadow, corners, maximize/restore, tray restore, and multiple DPI values on Windows 11.
+- Keep macOS regression verification because the Windows dependency and setup call must remain cfg-gated.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+window.set_shadow(false)?;
+```
+
+#### Correct
+
+```rust
+#[cfg(target_os = "windows")]
+if configure_windows_dwm_border(app).is_err() {
+    eprintln!("警告：无法完整配置 Windows 系统窗口边框，将继续启动。");
+}
+```
+
 ## Scenario: Structured AI Prompt Plan Validation
 
 ### 1. Scope / Trigger

@@ -386,6 +386,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-dialog",
  "tokio",
+ "windows",
 ]
 
 [[package]]

@@ -1,0 +1,18 @@
+{
+  "$schema": "./gen/schemas/desktop-schema.json",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "商拍工坊",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true
+      }
+    ]
+  }
+}

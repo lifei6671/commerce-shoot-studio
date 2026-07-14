@@ -5,11 +5,15 @@ import { StudioToolbar } from "./StudioToolbar";
 
 const toggleMaximize = vi.fn();
 const startDragging = vi.fn();
+const isMaximized = vi.fn();
+const onResized = vi.fn();
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     close: vi.fn(),
+    isMaximized,
     minimize: vi.fn(),
+    onResized,
     startDragging,
     toggleMaximize,
   }),
@@ -18,6 +22,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 describe("StudioToolbar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    isMaximized.mockResolvedValue(false);
+    onResized.mockResolvedValue(vi.fn());
     startDragging.mockResolvedValue(undefined);
     toggleMaximize.mockResolvedValue(undefined);
   });
@@ -79,11 +85,27 @@ describe("StudioToolbar", () => {
     expect(toggleMaximize).not.toHaveBeenCalled();
   });
 
-  it("keeps macOS traffic lights native while rendering Windows custom controls", () => {
-    render(<StudioToolbar />);
+  it("uses the compact toolbar layout and custom controls on Windows", () => {
+    render(<StudioToolbar platform="windows" />);
 
-    expect(screen.queryByLabelText("macOS 窗口控制")).not.toBeInTheDocument();
+    expect(screen.getByRole("banner", { name: "应用工具栏" })).toHaveClass(
+      "h-11",
+      "bg-white/[0.82]",
+    );
+    expect(screen.getByLabelText("品牌区")).toHaveClass("pl-3");
+    expect(screen.getByText("商拍工坊")).toHaveClass("text-[12px]");
+    expect(screen.getByLabelText("任务操作区")).toHaveClass("gap-2", "pr-0");
     expect(screen.getByLabelText("Windows 窗口控制")).toBeInTheDocument();
+  });
+
+  it("keeps the current toolbar layout and native traffic lights on macOS", () => {
+    render(<StudioToolbar platform="macos" />);
+
+    expect(screen.getByRole("banner", { name: "应用工具栏" })).toHaveClass("h-[52px]");
+    expect(screen.getByLabelText("品牌区")).toHaveClass("pl-[92px]");
+    expect(screen.getByText("商拍工坊")).toHaveClass("text-[13px]");
+    expect(screen.getByLabelText("任务操作区")).toHaveClass("gap-3", "pr-3");
+    expect(screen.queryByLabelText("Windows 窗口控制")).not.toBeInTheDocument();
   });
 
   it("splits brand and task actions across the left panel divider", () => {

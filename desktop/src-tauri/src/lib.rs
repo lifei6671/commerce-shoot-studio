@@ -3,6 +3,8 @@ pub mod domain;
 pub mod infrastructure;
 pub mod services;
 
+#[cfg(target_os = "windows")]
+use crate::services::desktop_runtime::configure_windows_dwm_border;
 use crate::services::desktop_runtime::{handle_main_window_event, setup_system_tray};
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -18,6 +20,10 @@ pub fn run() {
         ))
         .setup(|app| {
             setup_system_tray(app)?;
+            #[cfg(target_os = "windows")]
+            if configure_windows_dwm_border(app).is_err() {
+                eprintln!("警告：无法完整配置 Windows 系统窗口边框，将继续启动。");
+            }
             Ok(())
         })
         .on_window_event(handle_main_window_event)

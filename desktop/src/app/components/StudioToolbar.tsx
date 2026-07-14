@@ -1,6 +1,11 @@
 import { FolderPlus, History, Settings } from "lucide-react";
 import type { MouseEvent, PointerEvent, ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { cn } from "../../shared/lib/cn";
+import {
+  detectDesktopPlatform,
+  type DesktopPlatform,
+} from "../../shared/lib/desktop-platform";
 import { Button } from "../../shared/ui/button";
 import { IconButton } from "../../shared/ui/icon-button";
 import { PlatformWindowControls } from "../../shared/ui/platform-window-controls";
@@ -16,6 +21,7 @@ type StudioToolbarProps = {
   onNewTask?: () => void;
   onOpenSettings?: () => void;
   onToggleHistory?: () => void;
+  platform?: DesktopPlatform;
 };
 
 export function StudioToolbar({
@@ -26,7 +32,10 @@ export function StudioToolbar({
   onNewTask,
   onOpenSettings,
   onToggleHistory,
+  platform = detectDesktopPlatform(),
 }: StudioToolbarProps) {
+  const isWindows = platform === "windows";
+
   function isInteractiveTarget(target: EventTarget | null) {
     return target instanceof Element && target.closest(interactiveSelector);
   }
@@ -50,25 +59,41 @@ export function StudioToolbar({
   return (
     <header
       aria-label="应用工具栏"
-      className="desktop-hairline relative z-10 grid h-[52px] shrink-0 grid-cols-[var(--studio-side-width)_minmax(0,1fr)] items-center border-b border-white/70 bg-white/70 backdrop-blur-2xl supports-[backdrop-filter]:bg-white/60 [@media(platform:windows)]:h-11 [@media(platform:windows)]:bg-white/82"
+      className={cn(
+        "desktop-hairline relative z-10 grid shrink-0 grid-cols-[var(--studio-side-width)_minmax(0,1fr)] items-center border-b border-white/70 backdrop-blur-2xl",
+        isWindows
+          ? "h-11 bg-white/[0.82]"
+          : "h-[52px] bg-white/70 supports-[backdrop-filter]:bg-white/60",
+      )}
       data-tauri-drag-region
       onDoubleClick={handleToolbarDoubleClick}
       onPointerDown={handleToolbarPointerDown}
     >
       <div
         aria-label="品牌区"
-        className="flex min-w-0 items-center pl-[92px] pr-4 [@media(platform:windows)]:pl-3"
+        className={cn(
+          "flex min-w-0 items-center pr-4",
+          isWindows ? "pl-3" : "pl-[92px]",
+        )}
       >
-        <div className="-translate-y-[3px] truncate text-[13px] font-semibold leading-none tracking-normal [@media(platform:windows)]:text-[12px]">
+        <div
+          className={cn(
+            "-translate-y-[3px] truncate font-semibold leading-none tracking-normal",
+            isWindows ? "text-[12px]" : "text-[13px]",
+          )}
+        >
           商拍工坊
         </div>
       </div>
 
       <div
         aria-label="任务操作区"
-        className="flex h-full min-w-0 items-center justify-end gap-3 pl-4 pr-3 [@media(platform:windows)]:gap-2 [@media(platform:windows)]:pr-0"
+        className={cn(
+          "flex h-full min-w-0 items-center justify-end pl-4",
+          isWindows ? "gap-2 pr-0" : "gap-3 pr-3",
+        )}
       >
-        <div className="flex items-center gap-2 [@media(platform:windows)]:h-full [@media(platform:windows)]:gap-1">
+        <div className={cn("flex items-center", isWindows ? "h-full gap-1" : "gap-2")}>
           {hidePrimaryAction ? null : (
             <Button data-window-interactive onClick={onNewTask} size="sm" variant="soft">
               <FolderPlus className="size-3.5" />
@@ -99,10 +124,7 @@ export function StudioToolbar({
             <Settings className="size-4" />
           </IconButton>
           <div className="size-7 rounded-full border border-white bg-[linear-gradient(135deg,#111827,#64748b)] shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_4px_10px_rgba(15,23,42,0.16)]" />
-          <PlatformWindowControls
-            className="ml-1 hidden [@media(platform:windows)]:flex"
-            variant="windows"
-          />
+          {isWindows ? <PlatformWindowControls className="ml-1" variant="windows" /> : null}
         </div>
       </div>
     </header>

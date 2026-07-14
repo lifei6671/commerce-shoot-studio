@@ -1143,6 +1143,13 @@ Provider 视觉效果仍待人工验收，本项不标记完成。
 - [ ] Windows 下 workspace 目录和 SQLite 文件仅当前用户可读写。
 - [ ] Explorer reveal 通过 `ShellPort`。
 - [ ] Windows 真机完成导入、删除、GC、生成结果保存验收。
+- [ ] Windows 专属 Tauri 配置关闭原生 decorations；macOS 保持 Overlay 和原生交通灯。
+- [ ] Windows 顶栏为 44px、品牌左间距为 12px，三枚窗口按钮调用 `minimize` / `toggleMaximize` / `close`；最大化按钮通过真实 `isMaximized` 状态切换单方框“最大化”和双方框“还原”。
+- [ ] Windows 应用内层不重复绘制外框圆角和白色边框，关闭按钮悬停背景贴合右上系统外框且不露白。
+- [ ] Windows 11 通过 `DWMWA_COLOR_NONE` 消除聚焦/失焦时的 DWM 强调色外框，并将 Tao 保留的顶部非客户区设为标题栏白色，同时保留系统阴影和圆角；旧系统失败时 warning 后继续启动。
+- [ ] 标题栏空白区支持拖动和双击最大化，交互控件不会误触发窗口操作。
+- [ ] Windows 11 真机验证边缘缩放、最大化/还原、高 DPI 和无 macOS 交通灯占位。
+- [ ] macOS 真机回归 52px 顶栏、92px 交通灯预留和原生窗口按钮。
 
 ### 桌面双架构打包脚本
 

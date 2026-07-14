@@ -52,6 +52,59 @@ Questions to answer:
 
 ---
 
+## Scenario: Windows custom titlebar frame ownership
+
+### Scope / Trigger
+
+- Trigger: `AppShell` renders a borderless Windows window with HTML minimize, maximize, and close controls.
+
+### Contract
+
+- Windows uses `rounded-none border-0` on the application-owned inner frame. Windows 11 and Tauri own the outer corner clipping and system border.
+- macOS keeps the existing `rounded-[22px] border border-white/70` shell styling and native traffic lights.
+- Do not repair a Windows corner gap with button negative margins or a second large button radius; `overflow-hidden` makes those approaches preserve or worsen the mismatch.
+
+### Good / Bad Cases
+
+- Good: the Windows close-button hover background reaches the right and top client edges and is clipped once by the system frame.
+- Bad: a 22px application radius clips the close-button background inside the already-rounded Windows frame, leaving a visible white seam.
+
+### Tests Required
+
+- Assert the Windows frame has `rounded-none border-0` and does not have `rounded-[22px] border-white/70`.
+- Assert the macOS frame retains `rounded-[22px] border border-white/70`.
+- Keep a Windows 11 manual hover check in the platform acceptance checklist because JSDOM cannot verify DWM corner anti-aliasing.
+
+### Wrong vs Correct
+
+```tsx
+// Wrong: duplicates Windows system corner clipping.
+<div className="overflow-hidden rounded-[22px] border border-white/70" />
+
+// Correct: lets the system window own the Windows outer frame.
+<div className={platform === "windows" ? "rounded-none border-0" : "rounded-[22px] border border-white/70"} />
+```
+
+---
+
+## Scenario: Windows maximize control state
+
+### Contract
+
+- The Windows maximize control reads `getCurrentWindow().isMaximized()` on mount, immediately after the native resize listener is installed, and after native resize events; never infer maximize state from viewport dimensions.
+- Normal state uses the single-square icon and accessible name `Windows 最大化窗口`; maximized state uses the overlapping-square icon and `Windows 还原窗口`.
+- Only the Windows branch subscribes to `onResized`. Cleanup must handle both an installed listener and an unlisten function that resolves after unmount.
+- Rapid resize queries use latest-result-wins semantics so an older response cannot overwrite newer window state.
+- The capability grants only `core:window:allow-is-maximized`; no broader window permission set is required.
+
+### Tests Required
+
+- Assert the icon and accessible name change after the native resize callback reports a maximized window.
+- Assert both maximize and restore states call `toggleMaximize`.
+- Assert macOS registers no resize listener and Windows unlistens on unmount.
+
+---
+
 ## Scenario: Source image cards in generated result views
 
 ### 1. Scope / Trigger
