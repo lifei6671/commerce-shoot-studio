@@ -20,6 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [OpenAPI Contract](./openapi-contract.md) | Reviewed schema ownership, generated transports, and incremental operations | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards and structured AI output validation | Active |
 | [Logging Guidelines](./logging-guidelines.md) | slog/logit ownership, structured fields, and leakage guards | Active |
+| [HTTP Guidelines](./http-guidelines.md) | Gin routing, CORS, safe errors, body limits, recovery, and server construction | Active |
 
 ---
 

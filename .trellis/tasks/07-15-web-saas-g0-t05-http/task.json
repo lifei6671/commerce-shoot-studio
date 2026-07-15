@@ -1,0 +1,33 @@
+{
+  "id": "web-saas-g0-t05-http",
+  "name": "web-saas-g0-t05-http",
+  "title": "建立 Gin 路由与 HTTP 边界",
+  "description": "建立 Gin v1.12.0 路由、统一安全错误、方法/body/timeout、panic recovery 与入站日志边界，不提前实现业务 operation 或进程生命周期。",
+  "status": "in_progress",
+  "dev_type": "backend",
+  "scope": "server/internal/config,server/internal/http,server/lib/response,server/lib/apperror,server/internal/httpserver,server/internal/buildcontract,server/conf/app.yaml.example,server/go.mod,server/go.sum,docs,.trellis/spec/backend",
+  "package": "backend",
+  "priority": "P0",
+  "creator": "lifei6671",
+  "assignee": "lifei6671",
+  "createdAt": "2026-07-15",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev/10260629",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "07-14-web-saas-go-implementation",
+  "relatedFiles": [
+    "docs/2026-07-14-web-saas-go-technical-plan.md",
+    "docs/2026-07-14-web-saas-go-implementation-task-checklist.md",
+    ".trellis/spec/backend/http-guidelines.md",
+    ".trellis/spec/backend/error-handling.md",
+    ".trellis/spec/backend/openapi-contract.md",
+    ".trellis/spec/backend/logging-guidelines.md"
+  ],
+  "notes": "",
+  "meta": {}
+}

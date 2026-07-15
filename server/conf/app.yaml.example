@@ -5,6 +5,27 @@
 # 配置合同版本；当前只支持 1。
 version: 1
 
+# HTTP Server 配置。这里只定义启动参数，不会自动监听端口。
+http:
+  # 仅读取请求 Header 的最长时间，必须大于 0。
+  read_header_timeout: 5s
+  # 读取完整普通请求的最长时间，必须大于 0。
+  read_timeout: 30s
+  # 写出响应的最长时间；5 分钟为后续受控 SSE 预留。
+  write_timeout: 5m
+  # HTTP keep-alive 空闲连接超时时间。
+  idle_timeout: 60s
+  # 请求 Header 最大字节数，推荐值为 32 KiB。
+  max_header_bytes: 32768
+  # 普通 JSON 请求体默认最大字节数，推荐值为 1 MiB。
+  default_json_body_bytes: 1048576
+  # CORS 白名单。空列表表示只允许同源；不支持 wildcard、null 或第三方跨站 Cookie。
+  cors:
+    # 用户端允许的同站跨 Origin 白名单；每项必须是规范 http/https Origin。
+    user_allowed_origins: []
+    # 管理端允许的同站跨 Origin 白名单；不会与用户端列表合并。
+    admin_allowed_origins: []
+
 # MySQL 配置。
 mysql:
   # MySQL 主机名或 IP，不包含端口。

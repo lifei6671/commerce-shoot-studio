@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -41,6 +43,140 @@ func TestLoadCookieConfiguration(t *testing.T) {
 	}
 	if len(loaded.Security.VerificationCode.DerivationKey) != 32 || len(loaded.Security.VerificationCode.VerificationKey) != 32 {
 		t.Fatal("验证码密钥未解码为约定长度")
+	}
+}
+
+func TestLoadHTTPConfiguration(t *testing.T) {
+	loaded, err := Load(writeValidFixture(t, "cookie"))
+	if err != nil {
+		t.Fatalf("加载合法 HTTP 配置失败：%v", err)
+	}
+
+	if loaded.HTTP.ReadHeaderTimeout != 5*time.Second ||
+		loaded.HTTP.ReadTimeout != 30*time.Second ||
+		loaded.HTTP.WriteTimeout != 5*time.Minute ||
+		loaded.HTTP.IdleTimeout != 60*time.Second {
+		t.Fatalf("HTTP timeout 未精确加载：%+v", loaded.HTTP)
+	}
+	if loaded.HTTP.MaxHeaderBytes != 32768 || loaded.HTTP.DefaultJSONBodyBytes != 1048576 {
+		t.Fatalf("HTTP byte limit 未精确加载：%+v", loaded.HTTP)
+	}
+	wantUserOrigins := []string{
+		"https://app.example.com",
+		"http://localhost:5173",
+		"http://127.0.0.1:5173",
+		"https://[2001:db8::1]:8443",
+	}
+	if !reflect.DeepEqual(loaded.HTTP.CORS.UserAllowedOrigins, wantUserOrigins) {
+		t.Fatalf("用户端 Origin 未规范化加载：实际=%v 期望=%v", loaded.HTTP.CORS.UserAllowedOrigins, wantUserOrigins)
+	}
+	if !reflect.DeepEqual(loaded.HTTP.CORS.AdminAllowedOrigins, []string{"https://admin.example.com"}) {
+		t.Fatalf("管理端 Origin 未独立加载：%v", loaded.HTTP.CORS.AdminAllowedOrigins)
+	}
+}
+
+func TestLoadHTTPConfigurationAllowsExplicitEmptyOrigins(t *testing.T) {
+	appPath := writeValidFixture(t, "cookie")
+	replaceFileText(t, appPath, validUserOrigins(), "    user_allowed_origins: []\n")
+	replaceFileText(t, appPath, "    admin_allowed_origins:\n      - https://admin.example.com\n", "    admin_allowed_origins: []\n")
+
+	loaded, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("显式空 CORS 白名单应允许加载：%v", err)
+	}
+	if loaded.HTTP.CORS.UserAllowedOrigins == nil || loaded.HTTP.CORS.AdminAllowedOrigins == nil ||
+		len(loaded.HTTP.CORS.UserAllowedOrigins) != 0 || len(loaded.HTTP.CORS.AdminAllowedOrigins) != 0 {
+		t.Fatal("显式空 CORS 白名单未被保留为独立空列表")
+	}
+}
+
+func TestLoadRejectsInvalidHTTPConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		before string
+		after  string
+	}{
+		{name: "缺少 HTTP 段", before: validHTTPSection(), after: ""},
+		{name: "缺少 timeout", before: "  read_timeout: 30s\n", after: ""},
+		{name: "零 timeout", before: "  read_timeout: 30s\n", after: "  read_timeout: 0s\n"},
+		{name: "负 timeout", before: "  idle_timeout: 60s\n", after: "  idle_timeout: -1s\n"},
+		{name: "零 header limit", before: "  max_header_bytes: 32768\n", after: "  max_header_bytes: 0\n"},
+		{name: "负 body limit", before: "  default_json_body_bytes: 1048576\n", after: "  default_json_body_bytes: -1\n"},
+		{name: "HTTP 弱类型", before: "  max_header_bytes: 32768\n", after: "  max_header_bytes: \"32768\"\n"},
+		{name: "HTTP 未知字段", before: "  read_timeout: 30s\n", after: "  unknown_http_field: true\n  read_timeout: 30s\n"},
+		{name: "缺少用户 Origin 字段", before: validUserOrigins(), after: ""},
+		{
+			name:   "缺少管理 Origin 字段",
+			before: "    admin_allowed_origins:\n      - https://admin.example.com\n",
+			after:  "",
+		},
+		{name: "Origin 列表弱类型", before: validUserOrigins(), after: "    user_allowed_origins: https://app.example.com\n"},
+		{name: "Origin 元素弱类型", before: "      - HTTPS://APP.Example.COM\n", after: "      - 123\n"},
+		{name: "空 Origin", before: "      - HTTPS://APP.Example.COM\n", after: "      - \"\"\n"},
+		{name: "wildcard", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://*.origin-secret-marker.example\n"},
+		{name: "null", before: "      - HTTPS://APP.Example.COM\n", after: "      - null\n"},
+		{name: "userinfo", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://user@origin-secret-marker.example\n"},
+		{name: "path", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://origin-secret-marker.example/path\n"},
+		{name: "query", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://origin-secret-marker.example?secret=1\n"},
+		{name: "fragment", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://origin-secret-marker.example#secret\n"},
+		{name: "相对 URL", before: "      - HTTPS://APP.Example.COM\n", after: "      - origin-secret-marker.example\n"},
+		{name: "非 HTTP scheme", before: "      - HTTPS://APP.Example.COM\n", after: "      - ftp://origin-secret-marker.example\n"},
+		{name: "首尾空格", before: "      - HTTPS://APP.Example.COM\n", after: "      - \" https://origin-secret-marker.example\"\n"},
+		{name: "尾点 host", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://origin-secret-marker.example.\n"},
+		{name: "非 ASCII host", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://秘密.origin-secret-marker.example\n"},
+		{name: "显式默认端口", before: "      - HTTPS://APP.Example.COM\n", after: "      - https://origin-secret-marker.example:443\n"},
+		{
+			name:   "规范化后同组重复",
+			before: "      - HTTPS://APP.Example.COM\n",
+			after:  "      - HTTPS://APP.Example.COM\n      - https://app.example.com\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			appPath := writeValidFixture(t, "cookie")
+			replaceFileText(t, appPath, test.before, test.after)
+
+			_, err := Load(appPath)
+			if err == nil {
+				t.Fatal("无效 HTTP 配置应快速失败")
+			}
+			if strings.Contains(err.Error(), "origin-secret-marker") || strings.Contains(err.Error(), "秘密") {
+				t.Fatalf("HTTP 配置错误不得回显恶意 Origin：%v", err)
+			}
+		})
+	}
+}
+
+func TestBuildHTTPConfigDefensivelyCopiesOrigins(t *testing.T) {
+	sharedOrigins := []string{"https://app.example.com"}
+	userOrigins := sharedOrigins[:]
+	adminOrigins := sharedOrigins[:]
+	document := httpConfigDocument{
+		ReadHeaderTimeout:    5 * time.Second,
+		ReadTimeout:          30 * time.Second,
+		WriteTimeout:         5 * time.Minute,
+		IdleTimeout:          60 * time.Second,
+		MaxHeaderBytes:       32768,
+		DefaultJSONBodyBytes: 1048576,
+		CORS: corsConfigDocument{
+			UserAllowedOrigins:  &userOrigins,
+			AdminAllowedOrigins: &adminOrigins,
+		},
+	}
+
+	loaded, err := buildHTTPConfig(document)
+	if err != nil {
+		t.Fatalf("构造合法 HTTP 配置失败：%v", err)
+	}
+	sharedOrigins[0] = "https://mutated.example.com"
+	if loaded.CORS.UserAllowedOrigins[0] != "https://app.example.com" ||
+		loaded.CORS.AdminAllowedOrigins[0] != "https://app.example.com" {
+		t.Fatal("HTTP 配置保留了调用方 Origin slice")
+	}
+	loaded.CORS.UserAllowedOrigins[0] = "https://user-mutated.example.com"
+	if loaded.CORS.AdminAllowedOrigins[0] != "https://app.example.com" {
+		t.Fatal("用户端与管理端 Origin slice 共享底层数组")
 	}
 }
 
@@ -311,6 +447,12 @@ func TestRepositoryExampleIsCompleteStrictYAMLWithoutCredentials(t *testing.T) {
 	if app.Version != 1 || app.MySQL.Host == "" || app.Redis.Address == "" || app.Session.Store == "" {
 		t.Fatal("仓库配置示例未包含完整启动配置字段")
 	}
+	if app.HTTP.ReadHeaderTimeout != 5*time.Second || app.HTTP.ReadTimeout != 30*time.Second ||
+		app.HTTP.WriteTimeout != 5*time.Minute || app.HTTP.IdleTimeout != 60*time.Second ||
+		app.HTTP.MaxHeaderBytes != 32768 || app.HTTP.DefaultJSONBodyBytes != 1048576 ||
+		app.HTTP.CORS.UserAllowedOrigins == nil || app.HTTP.CORS.AdminAllowedOrigins == nil {
+		t.Fatal("仓库配置示例未包含完整 HTTP/CORS 字段和精确推荐值")
+	}
 	if app.MySQL.Username != "" || app.MySQL.Password != "" || app.Redis.Password != "" {
 		t.Fatal("仓库配置示例不得包含数据库部署凭据")
 	}
@@ -325,7 +467,10 @@ func TestRepositoryExampleIsCompleteStrictYAMLWithoutCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取仓库配置示例失败：%v", err)
 	}
-	for _, marker := range []string{"复制本文件", "MySQL 配置", "Redis 配置", "Session 配置", "验证码安全配置"} {
+	for _, marker := range []string{
+		"复制本文件", "HTTP Server 配置", "用户端允许的同站跨 Origin 白名单",
+		"管理端允许的同站跨 Origin 白名单", "MySQL 配置", "Redis 配置", "Session 配置", "验证码安全配置",
+	} {
 		if !bytes.Contains(content, []byte(marker)) {
 			t.Fatalf("仓库配置示例缺少字段说明：%s", marker)
 		}
@@ -345,10 +490,33 @@ func writeValidFixture(t *testing.T, store string) string {
 
 func validAppDocument(store string) string {
 	return "version: 1\n" +
+		validHTTPSection() +
 		validMySQLSection() +
 		validRedisSection() +
 		validSessionSection(store) +
 		validSecuritySection()
+}
+
+func validHTTPSection() string {
+	return "http:\n" +
+		"  read_header_timeout: 5s\n" +
+		"  read_timeout: 30s\n" +
+		"  write_timeout: 5m\n" +
+		"  idle_timeout: 60s\n" +
+		"  max_header_bytes: 32768\n" +
+		"  default_json_body_bytes: 1048576\n" +
+		"  cors:\n" +
+		validUserOrigins() +
+		"    admin_allowed_origins:\n" +
+		"      - https://admin.example.com\n"
+}
+
+func validUserOrigins() string {
+	return "    user_allowed_origins:\n" +
+		"      - HTTPS://APP.Example.COM\n" +
+		"      - http://localhost:5173\n" +
+		"      - http://127.0.0.1:5173\n" +
+		"      - https://[2001:db8::1]:8443\n"
 }
 
 func validMySQLSection() string {

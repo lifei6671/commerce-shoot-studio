@@ -24,7 +24,9 @@
     "07-15-web-saas-g0-t02-config",
     "07-15-web-saas-g0-t03-errors",
     "07-15-web-saas-g0-t04-openapi",
-    "07-15-web-saas-g0-t09-logging"
+    "07-15-web-saas-g0-t09-logging",
+    "07-15-web-saas-g0-t05-http",
+    "07-15-web-saas-g0-t06-http-security"
   ],
   "parent": null,
   "relatedFiles": [],

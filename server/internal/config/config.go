@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +20,26 @@ const (
 // Config 是启动阶段校验、归一化后的静态配置。
 type Config struct {
 	WorkDir  string
+	HTTP     HTTPConfig
 	MySQL    MySQLConfig
 	Redis    *RedisConfig
 	Session  SessionConfig
 	Security SecurityConfig
+}
+
+type HTTPConfig struct {
+	ReadHeaderTimeout    time.Duration
+	ReadTimeout          time.Duration
+	WriteTimeout         time.Duration
+	IdleTimeout          time.Duration
+	MaxHeaderBytes       int
+	DefaultJSONBodyBytes int64
+	CORS                 CORSConfig
+}
+
+type CORSConfig struct {
+	UserAllowedOrigins  []string
+	AdminAllowedOrigins []string
 }
 
 type MySQLConfig struct {
@@ -78,10 +95,26 @@ type VerificationCodeConfig struct {
 
 type appDocument struct {
 	Version  int                    `mapstructure:"version"`
+	HTTP     httpConfigDocument     `mapstructure:"http"`
 	MySQL    mysqlConfigDocument    `mapstructure:"mysql"`
 	Redis    redisConfigDocument    `mapstructure:"redis"`
 	Session  sessionConfigDocument  `mapstructure:"session"`
 	Security securityConfigDocument `mapstructure:"security"`
+}
+
+type httpConfigDocument struct {
+	ReadHeaderTimeout    time.Duration      `mapstructure:"read_header_timeout"`
+	ReadTimeout          time.Duration      `mapstructure:"read_timeout"`
+	WriteTimeout         time.Duration      `mapstructure:"write_timeout"`
+	IdleTimeout          time.Duration      `mapstructure:"idle_timeout"`
+	MaxHeaderBytes       int                `mapstructure:"max_header_bytes"`
+	DefaultJSONBodyBytes int64              `mapstructure:"default_json_body_bytes"`
+	CORS                 corsConfigDocument `mapstructure:"cors"`
+}
+
+type corsConfigDocument struct {
+	UserAllowedOrigins  *[]string `mapstructure:"user_allowed_origins"`
+	AdminAllowedOrigins *[]string `mapstructure:"admin_allowed_origins"`
 }
 
 type mysqlConfigDocument struct {
@@ -155,6 +188,119 @@ var reservedDSNParameters = map[string]struct{}{
 	"port":         {},
 	"database":     {},
 	"dbname":       {},
+}
+
+func buildHTTPConfig(document httpConfigDocument) (HTTPConfig, error) {
+	if document.ReadHeaderTimeout <= 0 || document.ReadTimeout <= 0 ||
+		document.WriteTimeout <= 0 || document.IdleTimeout <= 0 {
+		return HTTPConfig{}, fmt.Errorf("http timeout 必须为正数")
+	}
+	if document.MaxHeaderBytes <= 0 || document.DefaultJSONBodyBytes <= 0 {
+		return HTTPConfig{}, fmt.Errorf("http 请求大小限制必须为正数")
+	}
+	if document.CORS.UserAllowedOrigins == nil || document.CORS.AdminAllowedOrigins == nil {
+		return HTTPConfig{}, fmt.Errorf("http.cors 必须显式配置用户端和管理端 Origin 列表")
+	}
+	userOrigins, err := normalizeAllowedOrigins("http.cors.user_allowed_origins", *document.CORS.UserAllowedOrigins)
+	if err != nil {
+		return HTTPConfig{}, err
+	}
+	adminOrigins, err := normalizeAllowedOrigins("http.cors.admin_allowed_origins", *document.CORS.AdminAllowedOrigins)
+	if err != nil {
+		return HTTPConfig{}, err
+	}
+	return HTTPConfig{
+		ReadHeaderTimeout:    document.ReadHeaderTimeout,
+		ReadTimeout:          document.ReadTimeout,
+		WriteTimeout:         document.WriteTimeout,
+		IdleTimeout:          document.IdleTimeout,
+		MaxHeaderBytes:       document.MaxHeaderBytes,
+		DefaultJSONBodyBytes: document.DefaultJSONBodyBytes,
+		CORS: CORSConfig{
+			UserAllowedOrigins:  userOrigins,
+			AdminAllowedOrigins: adminOrigins,
+		},
+	}, nil
+}
+
+func normalizeAllowedOrigins(field string, origins []string) ([]string, error) {
+	normalized := make([]string, 0, len(origins))
+	seen := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		value, ok := normalizeOrigin(origin)
+		if !ok {
+			return nil, fmt.Errorf("%s 包含无效 Origin", field)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return nil, fmt.Errorf("%s 包含重复 Origin", field)
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func normalizeOrigin(origin string) (string, bool) {
+	if origin == "" || strings.TrimSpace(origin) != origin ||
+		strings.ContainsAny(origin, " \t\r\n") || strings.Contains(origin, "*") ||
+		strings.EqualFold(origin, "null") {
+		return "", false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || strings.HasSuffix(parsed.Host, ":") {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	hostname := strings.ToLower(parsed.Hostname())
+	if hostname == "" || strings.HasSuffix(hostname, ".") || !validOriginHostname(hostname) {
+		return "", false
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		hostname = ip.String()
+	}
+	port := parsed.Port()
+	if port != "" {
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber <= 0 || portNumber > 65535 || strconv.Itoa(portNumber) != port ||
+			scheme == "http" && portNumber == 80 || scheme == "https" && portNumber == 443 {
+			return "", false
+		}
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port != "" {
+		host = net.JoinHostPort(hostname, port)
+	}
+	return scheme + "://" + host, true
+}
+
+func validOriginHostname(hostname string) bool {
+	if net.ParseIP(hostname) != nil {
+		return true
+	}
+	if len(hostname) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for index := range len(label) {
+			char := label[index]
+			if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func buildMySQLConfig(document mysqlConfigDocument) (MySQLConfig, error) {

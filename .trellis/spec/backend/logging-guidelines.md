@@ -40,9 +40,11 @@ Allowed context fields are:
 - correlation: `request_id`, `trace_id`, `user_id`, `task_id`, `invocation_id`.
 
 Inbound contexts require a route template. Outbound contexts require operation and peer service. Methods
-are limited to GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, CONNECT, and TRACE. Route templates and tokens
-have strict byte limits and character allowlists; schemes, hosts, query strings, fragments, whitespace,
-CRLF, and path traversal are rejected without echoing the input.
+are limited to GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, CONNECT, TRACE, and the fixed normalized value
+OTHER. G0-T05 maps every non-standard raw method to OTHER before creating the context; attacker-controlled
+method text must never enter logs. Route templates and tokens have strict byte limits and character
+allowlists; schemes, hosts, query strings, fragments, whitespace, CRLF, and path traversal are rejected
+without echoing the input.
 
 A fork inherits request, trace, user, and task IDs. Supplying a different value fails. Direction, method,
 operation, peer service, and invocation describe the child call; stale parent route/invocation fields are
@@ -96,6 +98,8 @@ Config values, Base64 markers, LogValuer non-resolution, concurrent forks, and r
 
 ## Future Owners
 
-Gin middleware and response mapping belong to G0-T05; request ID and same-origin protection to G0-T06;
-startup/flush ownership to G0-T07; metrics and tracing to G0-T10. Provider, Blob, SMTP, and audit fields are
-added only by their owning business tasks. Do not document those integrations as complete at G0-T09.
+Gin middleware, CORS, inbound completion assembly, and response mapping belong to G0-T05. Request ID
+issuance/header, trusted proxy parsing, and CrossOriginProtection belong to G0-T06 and reuse the same typed
+user/admin Origin allowlists. Startup/flush ownership belongs to G0-T07; metrics and tracing to G0-T10.
+Provider, Blob, SMTP, and audit fields are added only by their owning business tasks. Do not document those
+integrations as complete at G0-T09.

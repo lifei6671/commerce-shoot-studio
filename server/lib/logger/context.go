@@ -177,7 +177,7 @@ func validateContextFields(fields ContextFields) error {
 
 func validHTTPMethod(method string) bool {
 	switch method {
-	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE":
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "OTHER":
 		return true
 	default:
 		return false

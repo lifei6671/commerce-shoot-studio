@@ -34,8 +34,10 @@ and regenerate both Go and TypeScript outputs in the same change.
 
 - Generated types are HTTP transport DTOs. They are not GORM entities, service commands/views, Runtime Port
   types, page view-models, or persisted task snapshots.
-- G0-T04 does not generate Gin wrappers. G0-T05 owns Gin registration, binding, request IDs, body limits,
-  and safe mapping from `apperror.Error` to `ErrorResponse`.
+- G0-T04 does not generate Gin wrappers. G0-T05 owns Gin registration, binding, CORS, body limits, and safe
+  mapping from `apperror.Error` to `ErrorResponse`; it only consumes a trusted injected request ID.
+- G0-T06 owns request ID generation/response headers, trusted proxy parsing, and CrossOriginProtection. It
+  reuses G0-T05's typed user/admin Origin allowlists rather than defining a second trust configuration.
 - The Desktop package, lockfile, TypeScript configuration, Runtime Ports, adapters, and UI do not consume the
   Web generated transport file.
 - The Web Remote mapper introduced later converts generated transport DTOs to Runtime Port views.
@@ -46,6 +48,8 @@ and regenerate both Go and TypeScript outputs in the same change.
 
 - Do not declare CSRF tokens, cookies, or headers. Browser writes are protected by same-origin sessions and
   `net/http.CrossOriginProtection` in later HTTP tasks.
+- OPTIONS preflight is a Gin transport concern, not an OpenAPI operation. The operation contract remains
+  GET/POST only even when the HTTP boundary returns controlled CORS preflight responses.
 - Deployment configuration owns user/admin Cookie names. Because OpenAPI cookie security schemes require a
   static name, G0-T04 does not invent one; operation security is frozen with the owning authentication task.
 - `Idempotency-Key` is an opaque required header component. Do not add an unapproved UUID format, character

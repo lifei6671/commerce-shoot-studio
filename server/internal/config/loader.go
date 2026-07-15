@@ -34,6 +34,10 @@ func Load(configPath string) (Config, error) {
 		return Config{}, fmt.Errorf("app.version 只支持 1")
 	}
 	workDir := filepath.Dir(absolutePath)
+	httpConfig, err := buildHTTPConfig(app.HTTP)
+	if err != nil {
+		return Config{}, err
+	}
 
 	mysql, err := buildMySQLConfig(app.MySQL)
 	if err != nil {
@@ -60,7 +64,7 @@ func Load(configPath string) (Config, error) {
 	}
 
 	return Config{
-		WorkDir: workDir, MySQL: mysql, Redis: redis, Session: session, Security: security,
+		WorkDir: workDir, HTTP: httpConfig, MySQL: mysql, Redis: redis, Session: session, Security: security,
 	}, nil
 }
 
@@ -138,6 +142,12 @@ func restoreCaseSensitiveMaps(content []byte, target any) error {
 		return nil
 	}
 	var original struct {
+		HTTP struct {
+			CORS struct {
+				UserAllowedOrigins  *[]*string `yaml:"user_allowed_origins"`
+				AdminAllowedOrigins *[]*string `yaml:"admin_allowed_origins"`
+			} `yaml:"cors"`
+		} `yaml:"http"`
 		MySQL struct {
 			DSNParams map[string]string `yaml:"dsn_params"`
 		} `yaml:"mysql"`
@@ -145,8 +155,32 @@ func restoreCaseSensitiveMaps(content []byte, target any) error {
 	if err := yaml.Unmarshal(content, &original); err != nil {
 		return err
 	}
+	userOrigins, err := restoreOriginList(original.HTTP.CORS.UserAllowedOrigins)
+	if err != nil {
+		return err
+	}
+	adminOrigins, err := restoreOriginList(original.HTTP.CORS.AdminAllowedOrigins)
+	if err != nil {
+		return err
+	}
+	appTarget.HTTP.CORS.UserAllowedOrigins = userOrigins
+	appTarget.HTTP.CORS.AdminAllowedOrigins = adminOrigins
 	appTarget.MySQL.DSNParams = original.MySQL.DSNParams
 	return nil
+}
+
+func restoreOriginList(values *[]*string) (*[]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	restored := make([]string, 0, len(*values))
+	for _, value := range *values {
+		if value == nil {
+			return nil, fmt.Errorf("http.cors Origin 必须是字符串")
+		}
+		restored = append(restored, *value)
+	}
+	return &restored, nil
 }
 
 func requireRegularFile(path string) error {

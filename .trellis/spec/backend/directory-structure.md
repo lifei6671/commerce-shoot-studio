@@ -33,15 +33,24 @@ server/
 │   │   ├── async_job_status.go
 │   │   ├── constant_test.go
 │   │   └── model_category.go
-│   └── logger/
-│       ├── context.go
-│       ├── logger.go
-│       └── safe_handler.go
+│   ├── logger/
+│   │   ├── context.go
+│   │   ├── logger.go
+│   │   └── safe_handler.go
+│   └── response/
+│       └── error.go
 ├── cmd/server/main.go
 └── internal/
+    ├── buildcontract/http_contract_test.go
     ├── buildcontract/logging_contract_test.go
     ├── buildcontract/module_contract_test.go
     ├── buildcontract/openapi_contract_test.go
+    ├── httpapi/
+    │   ├── body.go
+    │   ├── cors.go
+    │   ├── middleware.go
+    │   └── router.go
+    ├── httpserver/server.go
     ├── models/dto/generated/types.gen.go
     └── config/
         ├── config.go
@@ -68,8 +77,18 @@ server/
   own file and never create a generic `status.go` or duplicate application error codes here.
 - `lib/logger` is the only logit adapter. It returns injected `*slog.Logger` values, writes JSON stdout,
   filters record attributes through a fixed allowlist, and owns typed fresh/fork context helpers.
+- `lib/response` is the only Gin error writer. It maps errors to the generated `ErrorResponse` without
+  exposing raw errors and stores the stable integer code for completion logging.
+- `internal/httpapi` owns the Gin engine, user/admin API groups, controlled CORS, method guard, complete JSON
+  binding with body limits, safe recovery, and one completion log per request. It registers no business route
+  by itself and never starts a listener.
+- `internal/httpserver` validates options and constructs `*http.Server` with explicit timeout/header limits
+  and a sanitized standard-library ErrorLog; lifecycle belongs to G0-T07.
 - `internal/buildcontract/logging_contract_test.go` enforces the pinned logit dependency, unique adapter,
   literal messages, and the ban on default or self-built slog bypasses.
+- `internal/buildcontract/http_contract_test.go` enforces the pinned Gin/publicsuffix dependencies, Gin import
+  ownership, the unique `gin.New` owner, generated error DTO ownership, and the absence of default middleware,
+  placeholder routes, HTTP lifecycle calls, and raw HTTP error text.
 - `conf/app.yaml.example` is the only tracked startup configuration template. It documents every current
   field in Simplified Chinese and contains no deployable credentials. Users copy or rename it to
   Git-ignored `conf/app.yaml`, or explicitly pass another complete `app.yaml`; the example is never loaded
@@ -95,6 +114,10 @@ server/
 - Persisted status and enum contracts: `server/lib/constant/async_job_status.go` and
   `server/lib/constant/model_category.go`.
 - Logging adapter and context contract: `server/lib/logger/logger.go` and `server/lib/logger/context.go`.
+- HTTP router and middleware contract: `server/internal/httpapi/router.go`, `cors.go`, `body.go`, and
+  `middleware.go`.
+- HTTP server construction contract: `server/internal/httpserver/server.go`.
+- Unified HTTP error response: `server/lib/response/error.go`.
 
 ## Scenario: Web SaaS Go module and toolchain contract
 

@@ -25,7 +25,7 @@ domain enums, and other genuinely cross-module constants.
   public contract and a standard `Unwrap()` chain.
 - `errors.Is` identifies application errors by stable code. `errors.As` retrieves `*apperror.Error`.
 
-The initial HTTP catalog contains exactly these mappings:
+The G0-T03 initial HTTP catalog contains exactly these mappings:
 
 | Name | Code | HTTP | Safe message |
 | --- | ---: | ---: | --- |
@@ -35,6 +35,16 @@ The initial HTTP catalog contains exactly these mappings:
 | `INTERNAL_ERROR` | 100500 | 500 | 服务暂时不可用 |
 | `GENERATION_TASK_NOT_FOUND` | 140404 | 404 | 生成任务不存在 |
 | `AI_REWRITE_IN_PROGRESS` | 150409 | 409 | AI 改写正在处理中 |
+
+G0-T05 separately approved these common transport mappings:
+
+| Name | Code | HTTP | Safe message |
+| --- | ---: | ---: | --- |
+| `FORBIDDEN` | 100403 | 403 | 请求被拒绝 |
+| `NOT_FOUND` | 100404 | 404 | 请求路径不存在 |
+
+`FORBIDDEN` deliberately does not distinguish CORS, CrossOriginProtection, or another security-boundary
+reason. `NOT_FOUND` is the generic Gin NoRoute error and must not replace domain-specific not-found codes.
 
 `GENERATION_PROVIDER_RESULT_UNCERTAIN=140504` is currently a task-result code only. It has no synchronous
 HTTP mapping or public `Error` sentinel until an owning HTTP use case defines that contract.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -453,6 +454,44 @@ func TestNewContextAcceptsAllFrozenHTTPMethodsAndPreservesDeadline(t *testing.T)
 		gotDeadline, ok := ctx.Deadline()
 		if !ok || !gotDeadline.Equal(deadline) {
 			t.Fatalf("method=%s deadline=%v ok=%v，期望=%v", method, gotDeadline, ok, deadline)
+		}
+	}
+}
+
+func TestNewContextAcceptsOnlyFixedNormalizedOtherForNonStandardMethods(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	log := newTestLogger(t, &output, nil)
+	ctx, err := logger.NewContext(context.Background(), logger.ContextFields{
+		Direction:     logger.DirectionInbound,
+		Method:        "OTHER",
+		RouteTemplate: "/api/v1/{unmatched}",
+	})
+	if err != nil {
+		t.Fatalf("logger.NewContext(OTHER) error = %v", err)
+	}
+	if err := logger.LogRequestComplete(ctx, log, logger.RequestResult{
+		StatusCode: http.StatusMethodNotAllowed,
+		ErrorCode:  int(apperror.CodeMethodNotAllowed),
+		ElapsedMS:  1,
+	}); err != nil {
+		t.Fatalf("logger.LogRequestComplete() error = %v", err)
+	}
+	payload := decodeSingleJSONLine(t, output.Bytes())
+	assertField(t, payload, "method", "OTHER")
+
+	for _, rawMethod := range []string{"BREW", "RAW_METHOD_SECRET_MARKER", "other"} {
+		_, err := logger.NewContext(context.Background(), logger.ContextFields{
+			Direction:     logger.DirectionInbound,
+			Method:        rawMethod,
+			RouteTemplate: "/api/v1/{unmatched}",
+		})
+		if err == nil {
+			t.Fatalf("任意原始非标准 method %q 必须被拒绝", rawMethod)
+		}
+		if strings.Contains(err.Error(), rawMethod) {
+			t.Fatalf("method 校验错误不得回显原始值：%q", err)
 		}
 	}
 }

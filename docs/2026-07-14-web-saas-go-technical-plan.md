@@ -44,7 +44,7 @@ remote -> RemoteRuntimeClient -> HTTPS API      -> Go / MySQL / Blob Storage
 
 - 数据库合同只要求 SQL、migration、事务和运维脚本最低兼容 MySQL 8.0；不得依赖高于 8.0 才提供的专属语法。CI 至少验证一个 8.0.x 环境，部署前再对实际选用版本完成同一套验收。
 - 不增加 `--role=api/worker` 和多进程模式，第一期只保留单进程、单副本，避免为未确认的拆分提前设计兼容层。
-- 业务 API 仍严格只允许 GET / POST，不开放 HEAD / OPTIONS；这是明确合同约束，不把它宣称为安全机制。
+- OpenAPI 业务 operation 仍严格只允许 GET / POST；HEAD 不作为业务 operation，线路返回 405 且空 body。OPTIONS 只开放受控浏览器 CORS 预检，不把方法限制或预检本身宣称为安全机制。
 - 所有业务表仍保留 `version`；追加型流水 / 审计表固定 `version = 1` 且禁止 UPDATE / DELETE，以同时满足项目统一字段约束和不可变语义。
 - 状态常量仍统一置于 `server/lib/constant`，但必须按领域拆分强类型文件，禁止单一 `status.go` 和跨领域比较。
 - 第一版先拆分邮件、生成、维护三个池；图片处理出现独立、可量化的 CPU / 内存瓶颈后再评估第四个处理池，不提前扩展。
@@ -127,7 +127,7 @@ remote -> RemoteRuntimeClient -> HTTPS API      -> Go / MySQL / Blob Storage
 /metrics               Prometheus 指标，仅内网或受保护访问
 ```
 
-前端建议构建为一个 Web 产物，按 `/app` 和 `/admin` 做路由级代码分割。Go 使用 `embed.FS` 或部署目录读取静态产物，由同一个 Gin 服务返回，保持单一部署单元和同源 Cookie，不引入跨域配置。
+前端建议构建为一个 Web 产物，按 `/app` 和 `/admin` 做路由级代码分割。Go 使用 `embed.FS` 或部署目录读取静态产物，由同一个 Gin 服务返回；默认部署仍保持单一部署单元和同源 Cookie。需要把用户端或管理端前端部署到不同 Origin 时，只允许与 API 属于同一 schemeful site，并分别通过 `http.cors.user_allowed_origins`、`http.cors.admin_allowed_origins` 配置精确白名单；禁止跨站 Session Cookie、通配符 Origin 和两组白名单混用。
 
 第一期部署边界：
 
@@ -230,6 +230,8 @@ server/
 
 G0-T02 的启动配置合同固定如下：`app.yaml` 使用 `version: 1`，并直接包含 `mysql`、`session`、`security` 和条件使用的 `redis`。MySQL 使用结构化 host、port、database、username、password、`tls_mode`、连接/读写 timeout 与连接池字段；`dsn_params: map[string]string` 只保存后续驱动的自定义查询参数，键名大小写不敏感地拒绝 `tls`、`timeout`、`readTimeout`、`writeTimeout`、`parseTime`、`loc` 以及用户、密码、网络、地址、库名等连接身份字段，后续装配强制 `parseTime=true`、`loc=UTC`。Session Store 只允许 `cookie` / `redis`；Redis 第一版只允许单节点直连，密码可为空以支持明确的内网无认证实例，不支持 Sentinel、Cluster 或静默降级。开发调试目标确认为 MySQL `192.168.1.6:13306` / `commerce_shoot_studio` 与无密码 Redis `192.168.1.6:6379`，但 MySQL 密码和本地 Session/验证码密钥不得写入仓库模板。
 
+G0-T05 在同一个完整 `app.yaml` 中追加 `http` 段：`read_header_timeout=5s`、`read_timeout=30s`、`write_timeout=5m`、`idle_timeout=60s`、`max_header_bytes=32768`、`default_json_body_bytes=1048576`，以及默认空列表的 `cors.user_allowed_origins` / `cors.admin_allowed_origins`。完整配置必须显式提供这些字段，不使用 Viper default 或模板合并；监听地址、trusted proxy、request ID、readiness 与 shutdown 不属于该配置切片。
+
 启动密钥统一使用标准 Base64：用户端和管理端的 Session authentication key 解码后各为 64 字节，AES-256 encryption key 各为 32 字节，验证码 derivation key / verification key 各为 32 字节；所有密钥彼此独立。仓库模板中的凭据保持空值，因此模板可严格解析但不能作为可启动配置。`system_configs` 在 G0-T02 只建立存储无关的原始 JSON source Port 和严格 typed decoder，拒绝未知字段、错误类型与尾随 JSON，并调用具体类型的 `Validate()`；真实表结构、固定业务 key 和业务 schema 仍由 G1 任务定义。
 
 ### 4.1 分层约束
@@ -264,7 +266,7 @@ Gin Handler -> Service -> Repository / Storage / Provider
 
 ## 5. API 合同
 
-API 使用 OpenAPI contract-first。G0-T04 通过锁定的 `oapi-codegen v2.7.2` 先生成 Go HTTP DTO models，通过独立 `web/` npm lockfile 中的 `openapi-typescript 7.13.0` 生成 TypeScript transport 类型；Gin 接口骨架、参数绑定和安全错误映射由 G0-T05 在日志基线就绪后生成/装配。生成工具只允许读取仓库内受评审的 `server/api/openapi.yaml`，禁止外部 `$ref`、构建时下载远程 schema、接受用户上传或第三方 schema；OpenAPI 变更和双端生成 diff 都必须审查，CI 必须校验生成结果与 schema 一致。生成代码禁止手改。OpenAPI 业务合同只允许 `GET` 和 `POST`：GET 必须只读，所有创建、修改、删除、取消、重试、验证码发送等操作统一使用动作式 POST 路径。Gin `NoMethod` 对 PUT、PATCH、DELETE、HEAD、OPTIONS、CONNECT、TRACE 等其他方法统一返回 HTTP 405 和整数错误码；系统同源部署，不注册 CORS 预检路由。
+API 使用 OpenAPI contract-first。G0-T04 通过锁定的 `oapi-codegen v2.7.2` 先生成 Go HTTP DTO models，通过独立 `web/` npm lockfile 中的 `openapi-typescript 7.13.0` 生成 TypeScript transport 类型；Gin 接口骨架、参数绑定和安全错误映射由 G0-T05 在日志基线就绪后生成/装配。生成工具只允许读取仓库内受评审的 `server/api/openapi.yaml`，禁止外部 `$ref`、构建时下载远程 schema、接受用户上传或第三方 schema；OpenAPI 变更和双端生成 diff 都必须审查，CI 必须校验生成结果与 schema 一致。生成代码禁止手改。OpenAPI 业务合同只允许 `GET` 和 `POST`：GET 必须只读，所有创建、修改、删除、取消、重试、验证码发送等操作统一使用动作式 POST 路径。Gin 对 PUT、PATCH、DELETE、HEAD、CONNECT、TRACE 和其他非标准方法返回 HTTP 405 与 `100405`；HEAD 在线路上保持空 body，非标准方法在日志中归一化为 `OTHER`。OPTIONS 只作为受控浏览器 CORS 预检：合法预检返回 204，非法 Origin/method/header 返回 `403 + 100403` 且不附加允许跨域 Header，普通非预检 OPTIONS 返回 `405 + 100405`。OPTIONS 预检不是 OpenAPI operation。Gin 必须关闭尾斜杠自动重定向，未精确匹配的路径进入统一 404；所有 API 响应追加 `Vary: Origin`，OPTIONS 再追加两项预检请求 Header 维度，拒绝响应不得携带任何 `Access-Control-Allow-*`。
 
 G0-T04 采用已确认的增量合同方案：初始 OpenAPI 固定为 `3.0.3` 与合法 `paths: {}`，只登记已经冻结的错误、分页、cursor、幂等 Header、AI 改写 SSE payload、生成前报价和积分共享 components。技术方案下列一期用户/管理路径库存继续有效，但请求/响应字段未冻结的 operation 不得用宽泛 `object`、空成功响应或自由 `additionalProperties` 伪装完成；G2～G6 所属业务任务在字段合同冻结后向同一 schema 增量添加 operation 并重新生成 Go/TS 类型。部署配置允许用户/管理 Cookie 名变化，因此 G0-T04 不虚构要求静态 Cookie 名的 OpenAPI `apiKey in: cookie` scheme；同源 Session 与两端隔离仍是强制合同，具体 operation security 由 G0-T05/G0-T06/G2 同步冻结。
 
@@ -336,7 +338,7 @@ GET    /api/admin/v1/audit-logs
 
 用户 Session 与管理 Session 使用不同 Cookie 名、作用路径和中间件。本期不引入 MFA，不创建 MFA 配置、API、数据库字段、前端交互或预留兼容壳，也不把 MFA 作为公网或发布门禁；管理端继续依赖独立 Session、管理员状态校验、登录审计、高风险操作近期认证和二次确认。
 
-用户端和管理端统一使用 Go 1.25+ 标准库 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求，通过 `Sec-Fetch-Site` 和 `Origin` 判断同源关系，不签发 CSRF Token、CSRF Cookie，也不保留无安全作用的 Token Header 合同。两端分别装配拒绝处理器并返回统一整数错误码；默认不配置 trusted origin 或不安全 bypass。所有写操作只能使用 POST，GET 不得产生状态变更。Session 响应继续固定设置 `Cache-Control: no-store, private` 和 `Vary: Cookie`，禁止 CDN 缓存。
+用户端和管理端统一使用 Go 1.25+ 标准库 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求，通过 `Sec-Fetch-Site` 和 `Origin` 判断来源关系，不签发 CSRF Token、CSRF Cookie，也不保留无安全作用的 Token Header 合同。两端分别装配拒绝处理器并返回统一 `403 + 100403`；G0-T06 必须分别复用 G0-T05 的用户端/管理端同站 Origin 白名单，不维护第二套 trusted origin，也不提供不安全 bypass。所有写操作只能使用 POST，GET 不得产生状态变更。Session 响应继续固定设置 `Cache-Control: no-store, private` 和 `Vary: Cookie`，CORS 只能追加并去重 `Vary`，禁止覆盖 Cookie 缓存维度。
 
 用户 Web 认证采用独立 `/app/login`、`/app/register`、`/app/forgot-password`、`/app/reset-password` 路由。未登录访问素材、历史、任务等受保护 `/app/*` 深链时，前端转到登录页；登录 API 成功并重新签发 Session 后使用 history replace 回到原路径，默认回 `/app`。`returnTo` 只属于前端导航状态，不传给登录 API，也不由服务端返回重定向；规范化后只允许同源且以 `/app/` 开头的普通路径，必须拒绝协议、`//`、反斜杠、控制字符、编码绕过和 `/admin`，非法值回退 `/app`。401 只清理认证状态并跳登录，不自动重放失败的 POST 请求。注册和找回密码入口是否可用由服务端 capability 返回；SMTP 未配置、注册未开放或能力不可用时明确禁用并展示安全原因。
 
@@ -366,7 +368,7 @@ type ErrorResponse struct {
 
 - `lib/apperror` 使用 `int` 定义稳定错误码、HTTP status、安全消息和 cause；错误码按模块划分号段，禁止直接返回字符串错误码。
 - 固定号段：`100xxx` 通用、`110xxx` 认证、`120xxx` 用户、`130xxx` 资产、`140xxx` 生成、`150xxx` 模型、`160xxx` 配置 / 邮件、`170xxx` 积分、`190xxx` 管理端。HTTP status 表示协议结果，`code` 表示稳定业务原因，两者不得混用。
-- G0-T03 首批 HTTP 错误固定为：`INVALID_REQUEST=100400/400`、`METHOD_NOT_ALLOWED=100405/405`、`REQUEST_BODY_TOO_LARGE=100413/413`、`INTERNAL_ERROR=100500/500`、`GENERATION_TASK_NOT_FOUND=140404/404`、`AI_REWRITE_IN_PROGRESS=150409/409`。`GENERATION_PROVIDER_RESULT_UNCERTAIN=140504` 只作为任务结果错误码，本阶段不定义同步 HTTP 映射，禁止根据后三位推导 HTTP status。
+- G0-T03 首批 HTTP 错误固定为：`INVALID_REQUEST=100400/400`、`METHOD_NOT_ALLOWED=100405/405`、`REQUEST_BODY_TOO_LARGE=100413/413`、`INTERNAL_ERROR=100500/500`、`GENERATION_TASK_NOT_FOUND=140404/404`、`AI_REWRITE_IN_PROGRESS=150409/409`。G0-T05 经确认追加通用 `FORBIDDEN=100403/403/请求被拒绝` 与 `NOT_FOUND=100404/404/请求路径不存在`。`GENERATION_PROVIDER_RESULT_UNCERTAIN=140504` 只作为任务结果错误码，本阶段不定义同步 HTTP 映射，禁止根据后三位推导 HTTP status。
 - G0-T03 只冻结 `async_jobs` 的 `queued=0`、`running=1` 和模型类别 `text-to-text=1`、`text-to-image=2`、`image-to-image=3`、`image-to-text=4`。其他状态数值、迁移和故障恢复规则留给 G0.5。
 - Service 返回业务错误，不依赖 Gin。
 - 全局错误中间件使用 `errors.Is` / `errors.As` 映射响应。
@@ -759,7 +761,7 @@ Repository 禁止无条件 `Find`、`Scan`、`Preload` 把全表读入内存。�
 - 认证中间件用 `user_id + session_version` 查询当前用户状态；数据库是用户状态和权限的事实源，停用用户或版本不匹配时立即拒绝并清理 Session。
 - Redis Store 只让 Cookie 保存随机 Session ID，服务端设置 TTL、独立 prefix、连接 / 读写 timeout。选中 Redis 但初始化失败时服务启动失败，禁止静默回退 Cookie。
 - 用户 Session Cookie 使用 `Path=/api/v1`，管理 Session Cookie 使用 `Path=/api/admin/v1`；两端使用不同 Cookie 名、认证密钥和 Session 中间件，删除时必须使用原 Path。CSRF 防护不再创建 Cookie 或 Token，两端分别装配 `CrossOriginProtection` 拒绝处理器。
-- Cookie 均设置 `Secure`、`HttpOnly`、合理 `SameSite`，并分别配置 idle TTL 与 absolute TTL；管理 Session TTL 更短，高风险管理操作要求近期重新认证。
+- Cookie 均设置 `Secure`、`HttpOnly` 和不允许跨站携带的 `SameSite` 策略，并分别配置 idle TTL 与 absolute TTL；第一版 CORS 只支持同一 schemeful site，不启用 `SameSite=None`。管理 Session TTL 更短，高风险管理操作要求近期重新认证。
 - 登录成功后废弃匿名 Session 并重新签发认证 Session，防止 fixation；第一版用户端与管理端各使用一组独立认证/加密密钥，不实现 key ring。替换任一组密钥会让对应已有 Session 全部失效并要求重新登录。
 - 密码重置、用户封禁或全端退出时递增 `session_version`，使旧会话失效。
 - Cookie 与 Redis Store 的切换需要重启并使已有会话失效，第一期不自研跨 Store 在线迁移。
@@ -1170,13 +1172,14 @@ credit_reconciliation_mismatch_total
 | 类别 | 首选组件 | 许可证 | 使用边界 |
 | --- | --- | --- | --- |
 | HTTP | Gin `v1.12.0` | MIT | 路由、中间件、参数绑定 |
+| Public Suffix | golang.org/x/net `v0.51.0` / publicsuffix | BSD-3-Clause | CORS schemeful-site/eTLD+1 校验；禁止手写域名后缀猜测 |
 | ORM | GORM `v1.31.2` + GORM MySQL Driver `v1.6.0` | MIT | Entity 映射、常规查询、事务；底层使用 go-sql-driver/mysql |
 | 乐观锁 | gorm.io/plugin/optimisticlock `v1.1.3` | MIT | 业务表 version 条件更新 |
 | Migration | Pressly Goose `v3.27.2` | MIT | 显式 SQL migration；禁用生产 AutoMigrate |
 | 配置 | Viper `v1.21.0` | MIT | 仓库默认配置与部署实例配置文件；第一期不使用环境变量，不做通用热更新 |
 | DTO 校验 | validator/v10 `v10.30.3` | MIT | HTTP 边界结构校验 |
 | Session | gin-contrib/sessions `v1.1.0` | MIT | Cookie / Redis Store 配置切换 |
-| CSRF | Go 标准库 `net/http.CrossOriginProtection` | BSD-3-Clause | Go 1.25+ 同源保护；不签发 Token/Cookie，不引入存在未修复漏洞的 `gorilla/csrf` |
+| CSRF | Go 标准库 `net/http.CrossOriginProtection` | BSD-3-Clause | Go 1.25+ 来源保护并复用用户/管理同站白名单；不签发 Token/Cookie，不引入存在未修复漏洞的 `gorilla/csrf` |
 | 邮件 | wneessen/go-mail `v0.8.1` | MIT | SMTP、TLS、context timeout；模板使用标准库 |
 | 密码 | alexedwards/argon2id `v1.0.0` + x/crypto `v0.54.0` | MIT / BSD-3-Clause | Argon2id PHC hash、参数版本和 rehash；禁止导入 `openpgp/*` |
 | ID | google/uuid `v1.6.0` | BSD-3-Clause | UUIDv7 生成和解析 |
@@ -1261,7 +1264,7 @@ web/
 - Session Cookie 使用 `Secure`、`HttpOnly` 和合适的 `SameSite`。
 - Session 认证 / 加密 key、验证码派生/校验 key、MySQL 密码和启用认证时的 Redis 密码从部署实例配置文件读取；无认证 Redis 使用空密码。SMTP、S3 和 Provider 密钥从 `system_configs` 对应业务固定 key 的 JSON 中读取。第一期不使用环境变量注入或 Secret Manager。
 - `server/conf/app.yaml` 的安全段显式配置 trusted proxy CIDR，默认空列表；直接暴露 Gin 时调用 `SetTrustedProxies(nil)`，只信任实际 Ingress / LB，禁止直接信任客户端 `X-Forwarded-For`。实现该字段时同步补入 `app.yaml.example`。
-- 第一期生产最多支持一层反向代理或 Ingress，并要求显式配置其 CIDR；`/app`、`/admin` 与 API 保持同域。第一期不接入 CDN。代理必须对 AI 改写 SSE 关闭 buffering，idle timeout 必须大于 SSE 最大持续时间；上传限制、客户端 IP 和 HTTPS scheme 只使用可信代理解析结果。后续引入 CDN 必须重新审批缓存、Cookie、SSE、上传和源站保护矩阵。
+- 第一期生产最多支持一层反向代理或 Ingress，并要求显式配置其 CIDR；`/app`、`/admin` 与 API 默认同域，分离 Origin 时也必须保持同一 schemeful site，并分别进入用户端/管理端白名单。第一期不接入 CDN。代理必须对 AI 改写 SSE 关闭 buffering，idle timeout 必须大于 SSE 最大持续时间；上传限制、客户端 IP、外部 scheme/host 和同站判断只使用可信代理解析结果。后续引入 CDN 必须重新审批缓存、Cookie、CORS、SSE、上传和源站保护矩阵。
 - 登录、验证码发送 / 校验、密码重置和管理员登录使用 MySQL `security_rate_limit_windows` 持久化原子计数与 blocked_until，不能只依赖重启即清零的进程内 limiter；普通请求整形仍可使用开源 limiter。
 - `security_rate_limit_windows` 至少保存 subject hash、action、window start / end、count、`blocked_until`、`expires_at`、status 和 version，并建立 `(expires_at, id)` 清理索引；maintenance pool 固定批次删除过期窗口，防止随机邮箱和 IP 攻击无限制造永久记录。
 - 上传、生成和管理操作分别限流，审计与限流统一使用可信代理解析后的客户端 IP。
@@ -1272,12 +1275,12 @@ web/
   每个管理请求必须校验管理员启用状态和 `session_version`；停用或版本变化立即清理管理
   Session。用户 Session 与管理 Session 不得互相替代。
 - S3、Provider 与 SMTP 密钥允许作为对应业务固定 key 的 `system_configs.value_json` 字段保存；不得进入 API 响应、通用缓存、审计 old/new value、任务 payload、执行计划、日志、事件或 Trace。
-- 所有 HTTP Server 配置 read header、read、write、idle timeout 和 body 上限。
+- 所有 HTTP Server 配置 read header=5s、read=30s、write=5m、idle=60s、header 上限 32768 字节和默认 JSON body 上限 1048576 字节；统一 JSON 绑定必须完整消费请求体、只接受一个 JSON 值，尾随数据同样受上限约束；上传与 SSE 所属任务另行冻结显式特例。
 - 上传防止路径穿越、伪造 MIME、超大图片、解码炸弹和对象覆盖。
 - Provider 与结果下载执行统一 SSRF host allowlist、DNS / IP、重定向、响应体上限和 timeout 策略。
 - `/metrics`、`pprof`、migration 和内部诊断接口不公开暴露。
-- CORS 默认关闭，因为用户端、管理端和 API 同源。
-- 所有业务写操作均为 POST，并使用 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求；前端不获取或回传 CSRF Token，服务端不自行实现 Token 算法。
+- CORS 白名单默认空，仅允许同源。需要分离前端 Origin 时，用户端与管理端使用互不混用的精确白名单；只允许同一 schemeful site，禁止 `*`、`Origin: null`、路径/query/fragment/userinfo 和 `SameSite=None` Session Cookie。合法预检返回 204，非法预检返回 `403 + 100403`，普通 OPTIONS 返回 `405 + 100405`。
+- 所有业务写操作均为 POST，并使用 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求；用户端/管理端分别复用同一组 CORS Origin 白名单。前端不获取或回传 CSRF Token，服务端不自行实现 Token 算法。
 - 管理端本期不引入 MFA；正式商用前必须完成登录审计、独立管理 Session、高风险操作近期认证和二次确认验收。
 
 健康检查边界：`/healthz` 只证明进程存活；`/readyz` 检查初始化完成、schema version、MySQL、当前 Blob，以及配置选中的 Redis Session Store。OpenAI、火山引擎和 SMTP 的临时故障通过 capability health、指标和管理端诊断暴露，不导致基础 API readiness 失败。
@@ -1329,11 +1332,11 @@ go test -race ./...
 - 删除素材与 queued / running run、历史重试并发时，仍被引用的输入和输出 Blob 不得被 GC；引用释放与 GC 竞争必须再次校验对象版本。
 - Blob 已写入后，分别在 output 插入、积分流水、账户更新、稳定槽 CAS、run / job 终态处注入失败，整个 MySQL 事务必须回滚且只留下可清理孤儿 Blob；同一 `run_id + slot_code` 即使恢复时产生不同 output ID 或重复完成，也只能生成一条消费流水，不同 slot 必须各自产生一次正确消费。
 - 验证 `available >= 0`、`reserved >= 0`、reservation 守恒和 account reserved 对账不变量；发现不一致只告警，不自动改账。
-- trusted proxy、登录 / 验证码持久限流、Session 同源 CSRF 防护和管理员高风险操作权限边界。
+- trusted proxy、登录 / 验证码持久限流、Session 同站白名单 CSRF 防护和管理员高风险操作权限边界。
 - 只有 AI 帮写 / AI 改写 endpoint 返回 SSE；图片生成、任务历史、邮件和管理端任务状态保持 polling。SSE 事件不得包含 raw Provider chunk、Prompt、凭据或字符串错误码。
 - 除 `system_configs` 对应业务配置 JSON 的密钥字段外，其他数据库表、日志、事件和 API DTO 不包含密钥、raw prompt 或 raw response。
 - 每个 Entity 都实现静态 `TableName()`；每张业务表都有 `version`，所有 status / 日期时间列分别为 `TINYINT` / `DATETIME(3)`。
-- OpenAPI 只包含 GET / POST；Gin 业务 API 对 PUT / PATCH / DELETE / HEAD / OPTIONS / CONNECT / TRACE 统一返回 405 和整数错误码。S3 外部端点的 CORS 预检与 HEAD 按对象存储兼容矩阵单独测试，不计入 Gin 业务 API。
+- OpenAPI 只包含 GET / POST；Gin 业务 API 对 PUT / PATCH / DELETE / HEAD / CONNECT / TRACE 与其他非标准方法返回 405 和 `100405`，其中 HEAD 线路 body 为空、非标准方法日志归一化为 `OTHER`。OPTIONS 仅作为 CORS 预检：合法预检 204、非法预检 `403 + 100403`、普通 OPTIONS `405 + 100405`。S3 外部端点的 CORS 与 HEAD 按对象存储兼容矩阵单独测试，不计入 Gin 业务 API。
 - OpenAPI 生成 DTO 只能位于 `internal/models/dto/generated`，不得再手写同名 HTTP DTO；Service 内部 Command / View 不得泄漏到 Handler 合同。
 - 所有列表均分页，Repository 不存在无界 `Find` / `Scan` / `Preload`，关键 SQL 通过生产量级数据的 `EXPLAIN ANALYZE`。
 - 同一模型类别 / 能力的多候选覆盖 429、5xx、熔断、认证失败、内容拒绝、用户取消、结果不确定和配置版本切换。
@@ -1346,7 +1349,7 @@ go test -race ./...
 - 建立 Go 1.26 Module、Gin、`server/conf/app.yaml.example` 单文件配置合同、日志、整数错误码、OpenAPI 和依赖装配。
 - 建立 `/app`、`/admin`、用户 API、管理 API 路由组。
 - 从 OpenAPI 生成 `internal/models/dto/generated` 与独立 Web TypeScript transport 类型；先冻结共享 components，业务 operation 由所属任务按字段合同增量加入。增加合同检查，拒绝外部 `$ref`、非 GET / POST、重复 operationId、敏感字段和重复手写 HTTP DTO。
-- 建立 trusted proxy、`CrossOriginProtection` 同源拒绝合同、请求体上限、`/healthz`、`/readyz`、`server migrate up` 和 serve 阶段 schema 校验。
+- 建立受控同站 CORS、trusted proxy、复用白名单的 `CrossOriginProtection` 拒绝合同、请求体上限、`/healthz`、`/readyz`、`server migrate up` 和 serve 阶段 schema 校验。
 - 按所有者授权锁定 `logit v1.0.0` 并作为 slog Handler；正式发布前补齐公开许可证据。
 
 ### G0.5：状态机、幂等与故障注入定稿

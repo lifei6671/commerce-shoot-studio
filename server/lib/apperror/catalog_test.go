@@ -20,6 +20,8 @@ func TestFirstErrorCatalog(t *testing.T) {
 		rangeEnd   apperror.Code
 	}{
 		{name: "INVALID_REQUEST", err: apperror.ErrInvalidRequest, code: 100400, httpStatus: http.StatusBadRequest, message: "请求参数无效", rangeStart: 100000, rangeEnd: 100999},
+		{name: "FORBIDDEN", err: apperror.ErrForbidden, code: 100403, httpStatus: http.StatusForbidden, message: "请求被拒绝", rangeStart: 100000, rangeEnd: 100999},
+		{name: "NOT_FOUND", err: apperror.ErrNotFound, code: 100404, httpStatus: http.StatusNotFound, message: "请求路径不存在", rangeStart: 100000, rangeEnd: 100999},
 		{name: "METHOD_NOT_ALLOWED", err: apperror.ErrMethodNotAllowed, code: 100405, httpStatus: http.StatusMethodNotAllowed, message: "请求方法不允许", rangeStart: 100000, rangeEnd: 100999},
 		{name: "REQUEST_BODY_TOO_LARGE", err: apperror.ErrRequestBodyTooLarge, code: 100413, httpStatus: http.StatusRequestEntityTooLarge, message: "请求体过大", rangeStart: 100000, rangeEnd: 100999},
 		{name: "INTERNAL_ERROR", err: apperror.ErrInternal, code: 100500, httpStatus: http.StatusInternalServerError, message: "服务暂时不可用", rangeStart: 100000, rangeEnd: 100999},
@@ -70,6 +72,8 @@ func TestStableCodeConstants(t *testing.T) {
 		rangeEnd   apperror.Code
 	}{
 		{name: "INVALID_REQUEST", code: apperror.CodeInvalidRequest, want: 100400, rangeStart: 100000, rangeEnd: 100999},
+		{name: "FORBIDDEN", code: apperror.CodeForbidden, want: 100403, rangeStart: 100000, rangeEnd: 100999},
+		{name: "NOT_FOUND", code: apperror.CodeNotFound, want: 100404, rangeStart: 100000, rangeEnd: 100999},
 		{name: "METHOD_NOT_ALLOWED", code: apperror.CodeMethodNotAllowed, want: 100405, rangeStart: 100000, rangeEnd: 100999},
 		{name: "REQUEST_BODY_TOO_LARGE", code: apperror.CodeRequestBodyTooLarge, want: 100413, rangeStart: 100000, rangeEnd: 100999},
 		{name: "INTERNAL_ERROR", code: apperror.CodeInternalError, want: 100500, rangeStart: 100000, rangeEnd: 100999},
