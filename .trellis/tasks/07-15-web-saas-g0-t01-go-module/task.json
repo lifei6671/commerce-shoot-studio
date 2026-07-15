@@ -1,0 +1,31 @@
+{
+  "id": "web-saas-g0-t01-go-module",
+  "name": "web-saas-g0-t01-go-module",
+  "title": "建立 Web SaaS server Go Module",
+  "description": "建立 server/ Go Module、精确 Go 工具链合同测试和最小可编译进程入口，不提前实现 HTTP、配置、数据库或 Web 功能。",
+  "status": "in_progress",
+  "dev_type": "backend",
+  "scope": "server/",
+  "package": null,
+  "priority": "P0",
+  "creator": "lifei6671",
+  "assignee": "lifei6671",
+  "createdAt": "2026-07-15",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dev/10260629",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "07-14-web-saas-go-implementation",
+  "relatedFiles": [
+    "server/go.mod",
+    "server/cmd/server/main.go",
+    "server/internal/buildcontract/module_contract_test.go",
+    "docs/2026-07-14-web-saas-go-implementation-task-checklist.md"
+  ],
+  "notes": "",
+  "meta": {}
+}
