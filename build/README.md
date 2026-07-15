@@ -139,16 +139,19 @@ CLI。Windows hosted runner 当前只生成 NSIS，不进入 WiX/VBScript 依赖
 `commerce-shoot-studio-unsigned-[platform]-[arch]-[bundle]` 模式，四个矩阵项及不同
 bundle 不会互相覆盖。
 
-手动触发只生成 Actions Artifacts，不创建 Release。推送与
-`desktop/src-tauri/tauri.conf.json` 版本一致的 `v*` 标签时，四个矩阵项必须全部成功，
-随后发布 Job 才会汇总并校验 2 个 DMG 和 2 个 NSIS `setup.exe`。发布流程先创建 Draft，
+手动触发只生成 Actions Artifacts，不创建 Release。`v*` 标签会触发构建；标签必须符合
+`vMAJOR.MINOR.PATCH` 格式，并作为本次发布的唯一版本事实源：构建 Job 去掉前缀
+`v`，通过 Tauri `--config` 临时覆盖应用版本，不要求修改 `tauri.conf.json`、Cargo 或 npm
+版本文件。四个矩阵项必须全部成功，随后发布 Job 才会汇总并校验 2 个 DMG 和 2 个 NSIS
+`setup.exe`。发布流程先创建 Draft，
 确认 macOS 与 Windows 均各有 ARM64、x64 产物，上传并精确复核四个安装包后再公开；
 重跑时可以更新未公开的 Draft，但 Draft 存在额外资产时会停止发布，也不会覆盖已公开
 Release 的资产。`.app` 目录、实验性 MSI 和其它中间文件不会上传到 Release。
 
-例如，应用版本为 `0.1.0` 时应推送 `v0.1.0`。标签不匹配或安装包数量不完整时，发布
-Job 会明确失败且不公开不完整 Release。预发布版本（如 `0.2.0-beta.1`）会创建
-Prerelease。Actions Artifact 仍保留用于逐 Job 调试，并受 GitHub 的保留期限约束。
+例如，推送 `v0.1.2` 时，四个平台安装包和 GitHub Release 均使用 `0.1.2`；非法标签格式
+或安装包数量不完整时，发布 Job 会明确失败且不公开不完整 Release。预发布版本（如
+`v0.2.0-beta.1`）会创建 Prerelease。Actions Artifact 仍保留用于逐 Job 调试，并受
+GitHub 的保留期限约束。
 
 2026-07-14 的[首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
 已经验证两个 macOS Job 成功；两个 Windows Job 的应用与 NSIS 构建也成功，但同一 Job

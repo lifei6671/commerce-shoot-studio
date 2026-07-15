@@ -26,13 +26,9 @@ repository="${GITHUB_REPOSITORY:-}"
 [[ -n "${release_tag}" ]] || fail "GITHUB_REF_NAME 不能为空。"
 [[ -n "${repository}" ]] || fail "GITHUB_REPOSITORY 不能为空。"
 
-app_version="$(jq -er '.version | select(type == "string" and length > 0)' "${TAURI_CONFIG}")" \
-  || fail "无法从 Tauri 配置读取版本号。"
+app_version="$(bash "${SCRIPT_DIR}/resolve-release-version.sh" "${release_tag}")"
 product_name="$(jq -er '.productName | select(type == "string" and length > 0)' "${TAURI_CONFIG}")" \
   || fail "无法从 Tauri 配置读取产品名称。"
-expected_tag="v${app_version}"
-[[ "${release_tag}" == "${expected_tag}" ]] \
-  || fail "标签 ${release_tag} 与应用版本 ${app_version} 不一致；期望标签为 ${expected_tag}。"
 
 dmg_files=()
 while IFS= read -r -d '' artifact; do

@@ -3,8 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 PUBLISH_SCRIPT="${REPO_ROOT}/build/publish-github-release.sh"
+VERSION_SCRIPT="${REPO_ROOT}/build/resolve-release-version.sh"
+WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/package-desktop.yml"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
@@ -17,7 +19,9 @@ ARTIFACTS_DIR="${TMP_DIR}/release artifacts"
 FAKE_BIN_DIR="${TMP_DIR}/bin"
 FAKE_GH_STATE="${TMP_DIR}/gh-state"
 FAKE_GH_LOG="${TMP_DIR}/gh.log"
-APP_VERSION="$(jq -r '.version' "${REPO_ROOT}/desktop/src-tauri/tauri.conf.json")"
+CONFIG_VERSION="$(jq -r '.version' "${REPO_ROOT}/desktop/src-tauri/tauri.conf.json")"
+APP_VERSION="9.8.7"
+RELEASE_TAG="v${APP_VERSION}"
 mkdir -p "${ARTIFACTS_DIR}" "${FAKE_BIN_DIR}" "${FAKE_GH_STATE}"
 touch \
   "${ARTIFACTS_DIR}/商拍工坊_${APP_VERSION}_aarch64.dmg" \
@@ -77,12 +81,25 @@ esac
 EOF
 chmod +x "${FAKE_BIN_DIR}/gh"
 
+[[ "$(bash "${VERSION_SCRIPT}" "${RELEASE_TAG}")" == "${APP_VERSION}" ]] \
+  || fail "无法从稳定版标签解析应用版本。"
+[[ "$(bash "${VERSION_SCRIPT}" 'v2.0.0-beta.1+build.5')" == "2.0.0-beta.1+build.5" ]] \
+  || fail "无法从预发布标签解析应用版本。"
+if bash "${VERSION_SCRIPT}" "release-${APP_VERSION}" >/dev/null 2>&1; then
+  fail "非法发布标签仍然被解析为应用版本。"
+fi
+
+grep -q 'resolve-release-version.sh' "${WORKFLOW_FILE}" \
+  || fail "构建 workflow 未从标签解析应用版本。"
+grep -q -- '--config ../build/tauri-ci-version.json' "${WORKFLOW_FILE}" \
+  || fail "构建 workflow 未向 Tauri 传递标签版本覆盖配置。"
+
 run_publish() {
   PATH="${FAKE_BIN_DIR}:${PATH}" \
     GH_BIN=gh \
     FAKE_GH_STATE="${FAKE_GH_STATE}" \
     FAKE_GH_LOG="${FAKE_GH_LOG}" \
-    GITHUB_REF_NAME="v${APP_VERSION}" \
+    GITHUB_REF_NAME="${RELEASE_TAG}" \
     GITHUB_REPOSITORY=lifei6671/commerce-shoot-studio \
     "${PUBLISH_SCRIPT}" "${ARTIFACTS_DIR}"
 }
@@ -94,6 +111,11 @@ run_publish
 grep -q 'release create' "${FAKE_GH_LOG}" || fail "未创建 Draft Release。"
 grep -q 'release upload' "${FAKE_GH_LOG}" || fail "未上传构建物。"
 grep -q 'release edit' "${FAKE_GH_LOG}" || fail "未发布 Draft Release。"
+release_create_log="$(grep 'release create' "${FAKE_GH_LOG}" | head -n 1)"
+[[ "${release_create_log}" == *"${APP_VERSION}"* ]] \
+  || fail "Release 标题未使用标签版本。"
+[[ "${release_create_log}" != *"${CONFIG_VERSION}"* ]] \
+  || fail "Release 标题仍然使用 Tauri 配置版本。"
 
 log_lines_before="$(wc -l <"${FAKE_GH_LOG}" | tr -d ' ')"
 run_publish
@@ -128,10 +150,10 @@ if PATH="${FAKE_BIN_DIR}:${PATH}" \
   GH_BIN=gh \
   FAKE_GH_STATE="${FAKE_GH_STATE}" \
   FAKE_GH_LOG="${FAKE_GH_LOG}" \
-  GITHUB_REF_NAME="v${APP_VERSION}-mismatch" \
+  GITHUB_REF_NAME="release-${APP_VERSION}" \
   GITHUB_REPOSITORY=lifei6671/commerce-shoot-studio \
   "${PUBLISH_SCRIPT}" "${ARTIFACTS_DIR}" >/dev/null 2>&1; then
-  fail "标签与应用版本不一致时仍然继续发布。"
+  fail "非法发布标签仍然继续发布。"
 fi
 
 mv \

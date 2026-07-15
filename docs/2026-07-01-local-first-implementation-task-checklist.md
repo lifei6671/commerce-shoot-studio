@@ -1187,7 +1187,10 @@ capability 查询结果和 `cscript.exe` 命令存在，不能证明 WiX ICE 所
 NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后的 Windows artifact
 仍待下一次在线运行核验；`windows-11-arm` runner 仍处于 Public Preview。
 
-2026-07-14 已增加统一发布 Job：仅 `v*` 标签触发，且标签必须与 Tauri 应用版本一致；
+2026-07-14 已增加统一发布 Job；2026-07-15 已将版本来源改为标签驱动：`v*` 标签触发
+构建，标签必须符合 `vMAJOR.MINOR.PATCH` 格式，并作为本次发布的唯一版本事实源；四个
+构建 Job 通过临时 Tauri `--config` 覆盖应用版本，不要求同步修改 `tauri.conf.json`、
+Cargo 或 npm 版本文件。
 四个矩阵项全部成功后，发布 Job 以独立的 `actions: read`、`contents: write` 权限下载
 Artifacts，严格校验 2 个 DMG 和 2 个 NSIS 安装包，再通过 Draft → 上传 → 复核 → 公开
 的顺序创建对应 GitHub Release；四个安装包必须覆盖 macOS 与 Windows 各自的 ARM64、
@@ -1202,7 +1205,7 @@ x64 架构，远端资产集合也必须精确匹配，避免 Draft 遗留资产
 - [ ] Windows ARM64 的 NSIS 在对应宿主完成 artifact、安装、资源和启动验收。
 - [ ] Windows MSI 的 VBScript/WiX ICE 运行环境修复后，分别完成 x64、ARM64 构建与安装/卸载验收。
 - [ ] GitHub Actions 四个 Job（Windows 为 NSIS-only）在线成功，并下载核验各自未签名 artifact 的架构、资源和安装/启动行为。
-- [ ] 推送与应用版本一致的 `v*` 标签后，GitHub Release 仅在四个 Job 全部成功时公开，并包含 2 个 DMG 与 2 个 NSIS 安装包。
+- [ ] 推送符合 `vMAJOR.MINOR.PATCH` 格式的标签后，GitHub Release 与四个平台安装包均使用标签版本，仅在四个 Job 全部成功时公开，并包含 2 个 DMG 与 2 个 NSIS 安装包。
 - [ ] 从 GitHub Actions 下载的 Release 构建在新旧 workspace 中均不显示或执行 Mock Local，旧 workspace 清理后历史 invocation 审计仍可追溯。
 - [ ] 正式发布前完成 macOS 签名/公证与 Windows Authenticode 策略确认和验证。
 
