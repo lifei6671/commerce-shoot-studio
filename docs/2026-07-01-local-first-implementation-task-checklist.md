@@ -1185,7 +1185,7 @@ macOS ARM64、macOS Intel x64、Windows x64、Windows ARM64 四个独立矩阵�
 capability 查询结果和 `cscript.exe` 命令存在，不能证明 WiX ICE 所需的 VBScript 引擎
 可用。为避免已成功的 NSIS 被 MSI 连带阻断，稳定 CI 已将两个 Windows Job 收口为
 NSIS-only；本地 PowerShell 仍保留 MSI 参数作为实验能力。调整后的 Windows artifact
-仍待下一次在线运行核验；`windows-11-arm` runner 仍处于 Public Preview。
+已在后续 v0.1.3 在线运行中成功上传；`windows-11-arm` runner 仍处于 Public Preview。
 
 2026-07-14 已增加统一发布 Job；2026-07-15 已将版本来源改为标签驱动：`v*` 标签触发
 构建，标签必须符合 `vMAJOR.MINOR.PATCH` 格式，并作为本次发布的唯一版本事实源；四个
@@ -1194,10 +1194,15 @@ Cargo 或 npm 版本文件。
 四个矩阵项全部成功后，发布 Job 以独立的 `actions: read`、`contents: write` 权限下载
 Artifacts，严格校验 2 个 DMG 和 2 个 NSIS 安装包，再通过 Draft → 上传 → 复核 → 公开
 的顺序创建对应 GitHub Release；四个安装包必须覆盖 macOS 与 Windows 各自的 ARM64、
-x64 架构，远端资产集合也必须精确匹配，避免 Draft 遗留资产被意外公开。手动触发仍只
-保留 Actions Artifacts；重跑可以覆盖未公开 Draft 的同名资产，但已公开 Release 只
-核验、不覆盖。该链路已有本地 fake `gh` 回归证据，真实权限和 Release 资产仍待下一次
-在线标签构建验收。
+x64 架构。上传边界将 Tauri 生成的中文安装包复制为带平台和架构的稳定 ASCII 名称，远端
+资产集合也必须精确匹配，避免 GitHub 文件名改写或 Draft 遗留资产被意外公开。手动触发
+仍只保留 Actions Artifacts；重跑可以覆盖未公开 Draft 的同名资产，但已公开 Release 只
+核验、不覆盖。
+
+2026-07-15 的 [v0.1.3 在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29385717828)
+已验证四个构建 Job 与六个 Actions Artifacts 均成功；发布 Job 创建 Draft 并上传后，因
+GitHub 改写含中文的 Release 资产文件名而在原名精确复核阶段失败。当前已补充 ASCII 上传
+名称映射及 fake `gh` 回归断言，真实 Release 公开仍待下一次在线标签构建验收。
 
 - [ ] macOS ARM64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。
 - [ ] macOS x64 的 app、dmg 在对应宿主完成构建、架构、资源和启动验收。

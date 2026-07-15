@@ -47,13 +47,17 @@ done < <(find "${ARTIFACTS_DIR}" -type f -name '*-setup.exe' -print0)
 
 macos_arm64_count=0
 macos_x64_count=0
+macos_arm64_asset=""
+macos_x64_asset=""
 for asset in "${dmg_files[@]}"; do
   case "$(basename "${asset}")" in
     *_aarch64.dmg|*_arm64.dmg)
       macos_arm64_count=$((macos_arm64_count + 1))
+      macos_arm64_asset="${asset}"
       ;;
     *_x64.dmg|*_x86_64.dmg|*_amd64.dmg)
       macos_x64_count=$((macos_x64_count + 1))
+      macos_x64_asset="${asset}"
       ;;
     *)
       fail "无法从 DMG 文件名识别目标架构：$(basename "${asset}")。"
@@ -65,13 +69,17 @@ done
 
 windows_arm64_count=0
 windows_x64_count=0
+windows_arm64_asset=""
+windows_x64_asset=""
 for asset in "${exe_files[@]}"; do
   case "$(basename "${asset}")" in
     *_arm64-setup.exe|*_aarch64-setup.exe)
       windows_arm64_count=$((windows_arm64_count + 1))
+      windows_arm64_asset="${asset}"
       ;;
     *_x64-setup.exe|*_x86_64-setup.exe|*_amd64-setup.exe)
       windows_x64_count=$((windows_x64_count + 1))
+      windows_x64_asset="${asset}"
       ;;
     *)
       fail "无法从 NSIS 文件名识别目标架构：$(basename "${asset}")。"
@@ -81,7 +89,20 @@ done
 [[ "${windows_arm64_count}" -eq 1 && "${windows_x64_count}" -eq 1 ]] \
   || fail "Windows Release 必须各包含 1 个 ARM64 与 x64 NSIS 安装包。"
 
-release_assets=("${dmg_files[@]}" "${exe_files[@]}")
+release_assets_dir="$(mktemp -d)"
+trap 'rm -rf "${release_assets_dir}"' EXIT
+release_asset_version="${app_version//+/_}"
+release_assets=(
+  "${release_assets_dir}/commerce-shoot-studio_${release_asset_version}_macos_arm64.dmg"
+  "${release_assets_dir}/commerce-shoot-studio_${release_asset_version}_macos_x64.dmg"
+  "${release_assets_dir}/commerce-shoot-studio_${release_asset_version}_windows_arm64-setup.exe"
+  "${release_assets_dir}/commerce-shoot-studio_${release_asset_version}_windows_x64-setup.exe"
+)
+cp "${macos_arm64_asset}" "${release_assets[0]}"
+cp "${macos_x64_asset}" "${release_assets[1]}"
+cp "${windows_arm64_asset}" "${release_assets[2]}"
+cp "${windows_x64_asset}" "${release_assets[3]}"
+
 for ((asset_index = 0; asset_index < ${#release_assets[@]}; asset_index++)); do
   asset="${release_assets[${asset_index}]}"
   asset_name="$(basename "${asset}")"

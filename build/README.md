@@ -139,6 +139,20 @@ CLI。Windows hosted runner 当前只生成 NSIS，不进入 WiX/VBScript 依赖
 `commerce-shoot-studio-unsigned-[platform]-[arch]-[bundle]` 模式，四个矩阵项及不同
 bundle 不会互相覆盖。
 
+上传 GitHub Release 前，发布脚本会保留 Actions Artifact 内的原始文件，并把四个安装包
+复制为稳定的 ASCII 文件名，避免 GitHub 按特殊字符规则改写中文文件名后导致严格校验失败：
+
+```text
+commerce-shoot-studio_<version>_macos_arm64.dmg
+commerce-shoot-studio_<version>_macos_x64.dmg
+commerce-shoot-studio_<version>_windows_arm64-setup.exe
+commerce-shoot-studio_<version>_windows_x64-setup.exe
+```
+
+若标签含 SemVer 构建元数据，文件名中的 `+` 会映射为 `_`；Release 标签和应用内版本仍保留
+原始 SemVer，例如 `v0.2.0-beta.1+build.5` 对应文件名版本段
+`0.2.0-beta.1_build.5`。
+
 手动触发只生成 Actions Artifacts，不创建 Release。`v*` 标签会触发构建；标签必须符合
 `vMAJOR.MINOR.PATCH` 格式，并作为本次发布的唯一版本事实源：构建 Job 去掉前缀
 `v`，通过 Tauri `--config` 临时覆盖应用版本，不要求修改 `tauri.conf.json`、Cargo 或 npm
@@ -155,10 +169,14 @@ GitHub 的保留期限约束。
 
 2026-07-14 的[首次在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29325750147)
 已经验证两个 macOS Job 成功；两个 Windows Job 的应用与 NSIS 构建也成功，但同一 Job
-后续的 MSI `light.exe` 失败，导致 Windows artifact 未上传。
-因此 workflow 已将 x64 与 ARM64 的稳定 CI bundle 收口为 NSIS。调整后的 Windows Job
-仍需再次在线运行并核验 artifact，且 `windows-11-arm` 仍处于 Public Preview；不可用时
-应记录阻塞或改用 ARM64 自托管 runner，不能用 x64 产物替代 ARM64 验收。
+后续的 MSI `light.exe` 失败，导致 Windows artifact 未上传，因此 workflow 已将 x64 与
+ARM64 的稳定 CI bundle 收口为 NSIS。
+
+2026-07-15 的 [v0.1.3 在线运行](https://github.com/lifei6671/commerce-shoot-studio/actions/runs/29385717828)
+中，四个构建 Job 和六个 Actions Artifacts 均成功；统一发布 Job 在创建 Draft 并上传后，
+因 GitHub 改写含中文的资产文件名而无法按原名复核。发布脚本现已在上传边界使用上述 ASCII
+名称，下一次标签构建仍需验证 Release 可正常公开。`windows-11-arm` runner 仍处于 Public
+Preview；不可用时应记录阻塞或改用 ARM64 自托管 runner，不能用 x64 产物替代 ARM64 验收。
 
 ## 产物目录
 
@@ -174,11 +192,11 @@ desktop/src-tauri/target/<target-triple>/release/bundle/
 
 ## 验证状态
 
-脚本入口和 CI 编译成功都不等于四种架构已经完成发布验收。首次在线运行只证明 macOS
-产物已上传，以及两个 Windows 架构都能走完 NSIS 生成阶段；调整后的 Windows artifact、
-产物架构、内置模特资源、安装/启动/卸载，以及包含空格或中文的本地仓库路径仍需补验。
-MSI、签名和公证仍需单独设计与验证。GitHub Release 自动发布链路也需要通过下一次
-真实 `v*` 标签构建核验权限、四个资产名称和安装行为。
+脚本入口和 CI 编译成功都不等于四种架构已经完成发布验收。v0.1.3 已证明调整后的四个构建
+Job 和六个 Actions Artifacts 可在线成功，但产物架构、内置模特资源、安装/启动/卸载，
+以及包含空格或中文的本地仓库路径仍需补验。MSI、签名和公证仍需单独设计与验证。GitHub
+Release 自动发布链路还需要通过下一次真实 `v*` 标签构建核验 ASCII 资产名称、Draft 公开
+和安装行为。
 
 本轮新增 Release 模型边界也仍待产物验收：打包应用的 provider profiles、模型配置、
 模型配置 UI 和任务执行链都不能暴露或执行 Mock Local；首次读取或解析含当前 mock

@@ -20,8 +20,15 @@ FAKE_BIN_DIR="${TMP_DIR}/bin"
 FAKE_GH_STATE="${TMP_DIR}/gh-state"
 FAKE_GH_LOG="${TMP_DIR}/gh.log"
 CONFIG_VERSION="$(jq -r '.version' "${REPO_ROOT}/desktop/src-tauri/tauri.conf.json")"
-APP_VERSION="9.8.7"
+APP_VERSION="9.8.7-beta.1+build.5"
 RELEASE_TAG="v${APP_VERSION}"
+RELEASE_ASSET_VERSION="${APP_VERSION//+/_}"
+EXPECTED_RELEASE_ASSETS=(
+  "commerce-shoot-studio_${RELEASE_ASSET_VERSION}_macos_arm64.dmg"
+  "commerce-shoot-studio_${RELEASE_ASSET_VERSION}_macos_x64.dmg"
+  "commerce-shoot-studio_${RELEASE_ASSET_VERSION}_windows_arm64-setup.exe"
+  "commerce-shoot-studio_${RELEASE_ASSET_VERSION}_windows_x64-setup.exe"
+)
 mkdir -p "${ARTIFACTS_DIR}" "${FAKE_BIN_DIR}" "${FAKE_GH_STATE}"
 touch \
   "${ARTIFACTS_DIR}/商拍工坊_${APP_VERSION}_aarch64.dmg" \
@@ -108,6 +115,16 @@ run_publish
 [[ "$(<"${FAKE_GH_STATE}/status")" == "published" ]] || fail "新 Release 未发布。"
 [[ "$(wc -l <"${FAKE_GH_STATE}/assets" | tr -d ' ')" == "4" ]] \
   || fail "新 Release 未上传四个安装包。"
+for expected_asset in "${EXPECTED_RELEASE_ASSETS[@]}"; do
+  grep -Fxq "${expected_asset}" "${FAKE_GH_STATE}/assets" \
+    || fail "Release 缺少规范化后的构建物：${expected_asset}。"
+done
+if grep -q '商拍工坊' "${FAKE_GH_STATE}/assets"; then
+  fail "Release 仍然使用会被 GitHub 改写的中文构建物名称。"
+fi
+if grep -q '+' "${FAKE_GH_STATE}/assets"; then
+  fail "Release 仍然使用会被 GitHub 改写的构建元数据分隔符。"
+fi
 grep -q 'release create' "${FAKE_GH_LOG}" || fail "未创建 Draft Release。"
 grep -q 'release upload' "${FAKE_GH_LOG}" || fail "未上传构建物。"
 grep -q 'release edit' "${FAKE_GH_LOG}" || fail "未发布 Draft Release。"
