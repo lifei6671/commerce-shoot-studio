@@ -1,6 +1,6 @@
 # 商拍工坊 Web SaaS Go 技术方案
 
-> 文档状态：方案草案，尚未开始实现
+> 文档状态：方案已确认，G0 实施中
 > 创建日期：2026-07-14
 > 适用范围：Web 用户端、Web 管理端、Go 后端、进程内任务执行器
 > 关联文档：`docs/2026-06-30-local-first-saas-ready-implementation-plan.md`
@@ -207,7 +207,7 @@ server/
 │   └── storage/                    # Go CDK Blob 初始化与业务键策略
 ├── lib/
 │   ├── apperror/                   # 统一错误码和错误类型
-│   ├── constant/                   # 状态、错误码、Header、分页等全局常量
+│   ├── constant/                   # 强类型状态、领域枚举、Header、分页等全局常量
 │   ├── logger/                     # slog / logit 初始化
 │   ├── response/                   # Gin 错误响应写出
 │   └── helper/                     # 已有跨模块复用需求的小函数
@@ -252,7 +252,7 @@ Gin Handler -> Service -> Repository / Storage / Provider
 `lib` 只保存确实跨模块复用的基础能力，不建立无边界的 `utils` 大包：
 
 - `apperror`：稳定错误码、HTTP status 和可安全展示的中文消息。
-- `constant`：整数错误码、状态 `TINYINT` 映射、Header 名、上下文键、分页上限等跨模块常量。
+- `constant`：状态 `TINYINT` 映射、稳定领域枚举、Header 名、上下文键、分页上限等跨模块常量；错误码只由 `apperror` 维护。
 - `logger`：日志初始化和 `slog.Handler` 装配。
 - `response`：统一错误响应，不承载业务逻辑。
 - `helper`：只有出现当前真实复用时才增加函数。
@@ -360,7 +360,9 @@ type ErrorResponse struct {
 规则：
 
 - `lib/apperror` 使用 `int` 定义稳定错误码、HTTP status、安全消息和 cause；错误码按模块划分号段，禁止直接返回字符串错误码。
-- 建议号段：`100xxx` 通用、`110xxx` 认证、`120xxx` 用户、`130xxx` 资产、`140xxx` 生成、`150xxx` 模型、`160xxx` 配置 / 邮件、`170xxx` 积分、`190xxx` 管理端。HTTP status 表示协议结果，`code` 表示稳定业务原因，两者不得混用。
+- 固定号段：`100xxx` 通用、`110xxx` 认证、`120xxx` 用户、`130xxx` 资产、`140xxx` 生成、`150xxx` 模型、`160xxx` 配置 / 邮件、`170xxx` 积分、`190xxx` 管理端。HTTP status 表示协议结果，`code` 表示稳定业务原因，两者不得混用。
+- G0-T03 首批 HTTP 错误固定为：`INVALID_REQUEST=100400/400`、`METHOD_NOT_ALLOWED=100405/405`、`REQUEST_BODY_TOO_LARGE=100413/413`、`INTERNAL_ERROR=100500/500`、`GENERATION_TASK_NOT_FOUND=140404/404`、`AI_REWRITE_IN_PROGRESS=150409/409`。`GENERATION_PROVIDER_RESULT_UNCERTAIN=140504` 只作为任务结果错误码，本阶段不定义同步 HTTP 映射，禁止根据后三位推导 HTTP status。
+- G0-T03 只冻结 `async_jobs` 的 `queued=0`、`running=1` 和模型类别 `text-to-text=1`、`text-to-image=2`、`image-to-image=3`、`image-to-text=4`。其他状态数值、迁移和故障恢复规则留给 G0.5。
 - Service 返回业务错误，不依赖 Gin。
 - 全局错误中间件使用 `errors.Is` / `errors.As` 映射响应。
 - MySQL、存储和 Provider 原始错误只进入脱敏内部日志，不直接返回前端。

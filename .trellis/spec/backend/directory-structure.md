@@ -19,6 +19,16 @@ server/
 │   └── app.yaml.example
 ├── go.mod
 ├── go.sum
+├── lib/
+│   ├── apperror/
+│   │   ├── catalog.go
+│   │   ├── catalog_test.go
+│   │   ├── error.go
+│   │   └── error_test.go
+│   └── constant/
+│       ├── async_job_status.go
+│       ├── constant_test.go
+│       └── model_category.go
 ├── cmd/server/main.go
 └── internal/
     ├── buildcontract/module_contract_test.go
@@ -38,6 +48,10 @@ server/
 - `internal/buildcontract` contains test-only assertions for the module and build toolchain.
 - `internal/config` owns startup YAML loading, work-directory derivation, typed validation, and
   the storage-independent runtime JSON document decoding boundary.
+- `lib/apperror` is the sole source of stable integer error codes, HTTP mappings, safe public messages,
+  and wrapped causes. It has no Gin, OpenAPI, response, or logger dependency.
+- `lib/constant` owns strongly typed persisted statuses and stable domain enums. Keep each domain in its
+  own file and never create a generic `status.go` or duplicate application error codes here.
 - `conf/app.yaml.example` is the only tracked startup configuration template. It documents every current
   field in Simplified Chinese and contains no deployable credentials. Users copy or rename it to
   Git-ignored `conf/app.yaml`, or explicitly pass another complete `app.yaml`; the example is never loaded
@@ -59,6 +73,9 @@ server/
 
 - Process entry: `server/cmd/server/main.go`.
 - Executable module contract: `server/internal/buildcontract/module_contract_test.go`.
+- Application-error contract: `server/lib/apperror/catalog.go` and `server/lib/apperror/error.go`.
+- Persisted status and enum contracts: `server/lib/constant/async_job_status.go` and
+  `server/lib/constant/model_category.go`.
 
 ## Scenario: Web SaaS Go module and toolchain contract
 
