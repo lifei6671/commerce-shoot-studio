@@ -170,19 +170,10 @@ server/
 ├── api/
 │   └── openapi.yaml                # 用户端和管理端 API 合同
 ├── conf/
-│   ├── app.yaml                    # 系统入口配置；仓库模板不含真实凭据
-│   ├── database/mysql.yaml
-│   ├── session/session.yaml        # cookie / redis Store 选择
-│   ├── session/redis.yaml
-│   ├── mail/smtp.yaml
-│   ├── storage/storage.yaml
-│   ├── model/models.yaml
+│   ├── app.yaml.example            # 唯一提交的完整配置模板，逐字段中文说明且不含真实凭据
+│   ├── app.yaml                    # 实际运行配置，本地/部署生成并由 Git 忽略
 │   ├── model/prompts/<capability>/vN.tmpl
 │   ├── model/capabilities/<catalogVersion>.yaml
-│   ├── worker/worker.yaml
-│   ├── log/log.yaml
-│   ├── observability/observability.yaml
-│   └── security/security.yaml
 ├── migrations/                     # 显式 MySQL up/down SQL
 ├── internal/
 │   ├── app/                        # 依赖装配、启动、优雅停机
@@ -229,11 +220,15 @@ server/
 
 配置约束：
 
-- 所有静态配置只能位于 `server/conf/`；默认入口固定为 `server/conf/app.yaml`，其他配置按领域放入子目录。
-- 配置加载顺序固定为：领域默认 YAML -> 部署实例 `app.yaml` 与领域配置覆盖 -> 启动后读取 MySQL `system_configs` 运行时配置。第一期不使用环境变量注入或 Secret Manager。启动时完成结构校验；选择 Redis Session Store 但 Redis 不可用时快速失败。
-- MySQL、Redis、Cookie Session key、验证码派生/校验 key 等启动必需凭据直接写入部署实例配置文件。仓库只提交空值或占位模板，真实部署配置不得提交到 Git。
+- 仓库只提交 `server/conf/app.yaml.example`：它必须完整列出当前启动配置字段并逐项提供简体中文说明，但所有密码和密钥保持空值。用户复制或改名为 `server/conf/app.yaml` 后填写真实值；实际 `app.yaml` 由 Git 精确忽略，加载器不会自动读取 `.example`。
+- 配置入口未显式传入时固定加载进程工作目录下的 `conf/app.yaml`，也可显式传入另一份完整 `app.yaml`；以加载文件为起点，它的上一级目录（即文件所在目录）是配置工作目录。单个 `app.yaml` 直接内联 MySQL、Session、Security 和条件 Redis 配置，不引用领域 YAML，不在不同配置文件之间继承或覆盖，缺字段快速失败；启动后再读取 MySQL `system_configs` 运行时配置。第一期不使用环境变量注入、Secret Manager 或热更新；选择 Redis Session Store 但 Redis 不可用时快速失败。
+- MySQL 密码、Redis 密码（目标启用认证时）、Cookie Session key、验证码派生/校验 key 等启动凭据直接写入部署实例配置文件。仓库只提交空值或占位模板，真实部署配置不得提交到 Git；受控内网无认证 Redis 可显式使用空密码，但地址与其他连接字段仍必须完整校验。
 - S3、SMTP、OpenAI、火山引擎等非启动必需配置及密钥由管理员在线维护，并直接写入 `system_configs`。普通用户没有配置权限；第一期不新建独立密钥表，也不引入应用层加密或外部密钥管理组件。
 - 启动级配置不能在线修改；S3 存储后端和 Session Store 的切换保存后明确提示重启生效，不实现热切换。
+
+G0-T02 的启动配置合同固定如下：`app.yaml` 使用 `version: 1`，并直接包含 `mysql`、`session`、`security` 和条件使用的 `redis`。MySQL 使用结构化 host、port、database、username、password、`tls_mode`、连接/读写 timeout 与连接池字段；`dsn_params: map[string]string` 只保存后续驱动的自定义查询参数，键名大小写不敏感地拒绝 `tls`、`timeout`、`readTimeout`、`writeTimeout`、`parseTime`、`loc` 以及用户、密码、网络、地址、库名等连接身份字段，后续装配强制 `parseTime=true`、`loc=UTC`。Session Store 只允许 `cookie` / `redis`；Redis 第一版只允许单节点直连，密码可为空以支持明确的内网无认证实例，不支持 Sentinel、Cluster 或静默降级。开发调试目标确认为 MySQL `192.168.1.6:13306` / `commerce_shoot_studio` 与无密码 Redis `192.168.1.6:6379`，但 MySQL 密码和本地 Session/验证码密钥不得写入仓库模板。
+
+启动密钥统一使用标准 Base64：用户端和管理端的 Session authentication key 解码后各为 64 字节，AES-256 encryption key 各为 32 字节，验证码 derivation key / verification key 各为 32 字节；所有密钥彼此独立。仓库模板中的凭据保持空值，因此模板可严格解析但不能作为可启动配置。`system_configs` 在 G0-T02 只建立存储无关的原始 JSON source Port 和严格 typed decoder，拒绝未知字段、错误类型与尾随 JSON，并调用具体类型的 `Validate()`；真实表结构、固定业务 key 和业务 schema 仍由 G1 任务定义。
 
 ### 4.1 分层约束
 
@@ -752,13 +747,13 @@ Repository 禁止无条件 `Find`、`Scan`、`Preload` 把全表读入内存。�
 
 第一期使用 MIT 许可证的 `github.com/gin-contrib/sessions`：
 
-- `server/conf/session/session.yaml` 通过 `store: cookie | redis` 选择 Store，默认 Cookie Store；`server/conf/session/redis.yaml` 保存 Redis 地址、密码、DB、连接池、TLS 和 key prefix。仓库模板中的密码保持空值，部署实例配置文件提供真实值。
+- `server/conf/app.yaml` 的 `session.store: cookie | redis` 选择 Store，默认 Cookie Store；同一文件的 `redis` 段保存 Redis 地址、可选密码、DB、连接池、TLS 和 key prefix。空密码明确表示无认证 Redis；目标启用认证时，密码只能由部署实例配置文件提供。
 - Cookie Store 同时配置认证 key 和加密 key，仅保存 `user_id`、`session_version`、登录时间、认证等级等最小身份数据；完整用户、邮箱、角色事实、积分和任何 secret 不进入 Cookie。
 - 认证中间件用 `user_id + session_version` 查询当前用户状态；数据库是用户状态和权限的事实源，停用用户或版本不匹配时立即拒绝并清理 Session。
 - Redis Store 只让 Cookie 保存随机 Session ID，服务端设置 TTL、独立 prefix、连接 / 读写 timeout。选中 Redis 但初始化失败时服务启动失败，禁止静默回退 Cookie。
 - 用户 Session Cookie 使用 `Path=/api/v1`，管理 Session Cookie 使用 `Path=/api/admin/v1`；两端使用不同 Cookie 名、认证密钥和 Session 中间件，删除时必须使用原 Path。CSRF 防护不再创建 Cookie 或 Token，两端分别装配 `CrossOriginProtection` 拒绝处理器。
 - Cookie 均设置 `Secure`、`HttpOnly`、合理 `SameSite`，并分别配置 idle TTL 与 absolute TTL；管理 Session TTL 更短，高风险管理操作要求近期重新认证。
-- 登录成功后废弃匿名 Session 并重新签发认证 Session，防止 fixation；Cookie Store 支持多组 key pair 轮换，第一组写入，后续组只读取旧 Cookie。
+- 登录成功后废弃匿名 Session 并重新签发认证 Session，防止 fixation；第一版用户端与管理端各使用一组独立认证/加密密钥，不实现 key ring。替换任一组密钥会让对应已有 Session 全部失效并要求重新登录。
 - 密码重置、用户封禁或全端退出时递增 `session_version`，使旧会话失效。
 - Cookie 与 Redis Store 的切换需要重启并使已有会话失效，第一期不自研跨 Store 在线迁移。
 - Cookie Store 是第一期默认正式支持基线；只有管理员可以配置并切换 Session Store。Redis 第一期只支持单节点直连，可选 TLS，完成目标环境集成测试后正式支持；不支持 Sentinel 或 Cluster。普通用户没有 Session Store 配置入口。
@@ -767,10 +762,10 @@ Repository 禁止无条件 `Find`、`Scan`、`Preload` 把全表读入内存。�
 
 第一期 SMTP Adapter 使用 MIT 许可证的 `github.com/wneessen/go-mail`，模板使用标准库 `html/template` + `embed.FS`，不自研 SMTP Client 或模板引擎。默认不配置 SMTP，支持标准 SMTP 而不绑定特定邮件厂商：
 
-- `server/conf/mail/smtp.yaml` 提供允许的 SMTP host / port / profile allowlist；管理员只能选择部署明确放行的 endpoint，并通过 `system_configs` 的邮件业务固定 key 维护完整 SMTP JSON，包括 profile、from、TLS 策略、timeout、验证码 TTL / 发送间隔、用户名和密码，禁止录入任意 host 探测内部网络。内部 SMTP 必须由部署配置显式放行。普通用户没有 SMTP 配置入口；管理端查询时移除密码字段，只返回是否已配置。
+- `server/conf/app.yaml` 的部署级邮件段提供允许的 SMTP host / port / profile allowlist；管理员只能选择部署明确放行的 endpoint，并通过 `system_configs` 的邮件业务固定 key 维护完整 SMTP JSON，包括 profile、from、TLS 策略、timeout、验证码 TTL / 发送间隔、用户名和密码，禁止录入任意 host 探测内部网络。内部 SMTP 必须由部署配置显式放行。普通用户没有 SMTP 配置入口；管理端查询时移除密码字段，只返回是否已配置。该段落在实现对应任务时同步加入 `app.yaml.example`。
 - SMTP 未配置或临时不可用不影响基础 `/readyz`，但注册、验证码、密码重置和测试邮件等 capability 必须明确返回不可用，不能伪装为成功。开放外部注册前必须配置真实 SMTP 并完成 TLS、timeout、异步发送、失败恢复与审计验收。
-- 创建 challenge 时使用 `crypto/rand` 生成至少 128 bit nonce，并用部署配置文件中独立、版本化的启动配置密钥对 `challenge_id + nonce + purpose + email_canonical` 做 HMAC 确定性派生六位验证码；数字映射需避免明显取模偏差。
-- 数据库保存 nonce、`derivation_key_version`、`verification_key_version` 和 code hash，不保存验证码明文；旧派生密钥与旧 verification key 至少保留到对应 challenge 全部过期，不能复用 Session、SMTP 或 Provider 密钥。确定性派生密钥只供 Worker 重建邮件内容，`code_hash` 使用独立 verification pepper 并通过恒定时间比较验证，两者职责不得混用。
+- 创建 challenge 时使用 `crypto/rand` 生成至少 128 bit nonce，并用部署配置文件中的独立 derivation key 对 `challenge_id + nonce + purpose + email_canonical` 做 HMAC 确定性派生六位验证码；数字映射需避免明显取模偏差。
+- 数据库保存 nonce 和 code hash，不保存验证码明文或密钥版本。第一版 derivation key 与 verification key 各一把且彼此独立，不能复用 Session、SMTP 或 Provider 密钥；更换任一密钥后，所有未过期 challenge 作废并要求重新发送。确定性派生密钥只供 Worker 重建邮件内容，`code_hash` 使用独立 verification pepper 并通过恒定时间比较验证，两者职责不得混用。
 - `email_verification_codes.user_id` 允许为空，注册场景以 `email_canonical + purpose` 为主体；保存 attempt / max attempts、固定 expires_at、sent / consumed / superseded 时间、status 和 version。
 - 状态固定为 `pending_send / sent / delivery_failed / consumed / superseded / expired`。同一邮件 job 重试重新派生并发送同一个验证码，不能延长 expires_at；用户主动重新发送时才创建新 challenge 并 supersede 旧记录。SMTP 用尽 `max_attempts` 后原子进入 `delivery_failed`。
 - Worker 发送前重新确认 challenge 仍是该邮箱和 purpose 下的最新有效记录，且 `expires_at - now` 不小于配置的 `min_delivery_validity`；SMTP 已接收但进程崩溃时，重试只会重复同一个有效验证码。
@@ -925,7 +920,7 @@ S3 浏览器直传是 SaaS Origin 到对象存储域名的跨域请求，Bucket 
 - Bucket 保持私有并启用 Block Public Access、服务端加密；上传身份只能写 `tmp/uploads/*`，Presigned POST 固定 key，禁止客户端覆盖正式对象。
 - `tmp/uploads/*` 配置短生命周期。upload session 完成后旧 Presigned POST 可能仍在有效期内，complete 必须拒绝再次激活；重传产生的临时孤儿由对象存储 lifecycle 和 maintenance job 双重清理。
 - complete 后从隔离区提交正式对象时必须绑定已校验对象的 checksum、ETag 或 VersionId；不支持条件提交的 S3 兼容实现不得直接宣称生产支持。
-- CORS、POST Policy、checksum、条件复制和生命周期能力必须进入 S3 兼容厂商测试矩阵；部署配置模板统一归档在 `server/conf/storage/`。
+- CORS、POST Policy、checksum、条件复制和生命周期能力必须进入 S3 兼容厂商测试矩阵；部署级存储字段在实现对应任务时统一加入 `server/conf/app.yaml.example`，不再创建领域配置文件。
 
 ### 8.4 资产引用与物理删除
 
@@ -1232,8 +1227,8 @@ web/
 ## 13. 安全设计
 
 - Session Cookie 使用 `Secure`、`HttpOnly` 和合适的 `SameSite`。
-- Session 认证 / 加密 key、验证码派生/校验 key、MySQL 和 Redis 密码从部署实例配置文件读取；SMTP、S3 和 Provider 密钥从 `system_configs` 对应业务固定 key 的 JSON 中读取。第一期不使用环境变量注入或 Secret Manager。
-- `server/conf/security/security.yaml` 显式配置 trusted proxy CIDR，默认空列表；直接暴露 Gin 时调用 `SetTrustedProxies(nil)`，只信任实际 Ingress / LB，禁止直接信任客户端 `X-Forwarded-For`。
+- Session 认证 / 加密 key、验证码派生/校验 key、MySQL 密码和启用认证时的 Redis 密码从部署实例配置文件读取；无认证 Redis 使用空密码。SMTP、S3 和 Provider 密钥从 `system_configs` 对应业务固定 key 的 JSON 中读取。第一期不使用环境变量注入或 Secret Manager。
+- `server/conf/app.yaml` 的安全段显式配置 trusted proxy CIDR，默认空列表；直接暴露 Gin 时调用 `SetTrustedProxies(nil)`，只信任实际 Ingress / LB，禁止直接信任客户端 `X-Forwarded-For`。实现该字段时同步补入 `app.yaml.example`。
 - 第一期生产最多支持一层反向代理或 Ingress，并要求显式配置其 CIDR；`/app`、`/admin` 与 API 保持同域。第一期不接入 CDN。代理必须对 AI 改写 SSE 关闭 buffering，idle timeout 必须大于 SSE 最大持续时间；上传限制、客户端 IP 和 HTTPS scheme 只使用可信代理解析结果。后续引入 CDN 必须重新审批缓存、Cookie、SSE、上传和源站保护矩阵。
 - 登录、验证码发送 / 校验、密码重置和管理员登录使用 MySQL `security_rate_limit_windows` 持久化原子计数与 blocked_until，不能只依赖重启即清零的进程内 limiter；普通请求整形仍可使用开源 limiter。
 - `security_rate_limit_windows` 至少保存 subject hash、action、window start / end、count、`blocked_until`、`expires_at`、status 和 version，并建立 `(expires_at, id)` 清理索引；maintenance pool 固定批次删除过期窗口，防止随机邮箱和 IP 攻击无限制造永久记录。
@@ -1276,7 +1271,7 @@ go test -race ./...
 ### 14.2 兼容矩阵
 
 - MySQL：CI 至少在一个 8.0.x 环境验证 schema、JSON、collation、唯一 / 外键矩阵、分页、乐观锁、`SKIP LOCKED` 并发领取、租约恢复和幂等；部署实际版本重复同一套测试。关键查询使用生产量级数据执行查询计划分析；实际版本支持时使用 `EXPLAIN ANALYZE`，否则至少使用 `EXPLAIN FORMAT=JSON`。
-- Session：Cookie Store 与 Redis Store 分别验证登录、fixation 防护、idle / absolute TTL、退出、`session_version` 失效、密钥轮换、Cookie Path、同源 POST 放行、跨域 POST 拒绝、Store 切换全量登出和已声明的 Redis 支持矩阵。
+- Session：Cookie Store 与 Redis Store 分别验证登录、fixation 防护、idle / absolute TTL、退出、`session_version` 失效、密钥替换全量登出、Cookie Path、同源 POST 放行、跨域 POST 拒绝、Store 切换全量登出和已声明的 Redis 支持矩阵。
 - SMTP：使用本地开源测试 SMTP 服务验证 TLS、timeout、验证码一次性消费、同一 challenge 重试仍发送同一码、旧 challenge 失效、`delivery_failed`、最小剩余有效期、grant 原子消费、并发校验上限、进程在 SMTP 接收后崩溃的恢复，以及敏感信息不泄漏。
 - 密码：在 `1 vCPU / 1 GiB` 等价环境从 `19 MiB / t=2 / p=1` 开始 benchmark；hash、verify、rehash 和密码重置 hash 共用全局并发 1，记录 p50/p95/max、CPU 和峰值 RSS，并验证 `p95 <= 500ms`、`max < 1s`、PHC 解析、旧参数 rehash 和超长输入拒绝。
 - 本地 Blob：`NoTempDir=true`、原子写入、相对 key、引用保护、分批 GC、Windows 路径、同文件系统 rename、磁盘空间阈值、持久卷重启、backup epoch、备份恢复和数据库 / Blob 对账。
@@ -1316,7 +1311,7 @@ go test -race ./...
 ### G0：工程骨架与合同
 
 - 新建 `server/` 单 Go Module。
-- 建立 Go 1.26 Module、Gin、`server/conf/app.yaml` 与领域配置、日志、整数错误码、OpenAPI 和依赖装配。
+- 建立 Go 1.26 Module、Gin、`server/conf/app.yaml.example` 单文件配置合同、日志、整数错误码、OpenAPI 和依赖装配。
 - 建立 `/app`、`/admin`、用户 API、管理 API 路由组。
 - 从 OpenAPI 生成 `internal/models/dto/generated`，增加合同检查，确保只出现 GET / POST 且不存在重复手写 HTTP DTO。
 - 建立 trusted proxy、`CrossOriginProtection` 同源拒绝合同、请求体上限、`/healthz`、`/readyz`、`server migrate up` 和 serve 阶段 schema 校验。
@@ -1340,7 +1335,7 @@ go test -race ./...
 ### G2：用户、Session 与邮件闭环
 
 - 用户、Argon2id 密码、邮箱验证码、密码重置、Gin Session 和个人资料。
-- Cookie / Redis Session Store 配置切换、fixation 防护、idle / absolute TTL、密钥轮换和 `session_version` 失效。
+- Cookie / Redis Session Store 配置切换、fixation 防护、idle / absolute TTL、密钥替换全量登出和 `session_version` 失效。
 - `wneessen/go-mail` SMTP Adapter、确定性 challenge 验证码、验证 grant、持久限流、邮件模板，以及复用 G1 mail pool 的真实异步发送闭环。
 - 独立管理 Session、最小管理员权限和审计；用户资源 Repository 强制所有权过滤。
 
@@ -1407,12 +1402,12 @@ go test -race ./...
 4. S3 与本地模式的上传方式不同，必须通过 prepare / complete 合同屏蔽差异；S3 Presigned POST 需单独验证兼容对象存储实现。
 5. 官方模型 SDK 自带 retry 或较长 timeout 时可能造成重复费用；OpenAI 固定 `WithMaxRetries(0)`，其他 SDK 也必须在集成测试中证明不会绕过统一 Provider Policy。图片 timeout 的结果不确定场景默认停止自动降级。
 6. Cookie 切换 Redis Session Store 会使全部已有会话失效；`gin-contrib/sessions` 的 Go 版本、Redis TLS / Sentinel / Cluster 支持需按部署环境验证。
-7. SMTP 接收响应超时可能导致重复投递；同一 challenge 的验证码必须由版本化密钥确定性派生，重试发送同一码，创建新 challenge 时显式废弃旧 challenge。
+7. SMTP 接收响应超时可能导致重复投递；同一 challenge 的验证码必须由独立 derivation key 确定性派生，重试发送同一码，创建新 challenge 时显式废弃旧 challenge；第一版替换密钥会让所有未过期 challenge 失效。
 8. `lifei6671/logit` 当前缺少开源许可证，补许可证前不能满足本项目依赖准入规则。
 9. 第一阶段直接使用 `user_id` 隔离最简单，但未来团队空间需要一次明确的数据 migration。
 10. 第一版固定单副本；本地 Blob 即使支持生产也仍是单节点故障域，必须使用持久卷、容量告警、一致性备份和恢复演练，不能把切换 S3 等同于已经支持多副本。
 11. Provider 结果不确定时，平台可能已经产生真实成本；用户侧立即失败/部分失败并解冻后允许新 run 重试，可能形成重复 Provider 成本。必须监控不确定调用、隔离晚到结果并由平台核销，不能把成本反向转嫁给用户。
-12. 确定性验证码依赖版本化 HMAC 密钥；密钥轮换、保留周期和灾难恢复必须与未过期 challenge 生命周期匹配。
+12. 第一版确定性验证码使用独立但不版本化的 derivation/verification 密钥；替换密钥会让未过期 challenge 全部失效，部署和灾难恢复必须明确触发重新发送验证码。
 13. 项目只承诺 SQL 最低兼容 MySQL 8.0，不锁定具体 patch；不同 8.0.x、8.4 或托管兼容实现仍可能在 collation、优化器、DDL 和运维能力上存在差异，因此部署实际版本必须重新执行 migration、事务、关键 SQL、备份恢复和故障验收。
 14. 资产逻辑删除与物理对象释放分离后，历史保留会增加存储成本；GC 引用查询、保留期限和用户用量展示必须持续对账，不能用提前删除换取容量。
 15. S3 兼容实现对 Presigned POST、CORS、checksum 和条件复制的支持不一致；未通过目标厂商兼容矩阵时只能标记为实验性存储后端。

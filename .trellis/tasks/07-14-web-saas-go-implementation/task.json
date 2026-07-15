@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "07-14-web-saas-ds0-decisions",
-    "07-15-web-saas-g0-t01-go-module"
+    "07-15-web-saas-g0-t01-go-module",
+    "07-15-web-saas-g0-t02-config"
   ],
   "parent": null,
   "relatedFiles": [],

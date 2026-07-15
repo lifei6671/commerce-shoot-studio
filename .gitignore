@@ -39,3 +39,6 @@ desktop/src-tauri/target/
 # 开发者身份和 session runtime 由 .trellis/.gitignore 排除，个人 workspace journal 保持本地。
 .trellis/workspace/*/
 /docs/superpowers/
+
+# Web SaaS 本地真实启动配置；仓库只提交 server/conf/app.yaml.example。
+/server/conf/app.yaml

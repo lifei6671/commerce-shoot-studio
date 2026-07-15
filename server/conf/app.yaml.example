@@ -1,0 +1,95 @@
+# 商拍工坊 Web SaaS 完整启动配置示例。
+# 使用方法：复制本文件为同目录 app.yaml，再填写真实凭据和部署参数。
+# app.yaml 已被 Git 忽略，禁止把真实密码或密钥提交到仓库。
+
+# 配置合同版本；当前只支持 1。
+version: 1
+
+# MySQL 配置。
+mysql:
+  # MySQL 主机名或 IP，不包含端口。
+  host: 127.0.0.1
+  # MySQL TCP 端口，范围 1-65535。
+  port: 3306
+  # 应用使用的数据库名。
+  database: commerce_shoot_studio
+  # MySQL 用户名；启动时必填。
+  username: ""
+  # MySQL 密码；只允许填写在本地 app.yaml。
+  password: ""
+  # TLS 模式：false、true、skip-verify 或 preferred。
+  tls_mode: "false"
+  # 建立连接的超时时间。
+  connect_timeout: 5s
+  # 单次读取的超时时间。
+  read_timeout: 10s
+  # 单次写入的超时时间。
+  write_timeout: 10s
+  # 连接池最大打开连接数。
+  max_open_connections: 20
+  # 连接池最大空闲连接数，不能大于 max_open_connections。
+  max_idle_connections: 10
+  # 单个连接允许复用的最长时间。
+  connection_max_lifetime: 30m
+  # 额外 MySQL DSN 查询参数。禁止配置连接身份、地址、超时、TLS、parseTime 和 loc；
+  # 运行时会强制使用 parseTime=true、loc=UTC。
+  dsn_params:
+    charset: utf8mb4
+
+# Redis 配置。session.store=redis 时启用；Cookie 模式仍会严格检查已填写字段的类型。
+redis:
+  # 单节点 Redis 地址，必须使用 host:port；不支持 Sentinel 或 Cluster。
+  address: 127.0.0.1:6379
+  # Redis 密码。仅受控内网无认证实例可留空。
+  password: ""
+  # Redis database 编号，必须大于等于 0。
+  database: 0
+  # 是否使用 TLS。
+  tls: false
+  # Session key 前缀，用于隔离同一 Redis 中的应用数据。
+  key_prefix: "commerce-shoot-studio:"
+  # Redis 连接池大小，必须大于 0。
+  pool_size: 10
+  # 建立连接的超时时间。
+  connect_timeout: 3s
+  # 单次读取的超时时间。
+  read_timeout: 3s
+  # 单次写入的超时时间。
+  write_timeout: 3s
+
+# Session 配置。
+session:
+  # Session Store：cookie 或 redis。切换 Store 需要重启并会使已有会话失效。
+  store: cookie
+  # 用户端 Session；不得与管理端复用 Cookie 名或密钥。
+  user:
+    # 用户端 Cookie 名。
+    cookie_name: commerce_shoot_user
+    # 标准 Base64；解码后必须为 64 字节。可用 `openssl rand -base64 64` 生成。
+    authentication_key: ""
+    # 标准 Base64；解码后必须为 32 字节。可用 `openssl rand -base64 32` 生成。
+    encryption_key: ""
+    # 无操作失效时间。
+    idle_ttl: 24h
+    # 绝对失效时间，必须不短于 idle_ttl。
+    absolute_ttl: 168h
+  # 管理端 Session；有效期必须短于用户端。
+  admin:
+    # 管理端 Cookie 名。
+    cookie_name: commerce_shoot_admin
+    # 标准 Base64；解码后必须为 64 字节，且不得复用其他启动密钥。
+    authentication_key: ""
+    # 标准 Base64；解码后必须为 32 字节，且不得复用其他启动密钥。
+    encryption_key: ""
+    # 管理端无操作失效时间，必须短于用户端。
+    idle_ttl: 1h
+    # 管理端绝对失效时间，必须短于用户端。
+    absolute_ttl: 8h
+
+# 验证码安全配置。
+security:
+  verification_code:
+    # 验证码确定性派生密钥：标准 Base64，解码后必须为 32 字节。
+    derivation_key: ""
+    # 验证码校验密钥：标准 Base64，解码后必须为 32 字节，且不得复用其他启动密钥。
+    verification_key: ""
