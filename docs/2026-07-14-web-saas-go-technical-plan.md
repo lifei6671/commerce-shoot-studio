@@ -210,7 +210,7 @@ server/
 ├── lib/
 │   ├── apperror/                   # 统一错误码和错误类型
 │   ├── constant/                   # 强类型状态、领域枚举、Header、分页等全局常量
-│   ├── logger/                     # slog / logit 初始化
+│   ├── logger/                     # slog / logit 唯一适配、安全 Handler 与 typed context
 │   ├── response/                   # Gin 错误响应写出
 │   └── helper/                     # 已有跨模块复用需求的小函数
 ├── test/
@@ -255,7 +255,8 @@ Gin Handler -> Service -> Repository / Storage / Provider
 
 - `apperror`：稳定错误码、HTTP status 和可安全展示的中文消息。
 - `constant`：状态 `TINYINT` 映射、稳定领域枚举、Header 名、上下文键、分页上限等跨模块常量；错误码只由 `apperror` 维护。
-- `logger`：日志初始化和 `slog.Handler` 装配。
+- `logger`：日志初始化、`slog.Handler` 安全边界和 typed context；只有该包可以导入 logit，
+  业务层只接收 `*slog.Logger`。
 - `response`：统一错误响应，不承载业务逻辑。
 - `helper`：只有出现当前真实复用时才增加函数。
 
@@ -1067,24 +1068,49 @@ type ModelProvider interface {
 ```text
 Service / Repository / Worker -> *slog.Logger
                                      │
-                                     └-> logit.NewSlogHandler(...)
+                                     └-> application safeHandler
+                                                   │
+                                                   └-> logit.NewSlogHandler(...)
+                                                                │
+                                                                └-> JSON stdout
 ```
 
-计划采用 `github.com/lifei6671/logit` 的 `NewSlogHandler` / `NewSlogLogger`，获得上下文字段、JSON/text、文件分流、轮转和清理能力。容器部署默认写 JSON stdout；本地一体化部署可启用 logit 文件轮转。
+G0-T09 已精确锁定 `github.com/lifei6671/logit v1.0.0`，并由 `server/lib/logger` 作为唯一适配层
+调用 `NewSlogHandler`。适配层固定输出单行 JSON stdout，默认最低级别为 Info，测试可以注入
+`io.Writer`；生产不启用 source，避免源码绝对路径进入日志。本阶段没有 logging 配置项、text
+handler、文件日志、分流或轮转能力，这些能力不得由业务层直接启用。
 
-截至 2026-07-14，`lifei6671/logit v1.0.0` 公开仓库尚未上传 `LICENSE` 文件。项目所有者 lifei6671 已明确授权本项目使用，因此当前开发可锁定该版本并加入 `go.mod`，不启用 `slog.JSONHandler` 回退。公开许可证仍是对外分发和开源合规证据，必须在正式发布前补齐；业务代码始终只依赖标准库 `*slog.Logger`，避免授权或 Handler 变化扩散到业务层。
+截至 2026-07-15，`lifei6671/logit v1.0.0` 公开仓库尚未上传 `LICENSE` 文件。项目所有者
+lifei6671 已明确授权本项目使用，因此当前开发已将该版本作为直接依赖加入 `go.mod`，不启用
+`slog.JSONHandler` 回退。公开许可证仍是对外分发和开源合规证据，必须在正式发布前补齐；
+业务代码始终只依赖标准库 `*slog.Logger`，避免授权或 Handler 变化扩散到业务层。
 
-日志字段至少包含：
+基础字段固定为：
 
 ```text
 timestamp, level, message, service, version
-request_id, trace_id
-user_id（内部 ID，必要时脱敏）
-task_id, invocation_id
-error_code, elapsed_ms
 ```
 
-禁止记录 API Key、密码、Session token、Authorization、Cookie、raw prompt、Provider raw response、图片 Base64 和用户可配置 URL 的完整路径。
+typed context 只允许 `direction/method/route_template/operation/peer_service` 以及
+`request_id/trace_id/user_id/task_id/invocation_id`。`NewContext` 为独立请求创建 fresh store；
+`ForkContext` 克隆 child store，只继承 request/trace/user/task 关联 ID，冲突覆盖快速失败，且不会
+把父入站 `route_template` 或父 `invocation_id` 带入出站调用。method 只接受九种标准 HTTP 方法；
+入站必须使用受限 route template，出站必须提供受限 operation 与 peer service。helper 保留父
+context 的取消和 deadline，不负责生成 request ID 或 trace ID。
+
+完成事件固定写“HTTP 请求完成”，显式 attr 只允许合法整数 `status_code/error_code/elapsed_ms`。
+100～399 记 Info，400～499 记 Warn，500～599 记 Error；出站调用没有收到 HTTP 响应时允许
+`status_code=0`，此时省略 status、必须提供正整数 error code 并记 Error。应用 safeHandler 在
+进入 logit 前丢弃未知 attr、group、`slog.Any`、error、bytes 和 LogValuer，且不调用 Resolve；
+`service/version` 和可信 context 字段不能被显式 attr 覆盖。writer 失败回调不接收原始 error，
+在适配层以非重入守卫执行并隔离 panic；hook 期间同 logger 的递归写入被抑制，避免自锁。
+
+生产源码通过 build contract 禁止 logit 越层导入、package-level/default/self-built slog、Handler
+提取、日志方法值、`slog.Any` 和动态日志消息；消息必须是受审字符串字面量。禁止记录完整配置
+YAML/JSON、DSN、API Key、密码、Session/验证码密钥、Authorization、Cookie、raw/system Prompt、
+Provider raw request/response/error/header、SSE 原文、图片或文件 Base64、原始文件内容、完整
+URL/query、绝对路径和底层 error cause。真实 Gin middleware、request ID 签发、Tracing/Metrics、
+Provider/Blob/SMTP 出站 wrapper 和启动/flush 生命周期仍由各自后续任务完成。
 
 ### 10.2 Metrics 与 Tracing
 

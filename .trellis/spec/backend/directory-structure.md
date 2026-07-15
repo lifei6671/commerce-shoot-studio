@@ -29,12 +29,17 @@ server/
 │   │   ├── catalog_test.go
 │   │   ├── error.go
 │   │   └── error_test.go
-│   └── constant/
-│       ├── async_job_status.go
-│       ├── constant_test.go
-│       └── model_category.go
+│   ├── constant/
+│   │   ├── async_job_status.go
+│   │   ├── constant_test.go
+│   │   └── model_category.go
+│   └── logger/
+│       ├── context.go
+│       ├── logger.go
+│       └── safe_handler.go
 ├── cmd/server/main.go
 └── internal/
+    ├── buildcontract/logging_contract_test.go
     ├── buildcontract/module_contract_test.go
     ├── buildcontract/openapi_contract_test.go
     ├── models/dto/generated/types.gen.go
@@ -61,6 +66,10 @@ server/
   and wrapped causes. It has no Gin, OpenAPI, response, or logger dependency.
 - `lib/constant` owns strongly typed persisted statuses and stable domain enums. Keep each domain in its
   own file and never create a generic `status.go` or duplicate application error codes here.
+- `lib/logger` is the only logit adapter. It returns injected `*slog.Logger` values, writes JSON stdout,
+  filters record attributes through a fixed allowlist, and owns typed fresh/fork context helpers.
+- `internal/buildcontract/logging_contract_test.go` enforces the pinned logit dependency, unique adapter,
+  literal messages, and the ban on default or self-built slog bypasses.
 - `conf/app.yaml.example` is the only tracked startup configuration template. It documents every current
   field in Simplified Chinese and contains no deployable credentials. Users copy or rename it to
   Git-ignored `conf/app.yaml`, or explicitly pass another complete `app.yaml`; the example is never loaded
@@ -85,6 +94,7 @@ server/
 - Application-error contract: `server/lib/apperror/catalog.go` and `server/lib/apperror/error.go`.
 - Persisted status and enum contracts: `server/lib/constant/async_job_status.go` and
   `server/lib/constant/model_category.go`.
+- Logging adapter and context contract: `server/lib/logger/logger.go` and `server/lib/logger/context.go`.
 
 ## Scenario: Web SaaS Go module and toolchain contract
 

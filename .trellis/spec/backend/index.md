@@ -19,7 +19,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Error Handling](./error-handling.md) | Stable integer codes, safe messages, wrapping, and package ownership | Active |
 | [OpenAPI Contract](./openapi-contract.md) | Reviewed schema ownership, generated transports, and incremental operations | Active |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards and structured AI output validation | Active |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Logging Guidelines](./logging-guidelines.md) | slog/logit ownership, structured fields, and leakage guards | Active |
 
 ---
 
