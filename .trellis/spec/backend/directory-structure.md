@@ -15,6 +15,10 @@ real source files are created; future G0 tasks add their own packages when their
 
 ```text
 server/
+├── api/
+│   ├── generate.go
+│   ├── oapi-codegen.yaml
+│   └── openapi.yaml
 ├── conf/
 │   └── app.yaml.example
 ├── go.mod
@@ -32,6 +36,8 @@ server/
 ├── cmd/server/main.go
 └── internal/
     ├── buildcontract/module_contract_test.go
+    ├── buildcontract/openapi_contract_test.go
+    ├── models/dto/generated/types.gen.go
     └── config/
         ├── config.go
         ├── loader.go
@@ -48,6 +54,9 @@ server/
 - `internal/buildcontract` contains test-only assertions for the module and build toolchain.
 - `internal/config` owns startup YAML loading, work-directory derivation, typed validation, and
   the storage-independent runtime JSON document decoding boundary.
+- `api/openapi.yaml` is the only reviewed HTTP transport source. `api/generate.go` and
+  `api/oapi-codegen.yaml` generate models only; Gin server wrappers belong to G0-T05.
+- `internal/models/dto/generated` contains committed generated HTTP DTOs and is never edited manually.
 - `lib/apperror` is the sole source of stable integer error codes, HTTP mappings, safe public messages,
   and wrapped causes. It has no Gin, OpenAPI, response, or logger dependency.
 - `lib/constant` owns strongly typed persisted statuses and stable domain enums. Keep each domain in its

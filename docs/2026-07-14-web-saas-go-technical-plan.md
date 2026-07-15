@@ -168,7 +168,9 @@ server/
 │   └── server/
 │       └── main.go                 # API + Worker 唯一进程入口
 ├── api/
-│   └── openapi.yaml                # 用户端和管理端 API 合同
+│   ├── openapi.yaml                # 用户端和管理端唯一 OpenAPI 合同
+│   ├── oapi-codegen.yaml           # G0-T04 models-only 生成配置
+│   └── generate.go                 # 锁定 oapi-codegen v2.7.2 的生成入口
 ├── conf/
 │   ├── app.yaml.example            # 唯一提交的完整配置模板，逐字段中文说明且不含真实凭据
 │   ├── app.yaml                    # 实际运行配置，本地/部署生成并由 Git 忽略
@@ -261,7 +263,9 @@ Gin Handler -> Service -> Repository / Storage / Provider
 
 ## 5. API 合同
 
-API 使用 OpenAPI contract-first，后端通过锁定的 `oapi-codegen v2.7.2` 生成 Gin 接口骨架，前端通过 `openapi-typescript 7.13.0` 生成 TypeScript 类型。生成工具只允许读取仓库内受评审的 OpenAPI 文件，禁止构建时下载远程 schema、接受用户上传或第三方 schema；OpenAPI 变更和生成 diff 都必须审查，CI 必须校验生成结果与 schema 一致。生成代码禁止手改。OpenAPI 业务合同只允许 `GET` 和 `POST`：GET 必须只读，所有创建、修改、删除、取消、重试、验证码发送等操作统一使用动作式 POST 路径。Gin `NoMethod` 对 PUT、PATCH、DELETE、HEAD、OPTIONS、CONNECT、TRACE 等其他方法统一返回 HTTP 405 和整数错误码；系统同源部署，不注册 CORS 预检路由。
+API 使用 OpenAPI contract-first。G0-T04 通过锁定的 `oapi-codegen v2.7.2` 先生成 Go HTTP DTO models，通过独立 `web/` npm lockfile 中的 `openapi-typescript 7.13.0` 生成 TypeScript transport 类型；Gin 接口骨架、参数绑定和安全错误映射由 G0-T05 在日志基线就绪后生成/装配。生成工具只允许读取仓库内受评审的 `server/api/openapi.yaml`，禁止外部 `$ref`、构建时下载远程 schema、接受用户上传或第三方 schema；OpenAPI 变更和双端生成 diff 都必须审查，CI 必须校验生成结果与 schema 一致。生成代码禁止手改。OpenAPI 业务合同只允许 `GET` 和 `POST`：GET 必须只读，所有创建、修改、删除、取消、重试、验证码发送等操作统一使用动作式 POST 路径。Gin `NoMethod` 对 PUT、PATCH、DELETE、HEAD、OPTIONS、CONNECT、TRACE 等其他方法统一返回 HTTP 405 和整数错误码；系统同源部署，不注册 CORS 预检路由。
+
+G0-T04 采用已确认的增量合同方案：初始 OpenAPI 固定为 `3.0.3` 与合法 `paths: {}`，只登记已经冻结的错误、分页、cursor、幂等 Header、AI 改写 SSE payload、生成前报价和积分共享 components。技术方案下列一期用户/管理路径库存继续有效，但请求/响应字段未冻结的 operation 不得用宽泛 `object`、空成功响应或自由 `additionalProperties` 伪装完成；G2～G6 所属业务任务在字段合同冻结后向同一 schema 增量添加 operation 并重新生成 Go/TS 类型。部署配置允许用户/管理 Cookie 名变化，因此 G0-T04 不虚构要求静态 Cookie 名的 OpenAPI `apiKey in: cookie` scheme；同源 Session 与两端隔离仍是强制合同，具体 operation security 由 G0-T05/G0-T06/G2 同步冻结。
 
 ### 5.1 用户 API
 
@@ -1315,7 +1319,7 @@ go test -race ./...
 - 新建 `server/` 单 Go Module。
 - 建立 Go 1.26 Module、Gin、`server/conf/app.yaml.example` 单文件配置合同、日志、整数错误码、OpenAPI 和依赖装配。
 - 建立 `/app`、`/admin`、用户 API、管理 API 路由组。
-- 从 OpenAPI 生成 `internal/models/dto/generated`，增加合同检查，确保只出现 GET / POST 且不存在重复手写 HTTP DTO。
+- 从 OpenAPI 生成 `internal/models/dto/generated` 与独立 Web TypeScript transport 类型；先冻结共享 components，业务 operation 由所属任务按字段合同增量加入。增加合同检查，拒绝外部 `$ref`、非 GET / POST、重复 operationId、敏感字段和重复手写 HTTP DTO。
 - 建立 trusted proxy、`CrossOriginProtection` 同源拒绝合同、请求体上限、`/healthz`、`/readyz`、`server migrate up` 和 serve 阶段 schema 校验。
 - 按所有者授权锁定 `logit v1.0.0` 并作为 slog Handler；正式发布前补齐公开许可证据。
 

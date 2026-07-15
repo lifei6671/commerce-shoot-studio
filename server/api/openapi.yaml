@@ -1,0 +1,285 @@
+openapi: 3.0.3
+info:
+  title: 商拍工坊 Web SaaS API
+  version: 0.1.0
+  description: |
+    Web 用户端与管理端共享的 HTTP transport 合同。
+    用户与管理 Session 均由浏览器按同源 Cookie 管理，但 Cookie 名来自部署配置，
+    因此本合同不声明带静态 Cookie 名的 security scheme。
+    业务 operation 在所属任务冻结请求与响应字段后增量加入，禁止使用占位 object。
+paths: {}
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 外部副作用写操作使用的不透明幂等键。
+      schema:
+        type: string
+  responses:
+    AiAssistStream:
+      description: |
+        AI 帮写或改写的 SSE 字符串流。帧 payload 使用本合同中的 AiAssistStreamMeta、
+        AiAssistStreamDelta、AiAssistStreamDone 和 AiAssistStreamError；顺序与 flush 行为由合同测试保证。
+      content:
+        text/event-stream:
+          schema:
+            type: string
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - requestId
+      properties:
+        code:
+          type: integer
+          description: 稳定整数业务错误码，与 HTTP status 分离。
+        message:
+          type: string
+          description: 可安全展示的简体中文消息。
+        requestId:
+          type: string
+          description: 当前请求的关联 ID。
+    PageRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          default: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    PageInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - page
+        - pageSize
+        - total
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+    CursorRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        cursor:
+          type: string
+          description: 服务端签发并解析的不透明游标。
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    CursorPageInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - hasMore
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+    AiAssistStreamMeta:
+      type: object
+      additionalProperties: false
+      required:
+        - aiAssistInvocationId
+        - replayed
+        - requestId
+      properties:
+        requestId:
+          type: string
+        aiAssistInvocationId:
+          type: string
+          description: 对外父 AI assist invocation ID，不是内部模型 invocation ID。
+        replayed:
+          type: boolean
+    AiAssistStreamDelta:
+      type: object
+      additionalProperties: false
+      required:
+        - sequence
+        - text
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        text:
+          type: string
+          description: 业务归一化后的 UTF-8 文本增量。
+    AiAssistTextResult:
+      type: object
+      additionalProperties: false
+      required:
+        - text
+      properties:
+        text:
+          type: string
+    AiAssistStreamDone:
+      type: object
+      additionalProperties: false
+      required:
+        - result
+        - sequence
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        result:
+          $ref: "#/components/schemas/AiAssistTextResult"
+    AiAssistStreamError:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - sequence
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        code:
+          type: integer
+        message:
+          type: string
+          description: 可安全展示的错误消息。
+    GenerationPlanQuoteView:
+      type: object
+      additionalProperties: false
+      required:
+        - availablePoints
+        - maxReservedPoints
+        - plannedSlotCount
+        - quoteVersion
+        - shortfallPoints
+      properties:
+        plannedSlotCount:
+          type: integer
+          minimum: 0
+        maxReservedPoints:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        availablePoints:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        shortfallPoints:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        quoteVersion:
+          type: string
+          description: 客户端不得解析的不透明报价版本。
+        invalidReason:
+          type: string
+          nullable: true
+          description: 报价失效时可安全展示的原因。
+    CreditSummaryView:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - reserved
+      properties:
+        available:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        reserved:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+    CreditLedgerItemView:
+      type: object
+      additionalProperties: false
+      required:
+        - availableAfter
+        - createdAt
+        - deltaAvailable
+        - deltaReserved
+        - description
+        - id
+        - operation
+        - points
+        - quantity
+        - reservedAfter
+        - unitPoints
+      properties:
+        id:
+          type: string
+        operation:
+          type: string
+        unitPoints:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1
+        points:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        deltaAvailable:
+          type: integer
+          format: int64
+          minimum: -1000000000000
+          maximum: 1000000000000
+        deltaReserved:
+          type: integer
+          format: int64
+          minimum: -1000000000000
+          maximum: 1000000000000
+        availableAfter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        reservedAfter:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+        taskId:
+          type: string
+          nullable: true
+        outputId:
+          type: string
+          nullable: true
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time

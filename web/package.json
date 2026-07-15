@@ -1,0 +1,12 @@
+{
+  "name": "commerce-shoot-studio-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "generate:openapi": "openapi-typescript ../server/api/openapi.yaml --output src/api/generated/openapi.ts --default-non-nullable false"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0"
+  }
+}
