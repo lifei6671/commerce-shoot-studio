@@ -329,7 +329,7 @@ POST   /api/admin/v1/model-invocations/{invocationId}/resolve
 GET    /api/admin/v1/audit-logs
 ```
 
-用户 Session 与管理 Session 使用不同 Cookie 名、作用路径和中间件。管理端必须支持 MFA 后才能进入正式商用；第一期内部测试若暂不实现 MFA，必须限制管理入口的网络访问范围并记录为上线阻塞项。
+用户 Session 与管理 Session 使用不同 Cookie 名、作用路径和中间件。本期不引入 MFA，不创建 MFA 配置、API、数据库字段、前端交互或预留兼容壳，也不把 MFA 作为公网或发布门禁；管理端继续依赖独立 Session、管理员状态校验、登录审计、高风险操作近期认证和二次确认。
 
 用户端和管理端统一使用 Go 1.25+ 标准库 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求，通过 `Sec-Fetch-Site` 和 `Origin` 判断同源关系，不签发 CSRF Token、CSRF Cookie，也不保留无安全作用的 Token Header 合同。两端分别装配拒绝处理器并返回统一整数错误码；默认不配置 trusted origin 或不安全 bypass。所有写操作只能使用 POST，GET 不得产生状态变更。Session 响应继续固定设置 `Cache-Control: no-store, private` 和 `Vary: Cookie`，禁止 CDN 缓存。
 
@@ -1246,7 +1246,7 @@ web/
 - `/metrics`、`pprof`、migration 和内部诊断接口不公开暴露。
 - CORS 默认关闭，因为用户端、管理端和 API 同源。
 - 所有业务写操作均为 POST，并使用 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求；前端不获取或回传 CSRF Token，服务端不自行实现 Token 算法。
-- 管理端正式商用前必须启用 MFA、登录审计和高风险操作二次确认。
+- 管理端本期不引入 MFA；正式商用前必须完成登录审计、独立管理 Session、高风险操作近期认证和二次确认验收。
 
 健康检查边界：`/healthz` 只证明进程存活；`/readyz` 检查初始化完成、schema version、MySQL、当前 Blob，以及配置选中的 Redis Session Store。OpenAI、火山引擎和 SMTP 的临时故障通过 capability health、指标和管理端诊断暴露，不导致基础 API readiness 失败。
 
@@ -1388,7 +1388,7 @@ go test -race ./...
 
 ### G7：商用加固
 
-- MFA、告警、容量压测、安全回归和灾难恢复演练；核心持久限流、指标、Tracing 与备份恢复不得推迟到本阶段才首次实现。
+- 管理员高风险近期认证与应急访问、告警、容量压测、安全回归和灾难恢复演练；本期不引入 MFA，核心持久限流、指标、Tracing 与备份恢复不得推迟到本阶段才首次实现。
 - 跨用户安全测试、故障演练和对象清理演练。
 - 内部用户灰度后再开放外部注册。
 
