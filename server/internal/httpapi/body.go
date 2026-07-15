@@ -104,7 +104,7 @@ func (runtime *runtime) bodyLimitMiddleware() gin.HandlerFunc {
 			limit = override
 		}
 		if context.Request.ContentLength > limit {
-			response.WriteError(context, runtime.currentRequestID(context), apperror.ErrRequestBodyTooLarge)
+			response.WriteError(context, apperror.ErrRequestBodyTooLarge)
 			context.Abort()
 			return
 		}

@@ -36,8 +36,9 @@ and regenerate both Go and TypeScript outputs in the same change.
   types, page view-models, or persisted task snapshots.
 - G0-T04 does not generate Gin wrappers. G0-T05 owns Gin registration, binding, CORS, body limits, and safe
   mapping from `apperror.Error` to `ErrorResponse`; it only consumes a trusted injected request ID.
-- G0-T06 owns request ID generation/response headers, trusted proxy parsing, and CrossOriginProtection. It
-  reuses G0-T05's typed user/admin Origin allowlists rather than defining a second trust configuration.
+- G0-T06 owns the implemented request ID generation/response headers, trusted proxy parsing, API no-store
+  cache baseline, and CrossOriginProtection. It reuses G0-T05's typed user/admin Origin allowlists rather than
+  defining a second trust configuration.
 - The Desktop package, lockfile, TypeScript configuration, Runtime Ports, adapters, and UI do not consume the
   Web generated transport file.
 - The Web Remote mapper introduced later converts generated transport DTOs to Runtime Port views.
@@ -47,7 +48,7 @@ and regenerate both Go and TypeScript outputs in the same change.
 ## Security and Streaming
 
 - Do not declare CSRF tokens, cookies, or headers. Browser writes are protected by same-origin sessions and
-  `net/http.CrossOriginProtection` in later HTTP tasks.
+  `net/http.CrossOriginProtection`; G2-T03 later adds the Session-aware completion matrix without adding tokens.
 - OPTIONS preflight is a Gin transport concern, not an OpenAPI operation. The operation contract remains
   GET/POST only even when the HTTP boundary returns controlled CORS preflight responses.
 - Deployment configuration owns user/admin Cookie names. Because OpenAPI cookie security schemes require a

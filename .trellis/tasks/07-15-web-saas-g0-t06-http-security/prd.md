@@ -109,4 +109,4 @@ Metrics、健康检查或 CSRF Token 协议。
 - 2026-07-15 用户已确认全部用户/管理业务 API 成功和错误响应设置
   `Cache-Control: no-store, private` 与 `Vary: Cookie`；静态资源和健康检查不覆盖，后续 SSE
   显式使用自己的缓存合同。
-- G0-T05 当前仍保持未暂存、未提交；G0-T06 不触发自动提交或归档。
+- G0-T05 已由用户 review 后提交；G0-T06 不触发自动提交或归档，改动继续保留给用户 review。

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -85,7 +86,8 @@ type SessionCookieConfig struct {
 }
 
 type SecurityConfig struct {
-	VerificationCode VerificationCodeConfig
+	TrustedProxyCIDRs []netip.Prefix
+	VerificationCode  VerificationCodeConfig
 }
 
 type VerificationCodeConfig struct {
@@ -160,7 +162,8 @@ type sessionCookieDocument struct {
 }
 
 type securityConfigDocument struct {
-	VerificationCode verificationCodeDocument `mapstructure:"verification_code"`
+	TrustedProxyCIDRs *[]string                `mapstructure:"trusted_proxy_cidrs"`
+	VerificationCode  verificationCodeDocument `mapstructure:"verification_code"`
 }
 
 type verificationCodeDocument struct {
@@ -426,6 +429,27 @@ func buildRedisConfig(document redisConfigDocument) (RedisConfig, error) {
 }
 
 func buildSecurityConfig(document securityConfigDocument, session SessionConfig) (SecurityConfig, error) {
+	if document.TrustedProxyCIDRs == nil {
+		return SecurityConfig{}, fmt.Errorf("security.trusted_proxy_cidrs 不能为空")
+	}
+	trustedProxyCIDRs := make([]netip.Prefix, 0, len(*document.TrustedProxyCIDRs))
+	seenPrefixes := make(map[string]struct{}, len(*document.TrustedProxyCIDRs))
+	for _, value := range *document.TrustedProxyCIDRs {
+		if value == "" || strings.TrimSpace(value) != value {
+			return SecurityConfig{}, fmt.Errorf("security.trusted_proxy_cidrs 包含无效 CIDR")
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || prefix.Addr().Is4In6() || prefix != prefix.Masked() || prefix.Bits() == 0 || prefix.String() != value {
+			return SecurityConfig{}, fmt.Errorf("security.trusted_proxy_cidrs 包含无效 CIDR")
+		}
+		canonical := prefix.String()
+		if _, duplicate := seenPrefixes[canonical]; duplicate {
+			return SecurityConfig{}, fmt.Errorf("security.trusted_proxy_cidrs 包含重复 CIDR")
+		}
+		seenPrefixes[canonical] = struct{}{}
+		trustedProxyCIDRs = append(trustedProxyCIDRs, prefix)
+	}
+
 	derivationKey, err := decodeBase64Key("security.verification_code.derivation_key", document.VerificationCode.DerivationKey, verificationKeyLength)
 	if err != nil {
 		return SecurityConfig{}, err
@@ -446,9 +470,12 @@ func buildSecurityConfig(document securityConfigDocument, session SessionConfig)
 			}
 		}
 	}
-	return SecurityConfig{VerificationCode: VerificationCodeConfig{
-		DerivationKey: derivationKey, VerificationKey: verificationKey,
-	}}, nil
+	return SecurityConfig{
+		TrustedProxyCIDRs: trustedProxyCIDRs,
+		VerificationCode: VerificationCodeConfig{
+			DerivationKey: derivationKey, VerificationKey: verificationKey,
+		},
+	}, nil
 }
 
 func decodeBase64Key(field, encoded string, expectedLength int) ([]byte, error) {

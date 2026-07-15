@@ -46,9 +46,9 @@ func TestMethodGuardRejectsDisabledAndNonStandardMethods(t *testing.T) {
 func TestOrdinaryOptionsAndOptionsStarReturn405(t *testing.T) {
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: []string{"https://app.example.com"},
-		ExternalOrigin:     staticExternalOrigin("https://api.example.com"),
 	})
 	ordinary := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, ordinary, "https://api.example.com")
 	ordinary.Header.Set("Origin", "https://app.example.com")
 	ordinaryRecorder := httptest.NewRecorder()
 	router.ServeHTTP(ordinaryRecorder, ordinary)
@@ -73,7 +73,6 @@ func TestHEADUsesRealHTTPServerAndKeepsWireBodyEmpty(t *testing.T) {
 		Logger:             newTestLogger(t, io.Discard),
 		DefaultBodyBytes:   1024,
 		UserAllowedOrigins: []string{"http://app.example.com"},
-		ExternalOrigin:     staticExternalOrigin("http://api.example.com"),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -86,6 +85,7 @@ func TestHEADUsesRealHTTPServerAndKeepsWireBodyEmpty(t *testing.T) {
 		t.Fatalf("构造 HEAD 请求失败：%v", err)
 	}
 	request.Header.Set("Origin", "http://app.example.com")
+	request.Host = "api.example.com"
 
 	result, err := client.Do(request)
 	if err != nil {

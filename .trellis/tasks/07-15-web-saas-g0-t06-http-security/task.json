@@ -3,7 +3,7 @@
   "name": "web-saas-g0-t06-http-security",
   "title": "建立 trusted proxy、请求 ID 与 CSRF 基线",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

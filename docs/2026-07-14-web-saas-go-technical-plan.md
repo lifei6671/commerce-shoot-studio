@@ -228,7 +228,7 @@ server/
 - S3、SMTP、OpenAI、火山引擎等非启动必需配置及密钥由管理员在线维护，并直接写入 `system_configs`。普通用户没有配置权限；第一期不新建独立密钥表，也不引入应用层加密或外部密钥管理组件。
 - 启动级配置不能在线修改；S3 存储后端和 Session Store 的切换保存后明确提示重启生效，不实现热切换。
 
-G0-T02 的启动配置合同固定如下：`app.yaml` 使用 `version: 1`，并直接包含 `mysql`、`session`、`security` 和条件使用的 `redis`。MySQL 使用结构化 host、port、database、username、password、`tls_mode`、连接/读写 timeout 与连接池字段；`dsn_params: map[string]string` 只保存后续驱动的自定义查询参数，键名大小写不敏感地拒绝 `tls`、`timeout`、`readTimeout`、`writeTimeout`、`parseTime`、`loc` 以及用户、密码、网络、地址、库名等连接身份字段，后续装配强制 `parseTime=true`、`loc=UTC`。Session Store 只允许 `cookie` / `redis`；Redis 第一版只允许单节点直连，密码可为空以支持明确的内网无认证实例，不支持 Sentinel、Cluster 或静默降级。开发调试目标确认为 MySQL `192.168.1.6:13306` / `commerce_shoot_studio` 与无密码 Redis `192.168.1.6:6379`，但 MySQL 密码和本地 Session/验证码密钥不得写入仓库模板。
+G0-T02 的启动配置合同固定如下：`app.yaml` 使用 `version: 1`，并直接包含 `mysql`、`session`、`security` 和条件使用的 `redis`。MySQL 使用结构化 host、port、database、username、password、`tls_mode`、连接/读写 timeout 与连接池字段；`dsn_params: map[string]string` 只保存后续驱动的自定义查询参数，键名大小写不敏感地拒绝 `tls`、`timeout`、`readTimeout`、`writeTimeout`、`parseTime`、`loc` 以及用户、密码、网络、地址、库名等连接身份字段，后续装配强制 `parseTime=true`、`loc=UTC`。Session Store 只允许 `cookie` / `redis`；Redis 第一版只允许单节点直连，密码可为空以支持明确的内网无认证实例，不支持 Sentinel、Cluster 或静默降级。开发调试目标确认为本地内网 MySQL 实例的 `commerce_shoot_studio` 库与无密码 Redis 实例，但连接地址、MySQL 密码和本地 Session/验证码密钥不得写入仓库模板。
 
 G0-T05 在同一个完整 `app.yaml` 中追加 `http` 段：`read_header_timeout=5s`、`read_timeout=30s`、`write_timeout=5m`、`idle_timeout=60s`、`max_header_bytes=32768`、`default_json_body_bytes=1048576`，以及默认空列表的 `cors.user_allowed_origins` / `cors.admin_allowed_origins`。完整配置必须显式提供这些字段，不使用 Viper default 或模板合并；监听地址、trusted proxy、request ID、readiness 与 shutdown 不属于该配置切片。
 
@@ -339,6 +339,8 @@ GET    /api/admin/v1/audit-logs
 用户 Session 与管理 Session 使用不同 Cookie 名、作用路径和中间件。本期不引入 MFA，不创建 MFA 配置、API、数据库字段、前端交互或预留兼容壳，也不把 MFA 作为公网或发布门禁；管理端继续依赖独立 Session、管理员状态校验、登录审计、高风险操作近期认证和二次确认。
 
 用户端和管理端统一使用 Go 1.25+ 标准库 `net/http.CrossOriginProtection` 拒绝非安全跨域浏览器请求，通过 `Sec-Fetch-Site` 和 `Origin` 判断来源关系，不签发 CSRF Token、CSRF Cookie，也不保留无安全作用的 Token Header 合同。两端分别装配拒绝处理器并返回统一 `403 + 100403`；G0-T06 必须分别复用 G0-T05 的用户端/管理端同站 Origin 白名单，不维护第二套 trusted origin，也不提供不安全 bypass。所有写操作只能使用 POST，GET 不得产生状态变更。Session 响应继续固定设置 `Cache-Control: no-store, private` 和 `Vary: Cookie`，CORS 只能追加并去重 `Vary`，禁止覆盖 Cookie 缓存维度。
+
+G0-T06 的实际入站顺序固定为 lifecycle（API 缓存 Header baseline、服务端 Request ID、稳定完成日志上下文）→ recovery → trusted proxy → CORS → `CrossOriginProtection.Check` → method guard → body limit。用户端与管理端各自从已经规范化的 CORS map 构造独立 protection；代理场景仅为 `Check` 浅复制 Request 并替换 typed external authority，不使用 `Handler` wrapper、deny bridge 或 bypass。所有 `/api/v1`、`/api/admin/v1` 成功和错误响应统一设置 `Cache-Control: no-store, private` 与 `Vary: Cookie, Origin`，OPTIONS 额外追加两个预检 Vary 维度；非 API 路径不覆盖。
 
 用户 Web 认证采用独立 `/app/login`、`/app/register`、`/app/forgot-password`、`/app/reset-password` 路由。未登录访问素材、历史、任务等受保护 `/app/*` 深链时，前端转到登录页；登录 API 成功并重新签发 Session 后使用 history replace 回到原路径，默认回 `/app`。`returnTo` 只属于前端导航状态，不传给登录 API，也不由服务端返回重定向；规范化后只允许同源且以 `/app/` 开头的普通路径，必须拒绝协议、`//`、反斜杠、控制字符、编码绕过和 `/admin`，非法值回退 `/app`。401 只清理认证状态并跳登录，不自动重放失败的 POST 请求。注册和找回密码入口是否可用由服务端 capability 返回；SMTP 未配置、注册未开放或能力不可用时明确禁用并展示安全原因。
 
@@ -1264,6 +1266,8 @@ web/
 - Session Cookie 使用 `Secure`、`HttpOnly` 和合适的 `SameSite`。
 - Session 认证 / 加密 key、验证码派生/校验 key、MySQL 密码和启用认证时的 Redis 密码从部署实例配置文件读取；无认证 Redis 使用空密码。SMTP、S3 和 Provider 密钥从 `system_configs` 对应业务固定 key 的 JSON 中读取。第一期不使用环境变量注入或 Secret Manager。
 - `server/conf/app.yaml` 的安全段显式配置 trusted proxy CIDR，默认空列表；直接暴露 Gin 时调用 `SetTrustedProxies(nil)`，只信任实际 Ingress / LB，禁止直接信任客户端 `X-Forwarded-For`。实现该字段时同步补入 `app.yaml.example`。
+- `security.trusted_proxy_cidrs` 只接受规范 IPv4/IPv6 CIDR，拒绝重复、host bits、全网和 IPv4-mapped IPv6。第一版仅支持一层代理：可信 peer 的业务 API 必须提供单值且完整的 X-Forwarded-For/Proto/Host tuple，Host 必须是对应 scheme 的规范 authority；非可信 peer 忽略这些头，解析后下游一律不可见 forwarded/X-Real-IP 原值。
+- Router 构造期一次读取 32 字节内存密钥；请求期以 HMAC-SHA256(进程密钥, 原子序列大端字节) 生成并截断为 128-bit、32 位小写十六进制 Request ID。入站 `X-Request-ID` 永不信任，进程密钥不进入配置、日志、响应或持久化。
 - 第一期生产最多支持一层反向代理或 Ingress，并要求显式配置其 CIDR；`/app`、`/admin` 与 API 默认同域，分离 Origin 时也必须保持同一 schemeful site，并分别进入用户端/管理端白名单。第一期不接入 CDN。代理必须对 AI 改写 SSE 关闭 buffering，idle timeout 必须大于 SSE 最大持续时间；上传限制、客户端 IP、外部 scheme/host 和同站判断只使用可信代理解析结果。后续引入 CDN 必须重新审批缓存、Cookie、CORS、SSE、上传和源站保护矩阵。
 - 登录、验证码发送 / 校验、密码重置和管理员登录使用 MySQL `security_rate_limit_windows` 持久化原子计数与 blocked_until，不能只依赖重启即清零的进程内 limiter；普通请求整形仍可使用开源 limiter。
 - `security_rate_limit_windows` 至少保存 subject hash、action、window start / end、count、`blocked_until`、`expires_at`、status 和 version，并建立 `(expires_at, id)` 清理索引；maintenance pool 固定批次删除过期窗口，防止随机邮箱和 IP 攻击无限制造永久记录。

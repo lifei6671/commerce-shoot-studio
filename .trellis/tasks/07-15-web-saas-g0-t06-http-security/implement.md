@@ -7,7 +7,7 @@
 - 全程 TDD：每个切片先保留目标缺失的 RED，再做最小 GREEN、自 review 和定向验证。
 - 测试命令统一显式 `-timeout=60s`；并发与共享策略必须通过 shuffle/race。
 - 不 stage、不 commit；所有改动保留在工作树供用户 review。
-- 现有 G0-T05 dirty tree 是本任务依赖，不回退、不拆提交、不混入无关 Desktop 改动。
+- G0-T05 已由用户 review 后提交；本任务不回退该提交，也不混入无关 Desktop 改动。
 
 ## Phase 0：计划与规则门禁
 
@@ -80,7 +80,7 @@ go test -race -count=1 -timeout=60s ./internal/config
 - 包内 entropy reader short read/error 时 Router 构造失败，不产生可服务的 Engine，不进入请求路径。
 - 固定 ASCII known-vector key 的原文、hex、Base64 不进入成功/统一错误/panic 的 Header、body 或最终
   日志；entropy error marker 不进入构造错误文本或任何 writer。
-- `currentRequestID` 多次读取不生成新值。
+- `response.RequestID` 多次读取只返回生命周期已绑定值，不生成新 ID。
 - 统一错误 writer 不再接受 caller 自由传入 request ID；绑定成功后所有错误体只能读取可信上下文。
 
 ### GREEN
@@ -208,7 +208,7 @@ go test -race -shuffle=on -count=1 -timeout=60s ./internal/httpapi
 - 进程 HMAC 密钥不得进入配置、响应、日志、Trace、Metrics 或持久化。
 - 禁止 package-level 或跨请求共享可变 `hash.Hash`；每次请求创建独立 HMAC 实例。
 - `response.BindRequestID` 只允许 lifecycle 调用，`WriteError` 不接受 request ID 字符串。
-- `currentRequestID` 只读，不能生成新 ID；completion 使用局部稳定 logContext。
+- `response.RequestID` 只读生命周期已绑定值；completion 使用局部稳定 logContext。
 - middleware 顺序为 lifecycle（API Header baseline → request identity → completion）→ recovery → proxy →
   CORS → COP → method → body。
 - 不放宽 G0-T05 已有依赖、错误 DTO、监听/生命周期和业务 route 守卫。
@@ -255,7 +255,7 @@ go test -count=1 -timeout=60s ./internal/buildcontract
 
 ```bash
 cd server
-gofmt -l $(rg --files -g '*.go')
+unformatted=$(rg --files -g '*.go' -0 | xargs -0 gofmt -l); test -z "$unformatted"
 go mod tidy -diff
 go mod verify
 go vet ./...
@@ -276,6 +276,16 @@ git diff --check
 
 补充执行 secret pattern scan 和 `git diff` 自 review。本机未安装的锁定 lint v2.12.2、govulncheck 等正式
 工具只记录，不临时引入；仍由 G0-T12 固化。
+
+## 实际实施证据（2026-07-15）
+
+- Phase 1～5 均按 RED → GREEN 完成；未新增依赖、数据库 schema、OpenAPI operation 或真实
+  `conf/app.yaml` 改动。
+- 三路只读复审分别覆盖 proxy、Request ID/log、CSRF/cache；发现的测试与 AST 守卫缺口全部修复，
+  最终均为 `no findings`。
+- 已通过上述 NUL-safe `gofmt`、依赖一致性、vet、全包测试、全包 Race、build、run 与
+  `git diff --check`。
+- 工作树保持未暂存、未提交，等待用户 review。
 
 ## 完成条件
 

@@ -17,7 +17,7 @@ import (
 func TestWriteErrorMapsSafeResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const (
-		requestID = "01JHTTPRESPONSETEST"
+		requestID = "0123456789abcdef0123456789abcdef"
 		marker    = "secret-sql-path-prompt-marker"
 	)
 
@@ -63,8 +63,11 @@ func TestWriteErrorMapsSafeResponses(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			context, _ := gin.CreateTestContext(recorder)
 			context.Request = httptest.NewRequest(http.MethodPost, "/api/v1/test", nil)
+			if err := BindRequestID(context, requestID); err != nil {
+				t.Fatalf("BindRequestID() error = %v", err)
+			}
 
-			gotCode := WriteError(context, requestID, test.err)
+			gotCode := WriteError(context, test.err)
 			if gotCode != test.wantCode {
 				t.Fatalf("返回错误码错误：实际=%d 期望=%d", gotCode, test.wantCode)
 			}
@@ -94,20 +97,32 @@ func TestWriteErrorMapsSafeResponses(t *testing.T) {
 	}
 }
 
-func TestWriteErrorAllowsEmptyRequestID(t *testing.T) {
+func TestBindRequestIDRejectsInvalidOrRepeatedValues(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/missing", nil)
-
-	WriteError(context, "", apperror.ErrNotFound)
-
-	var body map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatalf("解析错误响应失败：%v", err)
+	tests := []string{
+		"",
+		"0123456789abcdef0123456789abcde",
+		"0123456789abcdef0123456789abcdef0",
+		"0123456789ABCDEF0123456789ABCDEF",
+		"g123456789abcdef0123456789abcdef",
 	}
-	if requestID, ok := body["requestId"]; !ok || requestID != "" {
-		t.Fatalf("G0-T06 注入前 requestId 应保留空字符串：%v", body)
+	for _, requestID := range tests {
+		context, _ := gin.CreateTestContext(httptest.NewRecorder())
+		if err := BindRequestID(context, requestID); err == nil {
+			t.Fatalf("非法 Request ID 必须拒绝：%q", requestID)
+		}
+	}
+
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	const requestID = "0123456789abcdef0123456789abcdef"
+	if err := BindRequestID(context, requestID); err != nil {
+		t.Fatalf("首次 BindRequestID() error = %v", err)
+	}
+	if got := RequestID(context); got != requestID {
+		t.Fatalf("RequestID() = %q", got)
+	}
+	if err := BindRequestID(context, requestID); err == nil {
+		t.Fatal("重复绑定 Request ID 必须拒绝")
 	}
 }
 
@@ -117,7 +132,10 @@ func TestWriteErrorSuppressesHEADBody(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = httptest.NewRequest(http.MethodHead, "/api/v1/missing", nil)
 
-	gotCode := WriteError(context, "01JHEAD", apperror.ErrMethodNotAllowed)
+	if err := BindRequestID(context, "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("BindRequestID() error = %v", err)
+	}
+	gotCode := WriteError(context, apperror.ErrMethodNotAllowed)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("HEAD status 错误：实际=%d", recorder.Code)
@@ -139,7 +157,10 @@ func TestWriteErrorDoesNotOverwriteCommittedResponse(t *testing.T) {
 	context.Writer.WriteHeaderNow()
 	_, _ = context.Writer.Write([]byte("committed-safe-body"))
 
-	gotCode := WriteError(context, "01JCOMMITTED", errors.New("panic-secret-marker"))
+	if err := BindRequestID(context, "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("BindRequestID() error = %v", err)
+	}
+	gotCode := WriteError(context, errors.New("panic-secret-marker"))
 
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("已提交 status 不得被覆盖：实际=%d", recorder.Code)

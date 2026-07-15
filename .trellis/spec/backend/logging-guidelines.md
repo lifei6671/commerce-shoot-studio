@@ -98,8 +98,9 @@ Config values, Base64 markers, LogValuer non-resolution, concurrent forks, and r
 
 ## Future Owners
 
-Gin middleware, CORS, inbound completion assembly, and response mapping belong to G0-T05. Request ID
-issuance/header, trusted proxy parsing, and CrossOriginProtection belong to G0-T06 and reuse the same typed
-user/admin Origin allowlists. Startup/flush ownership belongs to G0-T07; metrics and tracing to G0-T10.
+Gin middleware, CORS, inbound completion assembly, and response mapping belong to G0-T05. G0-T06 now owns
+the implemented HMAC Request ID issuance/header, trusted proxy parsing, API cache baseline, and
+CrossOriginProtection using the same typed user/admin Origin allowlists. Startup/flush ownership belongs to
+G0-T07; metrics and tracing to G0-T10.
 Provider, Blob, SMTP, and audit fields are added only by their owning business tasks. Do not document those
 integrations as complete at G0-T09.

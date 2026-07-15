@@ -15,11 +15,16 @@ type completionErrorCodeKey struct{}
 
 func (runtime *runtime) completionMiddleware() gin.HandlerFunc {
 	return func(context *gin.Context) {
-		requestID := ""
-		if runtime.requestID != nil {
-			requestID = runtime.requestID(context.Request.Context())
+		setAPIResponseHeaderBaseline(context)
+		context.Request.Header.Del("X-Request-ID")
+		requestID := runtime.requestIDs.Next()
+		if err := response.BindRequestID(context, requestID); err != nil {
+			runtime.logger.ErrorContext(context.Request.Context(), "HTTP Request ID 绑定失败")
+			response.WriteError(context, apperror.ErrInternal)
+			context.Abort()
+			return
 		}
-		context.Set(requestIDContextKey{}, requestID)
+		context.Header("X-Request-ID", requestID)
 		fields := appLogger.ContextFields{
 			Direction:     appLogger.DirectionInbound,
 			Method:        normalizedMethod(context.Request.Method),
@@ -27,18 +32,10 @@ func (runtime *runtime) completionMiddleware() gin.HandlerFunc {
 			RequestID:     requestID,
 		}
 		logContext, err := appLogger.NewContext(context.Request.Context(), fields)
-		if err != nil && requestID != "" {
-			// Request ID 由后续 G0-T06 的可信注入函数提供；非法值按内部合同故障处理且不回显。
-			context.Set(requestIDContextKey{}, "")
-			fields.RequestID = ""
-			logContext, err = appLogger.NewContext(context.Request.Context(), fields)
-			response.WriteError(context, "", apperror.ErrInternal)
-			context.Abort()
-		}
 		if err != nil {
 			runtime.logger.ErrorContext(context.Request.Context(), "HTTP 日志上下文初始化失败")
 			if !context.Writer.Written() {
-				response.WriteError(context, "", apperror.ErrInternal)
+				response.WriteError(context, apperror.ErrInternal)
 			}
 			context.Abort()
 			return
@@ -72,7 +69,7 @@ func (runtime *runtime) recoveryMiddleware() gin.HandlerFunc {
 			if context.Writer.Written() {
 				context.Set(completionErrorCodeKey{}, apperror.CodeInternalError)
 			} else {
-				response.WriteError(context, runtime.currentRequestID(context), apperror.ErrInternal)
+				response.WriteError(context, apperror.ErrInternal)
 			}
 			context.Abort()
 		}()
@@ -126,7 +123,7 @@ func (runtime *runtime) methodGuard() gin.HandlerFunc {
 			return
 		default:
 			context.Header("Allow", allowMethods)
-			response.WriteError(context, runtime.currentRequestID(context), apperror.ErrMethodNotAllowed)
+			response.WriteError(context, apperror.ErrMethodNotAllowed)
 			context.Abort()
 		}
 	}

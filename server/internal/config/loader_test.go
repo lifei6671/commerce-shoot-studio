@@ -44,6 +44,96 @@ func TestLoadCookieConfiguration(t *testing.T) {
 	if len(loaded.Security.VerificationCode.DerivationKey) != 32 || len(loaded.Security.VerificationCode.VerificationKey) != 32 {
 		t.Fatal("验证码密钥未解码为约定长度")
 	}
+	if loaded.Security.TrustedProxyCIDRs == nil || len(loaded.Security.TrustedProxyCIDRs) != 0 {
+		t.Fatal("显式空 trusted proxy 列表应保留为独立空列表")
+	}
+}
+
+func TestLoadTrustedProxyCIDRs(t *testing.T) {
+	appPath := writeValidFixture(t, "cookie")
+	replaceFileText(t, appPath, "  trusted_proxy_cidrs: []\n", "  trusted_proxy_cidrs:\n    - 10.0.0.0/8\n    - 2001:db8:abcd::/48\n")
+
+	loaded, err := Load(appPath)
+	if err != nil {
+		t.Fatalf("加载规范 trusted proxy CIDR 失败：%v", err)
+	}
+
+	want := []string{"10.0.0.0/8", "2001:db8:abcd::/48"}
+	if len(loaded.Security.TrustedProxyCIDRs) != len(want) {
+		t.Fatalf("trusted proxy CIDR 数量错误：%v", loaded.Security.TrustedProxyCIDRs)
+	}
+	for index, prefix := range loaded.Security.TrustedProxyCIDRs {
+		if prefix.String() != want[index] {
+			t.Fatalf("trusted proxy CIDR 未保序：实际=%v 期望=%v", loaded.Security.TrustedProxyCIDRs, want)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidTrustedProxyCIDRs(t *testing.T) {
+	tests := []struct {
+		name        string
+		replacement string
+	}{
+		{name: "字段缺失", replacement: ""},
+		{name: "非法 CIDR", replacement: "  trusted_proxy_cidrs: [not-a-cidr]\n"},
+		{name: "非规范 CIDR 文本", replacement: "  trusted_proxy_cidrs: [2001:0db8::/32]\n"},
+		{name: "IPv4 host bits", replacement: "  trusted_proxy_cidrs: [10.0.0.1/8]\n"},
+		{name: "IPv6 host bits", replacement: "  trusted_proxy_cidrs: [2001:db8::1/32]\n"},
+		{name: "IPv4 全网", replacement: "  trusted_proxy_cidrs: [0.0.0.0/0]\n"},
+		{name: "IPv6 全网", replacement: "  trusted_proxy_cidrs: [::/0]\n"},
+		{name: "IPv4 mapped IPv6", replacement: "  trusted_proxy_cidrs: [::ffff:192.0.2.0/120]\n"},
+		{name: "重复 CIDR", replacement: "  trusted_proxy_cidrs: [10.0.0.0/8, 10.0.0.0/8]\n"},
+		{name: "空 CIDR", replacement: "  trusted_proxy_cidrs: [\"\"]\n"},
+		{name: "首尾空格", replacement: "  trusted_proxy_cidrs: [\" 10.0.0.0/8\"]\n"},
+		{name: "列表弱类型", replacement: "  trusted_proxy_cidrs: 10.0.0.0/8\n"},
+		{name: "元素弱类型", replacement: "  trusted_proxy_cidrs: [123]\n"},
+		{name: "未知字段", replacement: "  trusted_proxy_cidrs: []\n  unknown_security_field: true\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			appPath := writeValidFixture(t, "cookie")
+			replaceFileText(t, appPath, "  trusted_proxy_cidrs: []\n", test.replacement)
+
+			_, err := Load(appPath)
+			if err == nil {
+				t.Fatal("无效 trusted proxy CIDR 应快速失败")
+			}
+			if strings.Contains(err.Error(), "not-a-cidr") || strings.Contains(err.Error(), "2001:0db8") {
+				t.Fatalf("trusted proxy 配置错误不得回显原值：%v", err)
+			}
+		})
+	}
+}
+
+func TestBuildSecurityConfigCopiesTrustedProxyCIDRs(t *testing.T) {
+	values := []string{"10.0.0.0/8"}
+	document := securityConfigDocument{
+		TrustedProxyCIDRs: &values,
+		VerificationCode: verificationCodeDocument{
+			DerivationKey:   sessionAuthenticationKey(0x31, 32),
+			VerificationKey: sessionAuthenticationKey(0x32, 32),
+		},
+	}
+	session := SessionConfig{
+		User: SessionCookieConfig{
+			AuthenticationKey: bytes.Repeat([]byte{0x11}, 64),
+			EncryptionKey:     bytes.Repeat([]byte{0x12}, 32),
+		},
+		Admin: SessionCookieConfig{
+			AuthenticationKey: bytes.Repeat([]byte{0x21}, 64),
+			EncryptionKey:     bytes.Repeat([]byte{0x22}, 32),
+		},
+	}
+
+	security, err := buildSecurityConfig(document, session)
+	if err != nil {
+		t.Fatalf("构建合法安全配置失败：%v", err)
+	}
+	values[0] = "192.0.2.0/24"
+	if got := security.TrustedProxyCIDRs[0].String(); got != "10.0.0.0/8" {
+		t.Fatalf("构造结果被文档层修改污染：%q", got)
+	}
 }
 
 func TestLoadHTTPConfiguration(t *testing.T) {
@@ -470,6 +560,7 @@ func TestRepositoryExampleIsCompleteStrictYAMLWithoutCredentials(t *testing.T) {
 	for _, marker := range []string{
 		"复制本文件", "HTTP Server 配置", "用户端允许的同站跨 Origin 白名单",
 		"管理端允许的同站跨 Origin 白名单", "MySQL 配置", "Redis 配置", "Session 配置", "验证码安全配置",
+		"可信代理出口网段", "真实 Ingress/LB", "必须覆盖而不是追加 X-Forwarded-For",
 	} {
 		if !bytes.Contains(content, []byte(marker)) {
 			t.Fatalf("仓库配置示例缺少字段说明：%s", marker)
@@ -570,6 +661,7 @@ func validSessionSection(store string) string {
 
 func validSecuritySection() string {
 	return "security:\n" +
+		"  trusted_proxy_cidrs: []\n" +
 		"  verification_code:\n" +
 		"    derivation_key: " + sessionAuthenticationKey(0x31, 32) + "\n" +
 		"    verification_key: " + sessionAuthenticationKey(0x32, 32) + "\n"

@@ -1,6 +1,7 @@
 # HTTP 边界规范
 
-> G0-T05 已落地的 Gin、CORS、统一错误、请求体限制与 `http.Server` 可执行合同。
+> G0-T05/G0-T06 已落地的 Gin、可信代理、Request ID、CORS/CSRF、统一错误、请求体限制与
+> `http.Server` 可执行合同。
 
 ## 场景：建立 Web SaaS Gin 入站边界
 
@@ -9,7 +10,7 @@
 - 新增或修改 Gin router、middleware、HTTP 错误响应、body limit、CORS、panic recovery、入站日志
   或 `http.Server` 构造时触发。
 - OpenAPI 业务 operation 仍只允许 GET/POST；OPTIONS 预检属于 transport，不进入 OpenAPI。
-- G0-T05 不拥有业务 Handler、request ID 生成、trusted proxy、CrossOriginProtection、监听和生命周期。
+- 当前边界不拥有业务 Handler、Session、监听和 shutdown 生命周期。
 
 ### 2. Signatures
 
@@ -25,13 +26,14 @@ type Options struct {
     BodyLimitOverrides map[RouteKey]int64
     UserAllowedOrigins []string
     AdminAllowedOrigins []string
-    RequestID          func(context.Context) string
-    ExternalOrigin     func(*http.Request) (string, error)
+    TrustedProxyCIDRs  []netip.Prefix
     RegisterRoutes     func(user, admin *gin.RouterGroup)
 }
 
 httpapi.New(httpapi.Options) (*gin.Engine, error)
-response.WriteError(c *gin.Context, requestID string, err error) apperror.Code
+response.BindRequestID(c *gin.Context, requestID string) error
+response.RequestID(c *gin.Context) string
+response.WriteError(c *gin.Context, err error) apperror.Code
 httpapi.BindJSON(c *gin.Context, target any) error
 httpserver.New(httpserver.Options) (*http.Server, error)
 ```
@@ -39,8 +41,14 @@ httpserver.New(httpserver.Options) (*http.Server, error)
 ### 3. Contracts
 
 - 只使用 `gin.New()`；禁止默认 Gin Logger/Recovery、`engine.Run()` 和全局 `http.TimeoutHandler`。
-- 中间件顺序固定：method 归一化 → logging → safe recovery → CORS → method guard → body limit →
-  handler/NoRoute。
+- 中间件顺序固定：lifecycle（API Header baseline → Request ID → stable completion context）→ safe
+  recovery → trusted proxy → CORS → CrossOriginProtection → method guard → body limit → handler/NoRoute。
+- Router 构造期一次读取 32 字节进程密钥；请求期使用 HMAC-SHA256(key, big-endian atomic sequence)
+  截断为 16 字节并输出 32 位小写十六进制 Request ID。入站 `X-Request-ID` 永不信任；统一错误、
+  响应 Header 和完成日志只读取生命周期绑定值。
+- `security.trusted_proxy_cidrs` 必须显式配置，空列表表示直连。只允许规范 CIDR，拒绝重复、host
+  bits、IPv4/IPv6 全网和 IPv4-mapped IPv6。可信代理业务 API 只接受单值完整
+  X-Forwarded-For/Proto/Host tuple；其他 forwarded/X-Real-IP 输入在解析后全部删除。
 - 用户 API `/api/v1` 与管理 API `/api/admin/v1` 使用独立 Origin 白名单，默认空列表只允许同源。
 - 白名单 Origin 必须精确匹配且与 API 同一 schemeful site；使用 `publicsuffix` 判断 eTLD+1，禁止
   通过域名最后两段猜测。IP/localhost 使用相同 scheme + exact host。
@@ -54,8 +62,11 @@ httpserver.New(httpserver.Options) (*http.Server, error)
 - Gin 的尾斜杠自动重定向必须关闭；未精确匹配的 GET/POST 始终进入统一 404，不生成框架 301/307。
 - 统一错误只实例化 generated `ErrorResponse`。raw error、panic、stack、路径、query、body、Header、
   Prompt、SQL 和 secret 不进入响应或日志。
-- request ID 只从可信注入函数消费。G0-T06 负责生成/响应 Header，并提供 trusted external Origin；
-  CORS 与 CrossOriginProtection 复用同一 typed 白名单。
+- 用户/管理分别构造 `net/http.CrossOriginProtection`，只复用各自 CORS canonical Origin map；不使用
+  Handler wrapper、bypass、CSRF Token/Cookie/Header。代理部署下只为 `Check` 浅复制 Request 并替换
+  为 typed external authority。
+- 所有用户/管理 API 响应固定 `Cache-Control: no-store, private`，并追加 `Vary: Cookie, Origin`；
+  OPTIONS 还追加两个预检 Vary 维度。非 API 路径不应用该缓存合同。
 - `http.Server` 固定 read-header/read/write/idle 为 5s/30s/5m/60s，header 上限 32768，关闭标准库
   General OPTIONS Handler，且只构造不监听。
 
@@ -75,7 +86,7 @@ httpserver.New(httpserver.Options) (*http.Server, error)
 | 非标准方法 | 405 / 100405，日志 method=OTHER |
 | 配置 wildcard/null/path/query/fragment/userinfo/cross-site | 拒绝配置或请求，不回显原值 |
 
-所有 API 响应都必须追加 `Vary: Origin`；OPTIONS 还必须追加
+所有 API 响应都必须追加 `Vary: Cookie` 与 `Vary: Origin`；OPTIONS 还必须追加
 `Access-Control-Request-Method` 与 `Access-Control-Request-Headers`。追加时按大小写不敏感去重，
 不得覆盖 Session 的 `Vary: Cookie`。允许 Origin 的 4xx/5xx 也必须携带对应 CORS Header，使浏览器
 能读取统一错误体；拒绝响应不携带任何 `Access-Control-Allow-*`。
@@ -90,11 +101,12 @@ httpserver.New(httpserver.Options) (*http.Server, error)
 
 ### 6. Tests Required
 
-- config：完整字段、严格类型、origin 语法/规范化/重复/marker 不泄漏、slice 防御性复制。
+- config：完整字段、严格类型、origin/CIDR 语法与规范化、重复/全网/mapped/marker 不泄漏、slice 防御性复制。
 - response：wrapped errors、MaxBytes、未知错误、HEAD、generated DTO 唯一性、恶意 marker。
 - CORS：204/403/405、header 大小写和可选列表、schemeful site、public suffix、用户/管理隔离、Vary。
 - method/body：OPTIONS star、真实 HEAD 线路、OTHER、Content-Length/chunked、route override、无副作用。
-- recovery/logging：已提交/未提交 panic、状态级别、恰好一条完成日志、并发 request ID 隔离、Race。
+- proxy/security：direct/trusted IPv4/IPv6、严格 tuple、Header 清理、两端 COP 隔离、legacy/no-header、cache/Vary。
+- recovery/logging：已提交/未提交 panic、状态级别、恰好一条完成日志、HMAC known vector、并发 ID 隔离、Race。
 - server/build contract：timeout/header、DisableGeneralOptionsHandler、安全 ErrorLog、禁用 API/导入边界。
 - 所有定向和 Race 测试显式 `-timeout=60s`；不以 mock body 或 `ResponseRecorder` 冒充真实 HEAD 线路。
 
@@ -113,7 +125,7 @@ log.Info(request.URL.String(), "error", err)
 ```go
 engine := gin.New()
 // 显式装配固定顺序的安全 middleware；只记录 route template 与整数错误码。
-engine.Use(logging, recovery, cors, methodGuard, bodyLimit)
+engine.Use(lifecycle, recovery, trustedProxy, cors, crossOriginProtection, methodGuard, bodyLimit)
 ```
 
 ## 设计决策

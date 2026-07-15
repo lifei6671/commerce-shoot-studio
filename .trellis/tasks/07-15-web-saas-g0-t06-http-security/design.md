@@ -276,7 +276,7 @@ OPTIONS 还预先追加 `Access-Control-Request-Method` 与 `Access-Control-Requ
 - 进程密钥禁止进入配置、响应、日志、Trace、Metrics 或持久化；
 - 禁止跨请求缓存/共享可变 `hash.Hash`；每次生成必须创建独立 HMAC 实例；
 - `response.BindRequestID` 只允许 lifecycle 调用，`WriteError` 不接受自由 request ID 参数；
-- `currentRequestID` 不得触发新生成，完成日志不得从下游可变 Request context 回读身份；
+- `response.RequestID` 只读取生命周期已绑定值，完成日志不得从下游可变 Request context 回读身份；
 - response Header baseline stage 只能作用于两个 API surface，Vary 必须追加而不是覆盖；
 - 每条静态规则提供 bad fixture，避免空树或字符串自证。
 

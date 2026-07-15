@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,13 +18,11 @@ import (
 func TestCORSAllowsSameSitePreflightAndPreservesVary(t *testing.T) {
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: []string{"https://app.example.co.uk"},
-		ExternalOrigin: func(*http.Request) (string, error) {
-			return "https://api.example.co.uk", nil
-		},
 	})
 	recorder := httptest.NewRecorder()
 	recorder.Header().Set("Vary", "Cookie, origin")
 	request := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, request, "https://api.example.co.uk")
 	request.Header.Set("Origin", "https://app.example.co.uk")
 	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	request.Header.Set("Access-Control-Request-Headers", " content-type, IDEMPOTENCY-key ")
@@ -45,11 +44,9 @@ func TestCORSAllowsSameSitePreflightAndPreservesVary(t *testing.T) {
 func TestCORSAllowsPreflightWithoutRequestedHeaders(t *testing.T) {
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: []string{"https://app.example.com"},
-		ExternalOrigin: func(*http.Request) (string, error) {
-			return "https://api.example.com", nil
-		},
 	})
 	request := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, request, "https://api.example.com")
 	request.Header.Set("Origin", "https://app.example.com")
 	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
 	recorder := httptest.NewRecorder()
@@ -64,21 +61,21 @@ func TestCORSAllowsPreflightWithoutRequestedHeaders(t *testing.T) {
 func TestCORSAlwaysVariesByOriginAndOptionsRequestHeaders(t *testing.T) {
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: []string{"https://app.example.com"},
-		ExternalOrigin:     staticExternalOrigin("https://api.example.com"),
 	})
 
 	withoutOrigin := httptest.NewRecorder()
 	router.ServeHTTP(withoutOrigin, httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil))
-	assertVarySet(t, withoutOrigin, []string{"Origin"})
+	assertVarySet(t, withoutOrigin, []string{"Cookie", "Origin"})
 
 	ordinaryOptions := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, ordinaryOptions, "https://api.example.com")
 	ordinaryOptions.Header.Set("Origin", "https://app.example.com")
 	ordinaryRecorder := httptest.NewRecorder()
 	router.ServeHTTP(ordinaryRecorder, ordinaryOptions)
 	if ordinaryRecorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("普通 OPTIONS status=%d", ordinaryRecorder.Code)
 	}
-	assertVarySet(t, ordinaryRecorder, []string{"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"})
+	assertVarySet(t, ordinaryRecorder, []string{"Cookie", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"})
 }
 
 func TestCORSRejectsInvalidPreflightWithoutAllowHeaders(t *testing.T) {
@@ -99,11 +96,9 @@ func TestCORSRejectsInvalidPreflightWithoutAllowHeaders(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			router := newCORSRouter(t, Options{
 				UserAllowedOrigins: []string{"https://app.example.com"},
-				ExternalOrigin: func(*http.Request) (string, error) {
-					return "https://api.example.com", nil
-				},
 			})
 			request := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+			setRequestExternalOrigin(t, request, "https://api.example.com")
 			request.Header.Set("Origin", test.origin)
 			request.Header.Set("Access-Control-Request-Method", test.requestMethod)
 			if test.requestHeader != "" {
@@ -135,10 +130,10 @@ func TestCORSRejectsInvalidPreflightWithoutAllowHeaders(t *testing.T) {
 func TestCORSRejectsRepeatedOriginAndChecksEveryRequestedHeaderLine(t *testing.T) {
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: []string{"https://app.example.com"},
-		ExternalOrigin:     staticExternalOrigin("https://api.example.com"),
 	})
 
 	repeatedOrigin := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, repeatedOrigin, "https://api.example.com")
 	repeatedOrigin.Header.Add("Origin", "https://app.example.com")
 	repeatedOrigin.Header.Add("Origin", "https://evil.example.com")
 	repeatedOrigin.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -149,6 +144,7 @@ func TestCORSRejectsRepeatedOriginAndChecksEveryRequestedHeaderLine(t *testing.T
 	}
 
 	repeatedHeaders := httptest.NewRequest(http.MethodOptions, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, repeatedHeaders, "https://api.example.com")
 	repeatedHeaders.Header.Set("Origin", "https://app.example.com")
 	repeatedHeaders.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	repeatedHeaders.Header.Add("Access-Control-Request-Headers", "Content-Type")
@@ -171,10 +167,9 @@ func TestCORSKeepsUserAndAdminPoliciesSeparateAndAllowsErrorBodies(t *testing.T)
 		DefaultBodyBytes:    1024,
 		UserAllowedOrigins:  []string{"https://user.example.com"},
 		AdminAllowedOrigins: []string{"https://admin.example.com"},
-		ExternalOrigin:      staticExternalOrigin("https://api.example.com"),
 		RegisterRoutes: func(user, admin *gin.RouterGroup) {
 			user.GET("/error", func(context *gin.Context) {
-				response.WriteError(context, "", apperror.ErrInternal)
+				response.WriteError(context, apperror.ErrInternal)
 			})
 			admin.GET("/probe", func(context *gin.Context) {
 				context.Status(http.StatusNoContent)
@@ -187,6 +182,7 @@ func TestCORSKeepsUserAndAdminPoliciesSeparateAndAllowsErrorBodies(t *testing.T)
 
 	userError := httptest.NewRecorder()
 	userRequest := httptest.NewRequest(http.MethodGet, "/api/v1/error", nil)
+	setRequestExternalOrigin(t, userRequest, "https://api.example.com")
 	userRequest.Header.Set("Origin", "https://user.example.com")
 	router.ServeHTTP(userError, userRequest)
 	if userError.Code != http.StatusInternalServerError {
@@ -205,6 +201,7 @@ func TestCORSKeepsUserAndAdminPoliciesSeparateAndAllowsErrorBodies(t *testing.T)
 	} {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, attempt.path, nil)
+		setRequestExternalOrigin(t, request, "https://api.example.com")
 		request.Header.Set("Origin", attempt.origin)
 		router.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusForbidden {
@@ -232,9 +229,9 @@ func TestCORSSchemefulSiteCoversPublicSuffixLocalhostAndIP(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			router := newCORSRouter(t, Options{
 				UserAllowedOrigins: []string{test.allowed},
-				ExternalOrigin:     staticExternalOrigin(test.external),
 			})
 			request := httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil)
+			setRequestExternalOrigin(t, request, test.external)
 			request.Header.Set("Origin", test.allowed)
 			recorder := httptest.NewRecorder()
 
@@ -248,10 +245,9 @@ func TestCORSSchemefulSiteCoversPublicSuffixLocalhostAndIP(t *testing.T) {
 }
 
 func TestCORSAllowsSameOriginWithEmptyListAndIgnoresForwardedHeaders(t *testing.T) {
-	sameOriginRouter := newCORSRouter(t, Options{
-		ExternalOrigin: staticExternalOrigin("https://api.example.com"),
-	})
+	sameOriginRouter := newCORSRouter(t, Options{})
 	sameRequest := httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, sameRequest, "https://api.example.com")
 	sameRequest.Header.Set("Origin", "https://api.example.com")
 	sameRecorder := httptest.NewRecorder()
 	sameOriginRouter.ServeHTTP(sameRecorder, sameRequest)
@@ -278,10 +274,10 @@ func TestCORSDefensivelyCopiesOriginLists(t *testing.T) {
 	origins := []string{"https://app.example.com"}
 	router := newCORSRouter(t, Options{
 		UserAllowedOrigins: origins,
-		ExternalOrigin:     staticExternalOrigin("https://api.example.com"),
 	})
 	origins[0] = "https://mutated.example.com"
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil)
+	setRequestExternalOrigin(t, request, "https://api.example.com")
 	request.Header.Set("Origin", "https://app.example.com")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
@@ -309,9 +305,17 @@ func newCORSRouter(t *testing.T, options Options) *gin.Engine {
 	return router
 }
 
-func staticExternalOrigin(origin string) func(*http.Request) (string, error) {
-	return func(*http.Request) (string, error) {
-		return origin, nil
+func setRequestExternalOrigin(t *testing.T, request *http.Request, origin string) {
+	t.Helper()
+	parsed, err := http.NewRequest(http.MethodGet, origin, nil)
+	if err != nil {
+		t.Fatalf("构造测试 external Origin 失败：%v", err)
+	}
+	request.Host = parsed.URL.Host
+	if parsed.URL.Scheme == "https" {
+		request.TLS = &tls.ConnectionState{}
+	} else {
+		request.TLS = nil
 	}
 }
 

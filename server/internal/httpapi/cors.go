@@ -146,30 +146,16 @@ func (runtime *runtime) corsMiddleware() gin.HandlerFunc {
 
 func (runtime *runtime) rejectCORS(context *gin.Context) {
 	clearCORSAllowHeaders(context.Writer.Header())
-	response.WriteError(context, runtime.currentRequestID(context), apperror.ErrForbidden)
+	response.WriteError(context, apperror.ErrForbidden)
 	context.Abort()
 }
 
 func (runtime *runtime) resolveExternalOrigin(request *http.Request) (originInfo, error) {
-	var raw string
-	var err error
-	if runtime.externalOrigin != nil {
-		raw, err = runtime.externalOrigin(request)
-		if err != nil {
-			return originInfo{}, fmt.Errorf("外部 Origin 解析失败")
-		}
-	} else {
-		scheme := "http"
-		if request.TLS != nil {
-			scheme = "https"
-		}
-		raw = scheme + "://" + request.Host
-	}
-	origin, ok := parseOrigin(raw, true)
-	if !ok {
+	metadata, ok := requestMetadataFromRequest(request)
+	if !ok || metadata.externalOrigin.normalized == "" {
 		return originInfo{}, fmt.Errorf("外部 Origin 非法")
 	}
-	return origin, nil
+	return metadata.externalOrigin, nil
 }
 
 func (policy *corsPolicy) origins(surface apiSurface) map[string]originInfo {

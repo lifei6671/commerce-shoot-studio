@@ -50,7 +50,7 @@ func TestChunkedBodyIsNotPreReadAndBindJSONPrecedesSideEffects(t *testing.T) {
 				Value string `json:"value"`
 			}
 			if err := BindJSON(context, &input); err != nil {
-				response.WriteError(context, "", err)
+				response.WriteError(context, err)
 				return
 			}
 			sideEffects.Add(1)
@@ -78,7 +78,7 @@ func TestBindJSONMapsMalformedInputAndAllowsValidInput(t *testing.T) {
 				Value string `json:"value"`
 			}
 			if err := BindJSON(context, &input); err != nil {
-				response.WriteError(context, "", err)
+				response.WriteError(context, err)
 				return
 			}
 			sideEffects.Add(1)
@@ -138,7 +138,7 @@ func TestBindJSONRejectsTrailingJSONAndOversizedTrailingBytes(t *testing.T) {
 						Value string `json:"value"`
 					}
 					if err := BindJSON(context, &input); err != nil {
-						response.WriteError(context, "", err)
+						response.WriteError(context, err)
 						return
 					}
 					sideEffects.Add(1)
@@ -170,7 +170,7 @@ func TestBodyLimitUsesExactRouteOverrideAndCopiesOptions(t *testing.T) {
 		handler := func(context *gin.Context) {
 			var input map[string]any
 			if err := BindJSON(context, &input); err != nil {
-				response.WriteError(context, "", err)
+				response.WriteError(context, err)
 				return
 			}
 			context.Status(http.StatusNoContent)
@@ -219,7 +219,7 @@ func TestBodyLimitAcceptsExactBoundary(t *testing.T) {
 		user.POST("/boundary", func(context *gin.Context) {
 			var input map[string]any
 			if err := BindJSON(context, &input); err != nil {
-				response.WriteError(context, "", err)
+				response.WriteError(context, err)
 				return
 			}
 			context.Status(http.StatusNoContent)

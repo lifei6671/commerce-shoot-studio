@@ -2,10 +2,11 @@
 package httpapi
 
 import (
-	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"log/slog"
-	"net/http"
+	"net/netip"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,8 +18,6 @@ const (
 	userAPIPrefix  = "/api/v1"
 	adminAPIPrefix = "/api/admin/v1"
 )
-
-type requestIDContextKey struct{}
 
 // RouteKey 唯一标识一个允许覆盖默认请求体上限的已注册路由。
 type RouteKey struct {
@@ -33,8 +32,7 @@ type Options struct {
 	BodyLimitOverrides  map[RouteKey]int64
 	UserAllowedOrigins  []string
 	AdminAllowedOrigins []string
-	RequestID           func(context.Context) string
-	ExternalOrigin      func(*http.Request) (string, error)
+	TrustedProxyCIDRs   []netip.Prefix
 	RegisterRoutes      func(user, admin *gin.RouterGroup)
 }
 
@@ -42,13 +40,18 @@ type runtime struct {
 	logger             *slog.Logger
 	defaultBodyBytes   int64
 	bodyLimitOverrides map[RouteKey]int64
-	requestID          func(context.Context) string
-	externalOrigin     func(*http.Request) (string, error)
+	requestIDs         *requestIDIssuer
+	trustedProxyCIDRs  []netip.Prefix
 	cors               *corsPolicy
+	security           *securityPolicy
 }
 
 // New 使用 gin.New 构造不含生产业务路由的 HTTP Router。
 func New(options Options) (*gin.Engine, error) {
+	return newWithEntropy(options, rand.Reader)
+}
+
+func newWithEntropy(options Options, entropy io.Reader) (*gin.Engine, error) {
 	if options.Logger == nil {
 		return nil, fmt.Errorf("httpapi logger 不能为空")
 	}
@@ -63,21 +66,43 @@ func New(options Options) (*gin.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	securityPolicy, err := newSecurityPolicy(corsPolicy)
+	if err != nil {
+		return nil, err
+	}
+	requestIDs, err := newRequestIDIssuer(entropy)
+	if err != nil {
+		return nil, err
+	}
+	trustedProxyCIDRs, trustedProxyCIDRStrings, err := cloneTrustedProxyCIDRs(options.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	runtime := &runtime{
 		logger:             options.Logger,
 		defaultBodyBytes:   options.DefaultBodyBytes,
 		bodyLimitOverrides: cloneBodyLimitOverrides(options.BodyLimitOverrides),
-		requestID:          options.RequestID,
-		externalOrigin:     options.ExternalOrigin,
+		requestIDs:         requestIDs,
+		trustedProxyCIDRs:  trustedProxyCIDRs,
 		cors:               corsPolicy,
+		security:           securityPolicy,
 	}
 
 	engine := gin.New()
+	engine.ForwardedByClientIP = false
+	engine.RemoteIPHeaders = nil
+	engine.TrustedPlatform = ""
+	engine.AppEngine = false
+	if err := engine.SetTrustedProxies(trustedProxyCIDRStrings); err != nil {
+		return nil, fmt.Errorf("Gin trusted proxy 配置失败")
+	}
 	// API 未匹配必须进入统一 404 合同，不能由 Gin 自动生成 301/307。
 	engine.RedirectTrailingSlash = false
 	engine.Use(runtime.completionMiddleware())
 	engine.Use(runtime.recoveryMiddleware())
+	engine.Use(runtime.proxyMiddleware())
 	engine.Use(runtime.corsMiddleware())
+	engine.Use(runtime.crossOriginProtectionMiddleware())
 	engine.Use(runtime.methodGuard())
 	engine.Use(runtime.bodyLimitMiddleware())
 	user := engine.Group(userAPIPrefix)
@@ -89,7 +114,7 @@ func New(options Options) (*gin.Engine, error) {
 		return nil, err
 	}
 	engine.NoRoute(func(context *gin.Context) {
-		response.WriteError(context, runtime.currentRequestID(context), apperror.ErrNotFound)
+		response.WriteError(context, apperror.ErrNotFound)
 	})
 	return engine, nil
 }
@@ -103,16 +128,4 @@ func cloneBodyLimitOverrides(source map[RouteKey]int64) map[RouteKey]int64 {
 		cloned[key] = limit
 	}
 	return cloned
-}
-
-func (runtime *runtime) currentRequestID(context *gin.Context) string {
-	if value, exists := context.Get(requestIDContextKey{}); exists {
-		if requestID, ok := value.(string); ok {
-			return requestID
-		}
-	}
-	if runtime.requestID == nil || context.Request == nil {
-		return ""
-	}
-	return runtime.requestID(context.Request.Context())
 }

@@ -151,6 +151,9 @@ func restoreCaseSensitiveMaps(content []byte, target any) error {
 		MySQL struct {
 			DSNParams map[string]string `yaml:"dsn_params"`
 		} `yaml:"mysql"`
+		Security struct {
+			TrustedProxyCIDRs *[]*string `yaml:"trusted_proxy_cidrs"`
+		} `yaml:"security"`
 	}
 	if err := yaml.Unmarshal(content, &original); err != nil {
 		return err
@@ -166,6 +169,11 @@ func restoreCaseSensitiveMaps(content []byte, target any) error {
 	appTarget.HTTP.CORS.UserAllowedOrigins = userOrigins
 	appTarget.HTTP.CORS.AdminAllowedOrigins = adminOrigins
 	appTarget.MySQL.DSNParams = original.MySQL.DSNParams
+	trustedProxyCIDRs, err := restoreTrustedProxyCIDRList(original.Security.TrustedProxyCIDRs)
+	if err != nil {
+		return err
+	}
+	appTarget.Security.TrustedProxyCIDRs = trustedProxyCIDRs
 	return nil
 }
 
@@ -177,6 +185,20 @@ func restoreOriginList(values *[]*string) (*[]string, error) {
 	for _, value := range *values {
 		if value == nil {
 			return nil, fmt.Errorf("http.cors Origin 必须是字符串")
+		}
+		restored = append(restored, *value)
+	}
+	return &restored, nil
+}
+
+func restoreTrustedProxyCIDRList(values *[]*string) (*[]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	restored := make([]string, 0, len(*values))
+	for _, value := range *values {
+		if value == nil {
+			return nil, fmt.Errorf("security.trusted_proxy_cidrs 必须是字符串列表")
 		}
 		restored = append(restored, *value)
 	}
